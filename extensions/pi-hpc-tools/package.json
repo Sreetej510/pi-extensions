@@ -1,0 +1,49 @@
+{
+  "name": "@omega/pi-hpc-tools",
+  "version": "0.1.0",
+  "description": "Pi extension for exploring a remote HPC/SSH host (via plink) with ls/read/grep tools, gated per-project by /hpc:on and /hpc:off.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "hpc",
+    "ssh",
+    "plink",
+    "remote"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "biome check . && npm run typecheck",
+    "format": "biome check --write .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "typebox": "^1.3.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.3",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@earendil-works/pi-tui": "^0.80.3",
+    "typescript": "^5.7.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/omega/pi-extensions",
+    "directory": "extensions/pi-hpc-tools"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

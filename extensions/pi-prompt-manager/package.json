@@ -1,0 +1,44 @@
+{
+  "name": "@omega/pi-prompt-manager",
+  "version": "0.1.0",
+  "description": "Pi extension to quickly save, manage, and paste reusable prompts without retyping.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "prompts",
+    "snippets"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "biome check . && npm run typecheck",
+    "format": "biome check --write .",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.3",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@earendil-works/pi-tui": "^0.80.3",
+    "typescript": "^5.7.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/omega/pi-extensions",
+    "directory": "extensions/pi-prompt-manager"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
