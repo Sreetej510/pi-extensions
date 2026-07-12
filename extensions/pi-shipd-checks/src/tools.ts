@@ -64,17 +64,22 @@ export function createReportTool(capture: { report?: ReviewReport }): ToolDefini
 const gapFinderToolParams = Type.Object({
   gaps: Type.Array(
     Type.Object({
-      description: Type.String({ description: "The specific untested behavior or edge case, in plain terms." }),
+      description: Type.String({
+        description:
+          "The specific untested behavior or edge case, in plain terms. Prefix with POSITIVE: or NEGATIVE: to " +
+          "indicate whether this is a missing required-behavior test or a missing forbidden/wrong-behavior test.",
+      }),
       risk: Type.String({
         description:
           "Concretely why a plausible-but-incorrect implementation could still pass every test in test.patch " +
-          "despite missing or misimplementing this behavior.",
+          "despite missing, misimplementing, or violating this behavior (including doing a forbidden thing " +
+          "because no test asserts it must not happen).",
       }),
     }),
     {
       description:
-        "Candidate behavioral test gaps grounded in agent_prompt.md or clear existing repo behavior. Use an empty " +
-        "array if you found none — do not manufacture gaps just to report something.",
+        "Candidate behavioral test gaps (positive and negative) grounded in agent_prompt.md or clear existing " +
+        "repo behavior. Use an empty array if you found none — do not manufacture gaps just to report something.",
     },
   ),
 });
@@ -103,11 +108,16 @@ export function createGapFinderTool(capture: {
 const gapValidatorToolParams = Type.Object({
   gaps: Type.Array(
     Type.Object({
-      description: Type.String({ description: "The confirmed, real, fair test gap (may be reworded for clarity)." }),
+      description: Type.String({
+        description:
+          "The confirmed, real, fair test gap (may be reworded for clarity). Keep POSITIVE:/NEGATIVE: prefix when " +
+          "applicable.",
+      }),
       justification: Type.String({
         description:
           "Why this is genuinely grounded in agent_prompt.md or the repo, fair to test per the fairness " +
-          "methodology, and a real (non-duplicate) coverage hole in test.patch.",
+          "methodology, and a real (non-duplicate) coverage hole in test.patch — for negative gaps, cite the " +
+          "prompt's prohibition/constraint and why no existing test catches the forbidden outcome.",
       }),
     }),
     {

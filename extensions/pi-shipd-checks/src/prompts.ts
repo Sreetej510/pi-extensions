@@ -93,33 +93,62 @@ export function buildReviewerPrompt(role: ReviewerRole, rubric: string, fairness
 export function buildGapFinderPrompt(testRubric: string, fairnessRules: string): string {
   const parts = [
     "You are an exhaustive, research-minded test-coverage analyst for a coding-agent benchmark task. Your mandate " +
-      "is to dig as deep as possible and surface EVERY genuine behavioral test gap you can find — not just the " +
-      "first one or two obvious ones. Treat a short list as a signal that you stopped too early, not as success.",
+      "is to dig as deep as possible and surface EVERY genuine behavioral test gap you can find — positive AND " +
+      "negative — not just the first one or two obvious ones. Treat a short list as a signal that you stopped too " +
+      "early, not as success.",
     "You are working inside a throwaway, read-only copy of a git repository (this is your current directory). " +
       "You have access to read/grep/find/ls tools only — you cannot execute code, apply patches, or edit files.",
     "The repo root contains `agent_prompt.md` (the task description given to a coding agent), `test.patch` (a " +
       "unified diff adding the hidden tests that will grade that agent's solution), and `solution.patch` (a " +
       "unified diff of one golden/reference solution).",
     "",
-    "Your job: find real BEHAVIORAL TEST GAPS. A gap is required or clearly-implied behavior from " +
-      "`agent_prompt.md` (and, where relevant, obvious existing repo conventions) that `test.patch` does NOT " +
-      "actually verify — such that a plausible alternative implementation could satisfy `agent_prompt.md` on its " +
-      "face, differ from `solution.patch`, get that behavior wrong or skip it entirely, and STILL pass every test " +
-      "in `test.patch` as written.",
+    "Your job: find real BEHAVIORAL TEST GAPS — both positive and negative. A gap is required or clearly-implied " +
+      "behavior from `agent_prompt.md` (and, where relevant, obvious existing repo conventions) that `test.patch` " +
+      "does NOT actually verify — such that a plausible alternative implementation could satisfy `agent_prompt.md` " +
+      "on its face, differ from `solution.patch`, get that behavior wrong or skip it entirely, and STILL pass " +
+      "every test in `test.patch` as written.",
+    "",
+    "Coverage must include BOTH directions:",
+    "- POSITIVE gaps: required behavior that should happen but is never asserted (the happy path, side effects, " +
+      "state changes, outputs, or transitions the prompt requires).",
+    "- NEGATIVE gaps: forbidden behavior, invalid states, or wrong outcomes that should NOT happen but are never " +
+      "asserted against. These are often the most dangerous holes: an agent can violate `agent_prompt.md` in a " +
+      "material way — doing something it must not do, leaving something enabled when it should be disabled, " +
+      "applying an effect to the wrong target, skipping a guard, or accepting invalid input — and still pass every " +
+      "test if the suite only checks that the correct action works, not that incorrect actions are rejected.",
     "",
     "Be systematic and exhaustive — do not stop after finding one or two gaps. Work through ALL of the following " +
       "passes before you consider yourself done:",
     "1. Go through `agent_prompt.md` sentence by sentence. For every distinct requirement, constraint, or implied " +
-      "rule, explicitly check which test(s) in `test.patch` exercise it, and how thoroughly.",
-    "2. Go through `solution.patch` branch by branch — every conditional, loop, early return, error path, and " +
-      "state transition. For each one, ask whether `test.patch` actually forces that branch to be taken and its " +
-      "outcome checked, or whether an implementation that got that branch wrong would still pass.",
+      "rule, explicitly check which test(s) in `test.patch` exercise it, and how thoroughly — both the required " +
+      "outcome AND any paired forbidden/wrong outcome.",
+    "2. Go through `solution.patch` branch by branch — every conditional, loop, early return, error path, guard, " +
+      "and state transition. For each one, ask whether `test.patch` actually forces that branch to be taken and " +
+      "its outcome checked, or whether an implementation that got that branch wrong would still pass.",
     "3. Systematically consider standard edge-case categories against the required behavior: boundary/limit " +
       "values, empty/missing/null/zero inputs, duplicate or repeated inputs, ordering and interleaving, " +
       "concurrent or repeated invocations, error/failure/rollback paths, interaction between two or more " +
       "required behaviors at once (not just each in isolation), and state left behind after an operation.",
     "4. Cross-check overlapping/interacting requirements — behaviors that are each tested alone but never tested " +
       "together — since that's exactly where a plausible-looking but incomplete implementation slips through.",
+    "5. NEGATIVE-CASE PASS (mandatory — do not skip): re-read `agent_prompt.md` specifically for prohibitions, " +
+      "conditions, guards, and 'only when' / 'must not' / 'never' / 'disabled when' / 'should not' language. For " +
+      "each one, ask: does `test.patch` assert that the WRONG thing does NOT happen? Examples of negative gaps:",
+    "   - A control that must be disabled/unavailable in a given state, but no test ever drives that state and " +
+      "asserts it stays disabled (an agent could leave it always enabled).",
+    "   - An operation that must NOT affect a separate scope/target (isolation, cross-contamination), but tests " +
+      "only verify the correct scope changes — never that the wrong scope is untouched.",
+    "   - A side effect that must NOT occur (no duplicate entries, no spurious history step, no refresh on " +
+      "no-op), but tests never trigger the scenario where a sloppy implementation would create one.",
+    "   - Invalid, out-of-order, or repeated input that should be ignored/rejected/coalesced differently, but " +
+      "tests never assert the incorrect handling would fail.",
+    "   - A rollback/undo boundary where the first action must NOT be undoable, or redo must NOT be available " +
+      "when nothing was undone — but tests only exercise the happy undo/redo path.",
+    "   - Mutual exclusion: two behaviors required to stay independent, but no test proves doing A does not " +
+      "silently change B.",
+    "For every prompt requirement, ask BOTH: 'Is the correct behavior tested?' AND 'Is there a corresponding test " +
+      "that would catch an agent doing the opposite, the forbidden thing, or applying it in the wrong context?' " +
+      "If only the first is tested, the second is a gap.",
     "Do not filter yourself or self-censor for volume. List every gap that survives your own check against the " +
       "ground rules below — a long, thorough list is expected and desired. A separate, independent agent will " +
       "strictly filter this list afterward, so your job here is coverage and recall, not brevity.",
@@ -127,10 +156,14 @@ export function buildGapFinderPrompt(testRubric: string, fairnessRules: string):
     "Ground rules — do not overreach:",
     "- Every gap must trace back to a specific requirement or sentence in `agent_prompt.md`, or to behavior that " +
       "is unambiguous from the existing, visible repo. Do not invent requirements the prompt doesn't support.",
+    "- Negative gaps must be grounded in an explicit or clearly implied prohibition/constraint in " +
+      "`agent_prompt.md` — not generic 'more negative tests would be nice'. The forbidden outcome must be part of " +
+      "the task contract.",
     "- Do not propose gaps for things `agent_prompt.md` leaves intentionally open, or for implementation " +
       "details/style the prompt doesn't mandate.",
     "- Read `test.patch` carefully before deciding something is untested — do not propose a gap that an existing " +
-      "test already covers (even indirectly).",
+      "test already covers (even indirectly). A single test that asserts both the positive outcome AND that the " +
+      "forbidden/wrong outcome did not occur counts as covered.",
     "",
     "For reference, here is the checklist for the tests focus area (use it to calibrate what good coverage looks " +
       "like, not as a list of gaps to report verbatim):",
@@ -143,9 +176,10 @@ export function buildGapFinderPrompt(testRubric: string, fairnessRules: string):
 
   parts.push(
     "",
-    "For each gap, describe: (1) the specific untested behavior/edge case, in plain terms, and (2) concretely why " +
-      "a plausible-but-incorrect implementation would still pass every given test despite missing or " +
-      "misimplementing it.",
+    "For each gap, describe: (1) the specific untested behavior/edge case — say explicitly if it is a POSITIVE gap " +
+      "(required behavior never verified) or a NEGATIVE gap (forbidden/wrong behavior never asserted against) — " +
+      "in plain terms, and (2) concretely why a plausible-but-incorrect implementation would still pass every given " +
+      "test despite missing, misimplementing, or violating this requirement.",
     `When you are done — after completing ALL the passes above — call the \`${GAP_FINDER_TOOL_NAME}\` tool exactly ` +
       "once with your full candidate list (empty only if, after genuinely exhaustive analysis, none exist). " +
       "That tool call is your only way to report a result.",
@@ -164,7 +198,8 @@ export function buildGapValidatorPrompt(
     "You are working inside a throwaway, read-only copy of a git repository (this is your current directory). " +
       "You have access to read/grep/find/ls tools only — you cannot execute code, apply patches, or edit files.",
     "Another research agent reviewed this same task (`agent_prompt.md`, `test.patch`, `solution.patch`, and the " +
-      "repo) and proposed the following CANDIDATE test gaps — behaviors it believes are required but untested:",
+      "repo) and proposed the following CANDIDATE test gaps — required-but-untested behaviors (positive and " +
+      "negative) it believes are missing from `test.patch`:",
     "",
     JSON.stringify(candidates, null, 2),
     "",
@@ -177,7 +212,9 @@ export function buildGapValidatorPrompt(
       "or exact incidental structure that only `solution.patch` happens to use. Judge this precisely against the " +
       "fairness methodology below.",
     "3. A real, distinct coverage hole — re-check `test.patch` yourself; drop any candidate an existing test " +
-      "already covers, and drop near-duplicate candidates (keep only the clearest phrasing of each distinct gap).",
+      "already covers, and drop near-duplicate candidates (keep only the clearest phrasing of each distinct gap). " +
+      "For negative-case candidates, keep them only if `test.patch` does not already assert that the forbidden/" +
+      "wrong outcome does not occur.",
     "",
     "Be strict: when genuinely unsure whether a candidate holds up, drop it rather than keep it. It is fine — " +
       "expected, even — to return an empty list if none of the candidates survive scrutiny.",
