@@ -29,6 +29,14 @@ const ROLE_FOCUS: Record<ReviewerRoleKey, string> = {
     "Read `agent_prompt.md` for the requirements and `test.patch` to see what must pass, and use read/grep/ls/find on the rest " +
     "of the repository to check for regressions, inconsistent style, and irrelevant/unexplained changes. Do not judge the " +
     "description's wording or the tests' coverage.\n" +
+    "Mandatory repo-conventions check: for every file and area touched by `solution.patch`, read the corresponding " +
+    "pre-existing code in the repo — same directory, sibling modules, similar components/services/hooks, and any " +
+    "files the patch imports from or extends. Establish how this repo actually does things (error handling and logging, " +
+    "naming, exports, state management, async patterns, i18n, test helpers, DI/service boundaries, comment density, " +
+    "defensive checks) and judge whether the solution matches those conventions. Flag clear deviations as S2/S4 issues — " +
+    "e.g. inventing a new logger when the repo uses a shared one, raw `console.*` where the codebase uses a structured " +
+    "error reporter, a different hook/service pattern than neighboring features, or new abstractions where similar code " +
+    "inlines the same logic. Use grep/read to find 2–3 closest analogues before concluding a pattern is acceptable.\n" +
     "Mandatory dead-code check: scan every added/changed line in `solution.patch` for unused code — variables, " +
     "parameters, imports, functions/methods, or fields that are declared/assigned but never read or called anywhere " +
     "(including by `test.patch`) — and for dead/unreachable code (branches, conditions, or statements that can never " +
@@ -49,6 +57,19 @@ function gapFinderPreamble(focusLine: string): string[] {
       "duplicate its work.",
   ];
 }
+
+const GAP_FINDER_AGGRESSION = [
+  "Thoroughness — your job is high recall on genuine gaps only:",
+  "- Find every gap you can justify with concrete evidence. Do not stop after the first obvious ones — keep reading until " +
+    "you have systematically covered the prompt, `solution.patch`, and relevant repo context.",
+  "- After your first pass, run at least one deliberate second sweep (re-read `agent_prompt.md`, re-scan `solution.patch`, " +
+    "grep the repo) before submitting — but if that sweep still finds nothing, submit an empty list.",
+  "- Do not self-censor or merge distinct genuine gaps into one — the validator will prune. Never invent or pad the list " +
+    "to seem thorough; an empty array is correct when exhaustive analysis truly finds none.",
+  "- Hunt subtle gaps too: partial coverage (asserted once but not under other valid inputs), behaviors implied by repo " +
+    "convention, interaction effects, ordering/timing, and branches visible in `solution.patch` that no test forces.",
+  "- Include a candidate only when you can cite specific grounding and a concrete false-pass risk — not to meet a quota.",
+];
 
 const GAP_FINDER_GROUND_RULES = [
   "Ground rules — do not overreach:",
@@ -81,6 +102,18 @@ export function buildReviewerPrompt(role: ReviewerRole, rubric: string, fairness
       "Fairness methodology (use this to judge whether an issue is actually blocking, and to distinguish agent-fault " +
         "from prompt-ambiguity from test-flaw problems):",
       fairnessRules,
+    );
+  }
+
+  if (role.key === "solution") {
+    parts.push(
+      "",
+      "Solution-specific calibration for repo standards (S2/S4):",
+      "Before returning PASS, you must have read real analogue files in the repo and compared patterns. A clear, " +
+        "documented mismatch with established repo conventions — wrong error/logging approach, inconsistent service " +
+        "or hook structure vs neighboring code, new patterns where the repo consistently uses existing ones — is " +
+        "blocking under S2/S4, not a minor note. Purely cosmetic nits (spacing, import order) with no pattern break " +
+        "belong in `notes`.",
     );
   }
 
@@ -119,8 +152,8 @@ export function buildPositiveGapFinderPrompt(testRubric: string, fairnessRules: 
       "You are an exhaustive, research-minded POSITIVE test-coverage analyst for a coding-agent benchmark task. " +
         "Your sole mandate is to surface EVERY genuine POSITIVE behavioral test gap — required behavior that " +
         "`test.patch` never asserts but `agent_prompt.md` requires. Do NOT search for forbidden/wrong-behavior " +
-        "gaps; a separate negative-case agent handles those in parallel. Treat a short list as a signal you stopped " +
-        "too early.",
+        "gaps; a separate negative-case agent handles those in parallel. Stay in your lane and search exhaustively " +
+        "before concluding there are none.",
     ),
     "",
     "Your job: find real POSITIVE TEST GAPS. A positive gap is required or clearly-implied behavior from " +
@@ -143,6 +176,9 @@ export function buildPositiveGapFinderPrompt(testRubric: string, fairnessRules: 
       "recover correctly, interaction between two or more required behaviors at once, and state left behind " +
       "after an operation.",
     "4. Cross-check overlapping/interacting requirements — behaviors each tested alone but never tested together.",
+    "5. Second-pass sweep: return to any requirement you marked 'covered' and ask whether coverage is shallow — one happy-path " +
+      "assertion is not enough if other valid inputs, sequences, or combinations could still slip through.",
+    ...GAP_FINDER_AGGRESSION,
     "Do not filter yourself or self-censor for volume. A separate validator will strictly filter afterward — " +
       "your job is recall on POSITIVE gaps only.",
     "",
@@ -162,7 +198,7 @@ export function buildPositiveGapFinderPrompt(testRubric: string, fairnessRules: 
     "For each gap, prefix the description with `POSITIVE:` and explain: (1) the specific untested required " +
       "behavior/edge case, and (2) concretely why a plausible-but-incomplete implementation would still pass " +
       "every given test despite missing or misimplementing it.",
-    `When you are done — after completing ALL the passes above — call the \`${GAP_FINDER_TOOL_NAME}\` tool exactly ` +
+    `When you are done — after completing ALL the passes above and a deliberate second sweep — call the \`${GAP_FINDER_TOOL_NAME}\` tool exactly ` +
       "once with your full candidate list (empty only if, after genuinely exhaustive analysis, none exist). " +
       "That tool call is your only way to report a result.",
   );
@@ -177,7 +213,7 @@ export function buildNegativeGapFinderPrompt(testRubric: string, fairnessRules: 
         "Your sole mandate is to surface EVERY genuine NEGATIVE behavioral test gap — forbidden behavior, invalid " +
         "states, or wrong outcomes that `test.patch` never asserts against but `agent_prompt.md` prohibits or " +
         "implies must not happen. Do NOT search for missing required-behavior gaps; a separate positive-case agent " +
-        "handles those in parallel. Treat a short list as a signal you stopped too early.",
+        "handles those in parallel. Stay in your lane and search exhaustively before concluding there are none.",
     ),
     "",
     "Your job: find real NEGATIVE TEST GAPS. A negative gap is a prohibition, guard, or 'must not' constraint from " +
@@ -201,6 +237,10 @@ export function buildNegativeGapFinderPrompt(testRubric: string, fairnessRules: 
     "   - Mutual exclusion: doing A must NOT silently change B, but no test proves independence.",
     "4. For every prompt prohibition, ask: 'Is there a test that would catch an agent doing the forbidden thing or " +
       "applying the requirement in the wrong context?' If not, it is a gap.",
+    "5. Adversarial pass: imagine a lazy or slightly-wrong implementation that satisfies the obvious tests — list every " +
+      "way it could still violate the prompt (wrong scope, wrong timing, wrong guard, spurious side effect, missing " +
+      "rejection) and check whether `test.patch` would catch each one.",
+    ...GAP_FINDER_AGGRESSION,
     "Do not filter yourself or self-censor for volume. A separate validator will strictly filter afterward — " +
       "your job is recall on NEGATIVE gaps only.",
     "",
@@ -224,7 +264,7 @@ export function buildNegativeGapFinderPrompt(testRubric: string, fairnessRules: 
     "For each gap, prefix the description with `NEGATIVE:` and explain: (1) the specific untested forbidden/wrong " +
       "behavior or invalid state, and (2) concretely why a plausible-but-wrong implementation would still pass " +
       "every given test despite violating this constraint.",
-    `When you are done — after completing ALL the passes above — call the \`${GAP_FINDER_TOOL_NAME}\` tool exactly ` +
+    `When you are done — after completing ALL the passes above and a deliberate second sweep — call the \`${GAP_FINDER_TOOL_NAME}\` tool exactly ` +
       "once with your full candidate list (empty only if, after genuinely exhaustive analysis, none exist). " +
       "That tool call is your only way to report a result.",
   );
