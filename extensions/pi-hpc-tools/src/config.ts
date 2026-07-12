@@ -95,3 +95,40 @@ export function getPlinkCommand(): string {
   if (existsSync(DEFAULT_PLINK)) return DEFAULT_PLINK;
   return "plink";
 }
+
+export const HPC_CONFIG_USAGE = "Usage: /hpc:config username@host password (password may contain spaces)";
+
+export type ParsedHpcConfigArgs =
+  | { ok: true; username: string; host: string; password: string }
+  | { ok: false; reason: "empty" | "invalid" };
+
+/** Parse `/hpc:config` args. Primary form: `username@host password…` */
+export function parseHpcConfigArgs(args: string): ParsedHpcConfigArgs {
+  const trimmed = args.trim();
+  if (!trimmed) return { ok: false, reason: "empty" };
+
+  const parts = trimmed.split(/\s+/);
+  const userHost = parts[0];
+  const at = userHost.indexOf("@");
+
+  if (at > 0 && at < userHost.length - 1) {
+    if (parts.length < 2) return { ok: false, reason: "invalid" };
+    return {
+      ok: true,
+      username: userHost.slice(0, at),
+      host: userHost.slice(at + 1),
+      password: parts.slice(1).join(" "),
+    };
+  }
+
+  if (parts.length >= 3) {
+    return {
+      ok: true,
+      username: parts[0],
+      host: parts[1],
+      password: parts.slice(2).join(" "),
+    };
+  }
+
+  return { ok: false, reason: "invalid" };
+}

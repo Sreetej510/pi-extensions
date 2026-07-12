@@ -19,7 +19,7 @@ ever leaving your local project.
 |---|---|
 | `/hpc:on` | Enable the HPC tools for the current project |
 | `/hpc:off` | Disable the HPC tools for the current project |
-| `/hpc:config` | Configure host/user/password/plink path |
+| `/hpc:config` | Set credentials: `/hpc:config username@host password` |
 
 ## Configuration
 
@@ -27,6 +27,12 @@ Credentials are resolved in this order:
 
 1. Environment variables: `HPC_USERNAME` (or `HPC_USER`), `HPC_HOST`, `HPC_PASSWORD`.
 2. `hpc-config.json` (in `~/.pi/agent/.pi/` or `~/.pi/`), written by `/hpc:config`:
+
+   ```bash
+   /hpc:config myuser@hpc-login.example.edu your-password
+   ```
+
+   Passwords with spaces work — everything after `username@host` is treated as the password.
 
    ```json
    {

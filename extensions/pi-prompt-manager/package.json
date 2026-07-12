@@ -1,6 +1,6 @@
 {
   "name": "@sreetej510/pi-prompt-manager",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Pi extension to quickly save, manage, and paste reusable prompts without retyping.",
   "type": "module",
   "license": "MIT",

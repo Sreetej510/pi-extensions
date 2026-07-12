@@ -21,7 +21,7 @@
  *   tools.ts        registers ls_hpc / read_file_hpc / grep_hpc
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getHPCConfig, loadConfig, saveConfig } from "./config.js";
+import { getHPCConfig, HPC_CONFIG_USAGE, loadConfig, parseHpcConfigArgs, saveConfig } from "./config.js";
 import { getHpcEnabled, getPendingToolSync, setCurrentConfig } from "./state.js";
 import { isHpcSyncNeeded, onProjectContext, scheduleDelayedHpcSync, setHpcEnabled, syncHpcTools } from "./tool-sync.js";
 
@@ -33,7 +33,8 @@ export default function hpcToolsExtension(pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       const config = getHPCConfig();
       if (!config) {
-        ctx.ui.notify("HPC not configured. Use /hpc:config username@host password", "error");
+        ctx.ui.notify(`HPC not configured. ${HPC_CONFIG_USAGE}`, "error");
+        ctx.ui.notify("Or set HPC_USERNAME, HPC_HOST, and HPC_PASSWORD.", "info");
         return;
       }
       setHpcEnabled(pi, ctx.cwd, true);
@@ -52,36 +53,18 @@ export default function hpcToolsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("hpc:config", {
-    description: "Set HPC credentials: /hpc:config username@host password",
+    description: HPC_CONFIG_USAGE,
     handler: async (args, ctx) => {
-      if (!args?.trim()) {
-        ctx.ui.notify("Usage: /hpc:config username@host password", "info");
-        ctx.ui.notify("   or: /hpc:config username host password", "info");
-        return;
-      }
-
-      const parts = args.trim().split(/\s+/);
-      let username: string;
-      let host: string;
-      let password: string;
-
-      if (parts.length === 2) {
-        const at = parts[0].indexOf("@");
-        if (at === -1) {
-          ctx.ui.notify("Use username@host password", "error");
-          return;
+      const parsed = parseHpcConfigArgs(args ?? "");
+      if (!parsed.ok) {
+        ctx.ui.notify(HPC_CONFIG_USAGE, parsed.reason === "empty" ? "info" : "error");
+        if (parsed.reason === "empty") {
+          ctx.ui.notify("Or set HPC_USERNAME, HPC_HOST, and HPC_PASSWORD.", "info");
         }
-        username = parts[0].slice(0, at);
-        host = parts[0].slice(at + 1);
-        password = parts[1];
-      } else if (parts.length >= 3) {
-        username = parts[0];
-        host = parts[1];
-        password = parts.slice(2).join(" ");
-      } else {
-        ctx.ui.notify("Usage: /hpc:config username@host password", "error");
         return;
       }
+
+      const { username, host, password } = parsed;
 
       saveConfig({ username, host, password });
       ctx.ui.notify(`HPC configured: ${username}@${host}`, "info");
