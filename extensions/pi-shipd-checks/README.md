@@ -18,10 +18,10 @@ For the flags you pass, `/checks`:
    **solution** — each restricted to `read`/`grep`/`find`/`ls` tools plus a single
    `submit_review_report` tool it must call with a structured `PASS`/`FAIL` verdict, reasons,
    and notes.
-4. Optionally runs a 2-stage behavioral test-gap analysis: an exhaustive researcher agent
-   proposes candidate gaps (required-but-untested edge cases), then a strict, independent
-   filter agent re-verifies each one against the fairness rules. This never turns a `PASS` into
-   a `FAIL` — it's purely informational.
+4. Optionally runs a 3-agent behavioral test-gap analysis: two specialized finders
+   run in parallel (positive required-behavior gaps + negative forbidden-behavior gaps),
+   then a strict validator filters the combined list. This never turns a `PASS` into a
+   `FAIL` — it's purely informational.
 5. Posts a one-line chat summary and merges the results into `shipd_report.json` in your
    project root. Running flags separately, in any order, builds up one combined report instead
    of overwriting it — `overall` only becomes a confident `PASS`/`FAIL` once all 3 focus
@@ -40,7 +40,7 @@ just the tests reviewer plus the gap-finder/filter stages. `--config` must be us
 | `/checks --description` | Run only the problem-description reviewer |
 | `/checks --tests` | Run only the tests reviewer |
 | `/checks --solution` | Run only the solution reviewer |
-| `/checks --gap-finder` | Run only the test-gap finder + filter agents |
+| `/checks --gap-finder` | Run positive + negative gap finders (parallel), then validator |
 | `/checks --config` | Set the reviewer model and thinking level |
 
 **Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run.
@@ -50,7 +50,7 @@ just the tests reviewer plus the gap-finder/filter stages. `--config` must be us
 `/checks --config` lets you pick a model from your `enabledModels` list in `settings.json`,
 then (if the model supports more than one) a thinking level. The currently configured
 model/level is highlighted `[current]` in the picker. Settings are saved globally to
-`~/.pi/agent/checks-config.json` and shared by all reviewer/gap-finder/validator agents.
+`~/.pi/agent/checks-config.json` and shared by all reviewer, gap-finder, and validator agents.
 
 ## Install
 

@@ -6,7 +6,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
-import { buildGapFinderPrompt, buildGapValidatorPrompt, buildReviewerPrompt } from "./prompts.js";
+import { buildGapValidatorPrompt, buildNegativeGapFinderPrompt, buildPositiveGapFinderPrompt, buildReviewerPrompt } from "./prompts.js";
 import {
   createGapFinderTool,
   createGapValidatorTool,
@@ -16,6 +16,7 @@ import {
   REPORT_TOOL_NAME,
 } from "./tools.js";
 import type {
+  GapFinderKind,
   GapStageResult,
   ReviewerRole,
   ReviewReport,
@@ -124,6 +125,7 @@ export async function runReviewer(opts: {
 }
 
 export async function runGapFinder(opts: {
+  kind: GapFinderKind;
   tempDir: string;
   model: unknown;
   thinkingLevel: ThinkingLevel;
@@ -132,6 +134,7 @@ export async function runGapFinder(opts: {
   cancelSignal: AbortSignal;
 }): Promise<GapStageResult<TestGapCandidate>> {
   const capture: { gaps?: TestGapCandidate[] } = {};
+  const buildPrompt = opts.kind === "positive" ? buildPositiveGapFinderPrompt : buildNegativeGapFinderPrompt;
   // biome-ignore lint: model typed loosely to avoid depending on internal Model<Api> generics
   const model = opts.model as any;
   const { session } = await createAgentSession({
@@ -145,7 +148,7 @@ export async function runGapFinder(opts: {
 
   try {
     const outcome = await raceAgentTurn(async () => {
-      await session.prompt(buildGapFinderPrompt(opts.testRubric, opts.fairnessRules));
+      await session.prompt(buildPrompt(opts.testRubric, opts.fairnessRules));
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
