@@ -14,16 +14,18 @@
     "statusline"
   ],
   "files": [
-    "src",
+    "dist",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   },
   "scripts": {
+    "build": "node ../../scripts/build-extension.mjs",
+    "prepublishOnly": "npm run build",
     "check": "biome check . && npm run typecheck",
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit"
