@@ -1,6 +1,6 @@
 /** Remote command execution over plink + shell quoting helpers. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getHPCConfig, getPlinkCommand, getShellExecutable } from "./config.js";
+import { getHPCConfig, getPlinkCommand, getShellExecutable, HPC_CONFIG_USAGE } from "./config.js";
 import type { HpcExecResult } from "./types.js";
 
 /** Single-quote escape for remote shell command strings. */
@@ -19,7 +19,7 @@ export async function execOnHPC(
 ): Promise<HpcExecResult> {
   const config = getHPCConfig();
   if (!config) {
-    throw new Error("HPC not configured. Use /hpc:config username@host password");
+    throw new Error(`HPC not configured. ${HPC_CONFIG_USAGE}`);
   }
 
   const plink = bashQuote(getPlinkCommand());
