@@ -31,18 +31,14 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerUsageCommand } from "./command.js";
-import {
-	installUsageFooter,
-	isFooterRegistered,
-	setFooterRegistered,
-} from "./footer.js";
+import { installUsageFooter, isFooterRegistered, setFooterRegistered } from "./footer.js";
 import { isUsageSupportedModel } from "./models.js";
 import {
-	clearUsageStatusline,
-	handleStaleContextError,
-	refreshCurrentUsageStatusline,
-	rethrowUnlessStaleContextError,
-	setSessionActive,
+  clearUsageStatusline,
+  handleStaleContextError,
+  refreshCurrentUsageStatusline,
+  rethrowUnlessStaleContextError,
+  setSessionActive,
 } from "./statusline.js";
 
 export { completeCodexStatusArguments, parseArgs } from "./args.js";
@@ -50,61 +46,55 @@ export { isStaleExtensionContextError } from "./errors.js";
 export { formatCodexUsageReport, formatCodexUsageStatusline } from "./format.js";
 export { normalizeAppServerResponse, normalizeBackendPayload } from "./normalize-codex.js";
 export type {
-	AnthropicUsageReport,
-	CodexUsageReport,
-	NormalizedCredits,
-	NormalizedRateLimitSnapshot,
-	NormalizedRateLimitWindow,
-	ProviderUsageModel,
+  AnthropicUsageReport,
+  CodexUsageReport,
+  NormalizedCredits,
+  NormalizedRateLimitSnapshot,
+  NormalizedRateLimitWindow,
+  ProviderUsageModel,
 } from "./types.js";
 
 export default function usageExtension(pi: ExtensionAPI) {
-	registerUsageCommand(pi);
+  registerUsageCommand(pi);
 
-	const ensureUsageFooter = (ctx: ExtensionContext) => {
-		if (isFooterRegistered() || !ctx.hasUI) return;
-		try {
-			installUsageFooter(pi, ctx);
-			setFooterRegistered(true);
-		} catch (error) {
-			if (!handleStaleContextError(ctx, error)) throw error;
-		}
-	};
+  const ensureUsageFooter = (ctx: ExtensionContext) => {
+    if (isFooterRegistered() || !ctx.hasUI) return;
+    try {
+      installUsageFooter(pi, ctx);
+      setFooterRegistered(true);
+    } catch (error) {
+      if (!handleStaleContextError(ctx, error)) throw error;
+    }
+  };
 
-	pi.on("session_start", (_event, ctx) => {
-		setSessionActive(true);
-		ensureUsageFooter(ctx);
-		if (isUsageSupportedModel(ctx.model)) {
-			void refreshCurrentUsageStatusline(ctx, ctx.model).catch(
-				rethrowUnlessStaleContextError(ctx),
-			);
-		} else {
-			clearUsageStatusline(ctx);
-		}
-	});
+  pi.on("session_start", (_event, ctx) => {
+    setSessionActive(true);
+    ensureUsageFooter(ctx);
+    if (isUsageSupportedModel(ctx.model)) {
+      void refreshCurrentUsageStatusline(ctx, ctx.model).catch(rethrowUnlessStaleContextError(ctx));
+    } else {
+      clearUsageStatusline(ctx);
+    }
+  });
 
-	pi.on("session_tree", (_event, ctx) => {
-		if (isUsageSupportedModel(ctx.model)) {
-			void refreshCurrentUsageStatusline(ctx, ctx.model).catch(
-				rethrowUnlessStaleContextError(ctx),
-			);
-		} else {
-			clearUsageStatusline(ctx);
-		}
-	});
+  pi.on("session_tree", (_event, ctx) => {
+    if (isUsageSupportedModel(ctx.model)) {
+      void refreshCurrentUsageStatusline(ctx, ctx.model).catch(rethrowUnlessStaleContextError(ctx));
+    } else {
+      clearUsageStatusline(ctx);
+    }
+  });
 
-	pi.on("model_select", (event, ctx) => {
-		if (isUsageSupportedModel(event.model)) {
-			void refreshCurrentUsageStatusline(ctx, event.model).catch(
-				rethrowUnlessStaleContextError(ctx),
-			);
-		} else {
-			clearUsageStatusline(ctx);
-		}
-	});
+  pi.on("model_select", (event, ctx) => {
+    if (isUsageSupportedModel(event.model)) {
+      void refreshCurrentUsageStatusline(ctx, event.model).catch(rethrowUnlessStaleContextError(ctx));
+    } else {
+      clearUsageStatusline(ctx);
+    }
+  });
 
-	pi.on("session_shutdown", (_event, ctx) => {
-		setSessionActive(false);
-		clearUsageStatusline(ctx);
-	});
+  pi.on("session_shutdown", (_event, ctx) => {
+    setSessionActive(false);
+    clearUsageStatusline(ctx);
+  });
 }

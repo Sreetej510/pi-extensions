@@ -7,7 +7,7 @@
  *
  *   node scripts/bump-shared-version.mjs patch
  */
-import { readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const VALID_BUMPS = new Set(["major", "minor", "patch"]);

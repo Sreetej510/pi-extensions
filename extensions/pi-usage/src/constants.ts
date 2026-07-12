@@ -7,8 +7,7 @@ export const CODEX_PROVIDER_ID = "openai-codex";
 export const ANTHROPIC_PROVIDER_ID = "anthropic";
 export const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 export const CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
-export const CODEX_CONSUME_RESET_CREDITS_URL =
-	"https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
+export const CODEX_CONSUME_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
 export const CODEX_OPENAI_BETA = "codex-1";
 export const ANTHROPIC_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 export const DEFAULT_TIMEOUT_MS = 15_000;
@@ -35,23 +34,23 @@ export const RESET_FOREGROUND = "\x1b[39m";
 export const ANTHROPIC_NON_WINDOW_KEYS = new Set(["five_hour", "seven_day", "extra_usage"]);
 
 export const COMMAND_COMPLETIONS: readonly CommandArgumentCompletion[] = [
-	{ value: "--refresh", label: "--refresh", description: "Refresh usage instead of cached data" },
-	{ value: "--no-statusline", label: "--no-statusline", description: "Do not update the statusline" },
-	{
-		value: "--clear-statusline",
-		label: "--clear-statusline",
-		description: "Clear the usage statusline",
-	},
-	{ value: "--timeout ", label: "--timeout", description: "Set query timeout in seconds" },
-	{ value: "--raw", label: "--raw", description: "Show raw usage API responses (for debugging)" },
-	{
-		value: "--list-banked-resets",
-		label: "--list-banked-resets",
-		description: "List available Codex banked resets and expiry dates",
-	},
-	{
-		value: "--consume-banked-reset ",
-		label: "--consume-banked-reset",
-		description: "Consume a Codex banked reset by id",
-	},
+  { value: "--refresh", label: "--refresh", description: "Refresh usage instead of cached data" },
+  { value: "--no-statusline", label: "--no-statusline", description: "Do not update the statusline" },
+  {
+    value: "--clear-statusline",
+    label: "--clear-statusline",
+    description: "Clear the usage statusline",
+  },
+  { value: "--timeout ", label: "--timeout", description: "Set query timeout in seconds" },
+  { value: "--raw", label: "--raw", description: "Show raw usage API responses (for debugging)" },
+  {
+    value: "--list-banked-resets",
+    label: "--list-banked-resets",
+    description: "List available Codex banked resets and expiry dates",
+  },
+  {
+    value: "--consume-banked-reset ",
+    label: "--consume-banked-reset",
+    description: "Consume a Codex banked reset by id",
+  },
 ];

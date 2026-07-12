@@ -11,33 +11,33 @@ let toolsRegistered = false;
 let pendingToolSync = false;
 
 export function getHpcEnabled(): boolean {
-	return hpcEnabled;
+  return hpcEnabled;
 }
 
 export function setHpcEnabledFlag(enabled: boolean): void {
-	hpcEnabled = enabled;
+  hpcEnabled = enabled;
 }
 
 export function getCurrentConfig(): HPCConfig | null {
-	return currentConfig;
+  return currentConfig;
 }
 
 export function setCurrentConfig(config: HPCConfig | null): void {
-	currentConfig = config;
+  currentConfig = config;
 }
 
 export function getToolsRegistered(): boolean {
-	return toolsRegistered;
+  return toolsRegistered;
 }
 
 export function setToolsRegistered(registered: boolean): void {
-	toolsRegistered = registered;
+  toolsRegistered = registered;
 }
 
 export function getPendingToolSync(): boolean {
-	return pendingToolSync;
+  return pendingToolSync;
 }
 
 export function setPendingToolSync(pending: boolean): void {
-	pendingToolSync = pending;
+  pendingToolSync = pending;
 }
