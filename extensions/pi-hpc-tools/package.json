@@ -1,6 +1,6 @@
 {
   "name": "@sreetej510/pi-hpc-tools",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi extension for exploring a remote HPC/SSH host (via plink) with ls/read/grep tools, gated per-project by /hpc:on and /hpc:off.",
   "type": "module",
   "license": "MIT",
