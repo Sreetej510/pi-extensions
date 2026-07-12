@@ -10,6 +10,19 @@ import type { ChecksConfig, ReviewerRole, ReviewReport, TestGapFinal, Verdict } 
 
 export const REQUIRED_FILES = ["agent_prompt.md", "solution.patch", "test.patch"] as const;
 
+/** ISO-8601-style local timestamp with numeric offset (not UTC `Z`). */
+export function formatLocalTimestamp(date = new Date()): string {
+  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+  const offsetMin = -date.getTimezoneOffset();
+  const sign = offsetMin >= 0 ? "+" : "-";
+  const absOffset = Math.abs(offsetMin);
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}` +
+    `${sign}${pad(Math.floor(absOffset / 60))}:${pad(absOffset % 60)}`
+  );
+}
+
 /** Load a prior shipd_report.json (if any) so a later run can merge into it instead of clobbering it. */
 export function loadExistingReport(reportPath: string): Record<string, unknown> {
   try {
@@ -51,7 +64,7 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
 
   const merged: Record<string, unknown> = {
     ...existingReport,
-    timestamp: new Date().toISOString(),
+    timestamp: formatLocalTimestamp(),
     model: `${config.provider}/${config.modelId}`,
     thinkingLevel: config.thinkingLevel,
   };
