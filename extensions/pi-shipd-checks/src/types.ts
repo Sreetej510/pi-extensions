@@ -23,7 +23,9 @@ export interface ReviewReport {
   notes: string[];
 }
 
-/** A candidate behavioral test gap (positive or negative) proposed by the gap-finder researcher agent. */
+export type GapFinderKind = "positive" | "negative";
+
+/** A candidate behavioral test gap (positive or negative) proposed by a gap-finder agent. */
 export interface TestGapCandidate {
   description: string;
   risk: string;

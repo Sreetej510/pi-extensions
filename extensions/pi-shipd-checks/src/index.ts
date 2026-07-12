@@ -20,13 +20,11 @@
  *      each restricted to read/grep/find/ls plus a single
  *      `submit_review_report` tool they must call with a structured verdict
  *      (see agents.ts, tools.ts).
- *   4. (--all / --gap-finder) Run a sequential 2-stage behavioral test-gap
- *      analysis: an exhaustive researcher agent proposes as many candidate
- *      gaps as it can find — required-but-untested edge cases that could let
- *      an incorrect solution slip past test.patch — then a strict,
- *      independent filter agent re-verifies each candidate against the
- *      fairness rules and keeps only the ones that hold up. This never turns
- *      a PASS into a FAIL; it only annotates the report/summary.
+ *   4. (--all / --gap-finder) Run a 3-agent behavioral test-gap analysis: two
+ *      specialized finders run in parallel — one for positive (missing required-
+ *      behavior) gaps, one for negative (missing forbidden-behavior) gaps — then a
+ *      strict validator filters the combined candidate list. This never turns a
+ *      PASS into a FAIL; it only annotates the report/summary.
  *   5. Post a one-line chat message and merge results into shipd_report.json
  *      in the project root (merged, not overwritten — running any of
  *      --review/--description/--tests/--solution/--gap-finder separately, in
@@ -44,7 +42,7 @@
  *   /checks --description run only the problem-description (prompt) reviewer
  *   /checks --tests       run only the tests reviewer
  *   /checks --solution    run only the solution reviewer
- *   /checks --gap-finder  run only the test-gap finder/filter agents
+ *   /checks --gap-finder  run positive + negative gap finders, then validator
  *   /checks --config      set the reviewer model and thinking level
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.
  *

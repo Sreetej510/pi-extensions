@@ -29,7 +29,8 @@ export interface MergeReportInput {
   runGapStages: boolean;
   testGaps: TestGapFinal[];
   gapAnalysisIncomplete: boolean;
-  gapFinderStatus: string;
+  positiveGapFinderStatus: string;
+  negativeGapFinderStatus: string;
   gapFilterStatus: string;
 }
 
@@ -43,7 +44,8 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
     runGapStages,
     testGaps,
     gapAnalysisIncomplete,
-    gapFinderStatus,
+    positiveGapFinderStatus,
+    negativeGapFinderStatus,
     gapFilterStatus,
   } = input;
 
@@ -74,7 +76,7 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
   if (runGapStages) {
     merged.testGaps = testGaps;
     if (gapAnalysisIncomplete) {
-      merged.testGapAnalysisNote = `Gap analysis did not fully complete (finder: ${gapFinderStatus}, filter: ${gapFilterStatus}); testGaps may be incomplete.`;
+      merged.testGapAnalysisNote = `Gap analysis did not fully complete (positive finder: ${positiveGapFinderStatus}, negative finder: ${negativeGapFinderStatus}, filter: ${gapFilterStatus}); testGaps may be incomplete.`;
     } else {
       delete merged.testGapAnalysisNote;
     }

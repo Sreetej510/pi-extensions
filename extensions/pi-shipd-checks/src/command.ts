@@ -48,7 +48,7 @@ const COMMAND_COMPLETIONS: readonly CommandOption[] = [
   {
     value: "--gap-finder",
     label: "--gap-finder",
-    description: "Run only the 2-step behavioral test-gap finder + strict filter agents",
+    description: "Run only the 3-agent test-gap flow: positive finder + negative finder (parallel), then validator",
   },
   { value: "--config", label: "--config", description: "Set the reviewer model and thinking level" },
 ];
@@ -227,9 +227,8 @@ export function registerChecksCommand(pi: ExtensionAPI) {
       }
 
       const reviewAbort = startReview();
-      // Stage count depends on which flags were passed: however many focus
-      // reviewers were selected, plus the gap-finder + gap-filter stages if requested.
-      const TOTAL_STAGES = (runReviewers ? activeRoles.length : 0) + (runGapStages ? 2 : 0);
+      // Stage count: focus reviewers + 2 parallel gap finders + 1 validator.
+      const TOTAL_STAGES = (runReviewers ? activeRoles.length : 0) + (runGapStages ? 3 : 0);
       ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("preparing clean snapshot", 0, TOTAL_STAGES));
       ctx.ui.notify(`checks (${runLabel}) started. Press ${CANCEL_SHORTCUT_LABEL} to cancel.`, "info");
 
@@ -283,32 +282,43 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           }
         }
 
-        // ── Test-gap analysis: a research agent proposes candidate behavioral
-        // gaps (required-but-untested edge cases that could let an incorrect
-        // solution slip past test.patch), then a strict, independent filter
-        // agent verifies each one against the fairness rules before it's kept.
-        // This never turns a PASS into a FAIL — it only annotates the report.
-        let gapFinding: GapStageResult<TestGapCandidate> = { status: "ok", gaps: [] };
+        // ── Test-gap analysis: two specialized finders (positive + negative) run
+        // in parallel to propose candidate gaps, then a strict validator filters
+        // the combined list. This never turns a PASS into a FAIL.
+        let positiveGapFinding: GapStageResult<TestGapCandidate> = { status: "ok", gaps: [] };
+        let negativeGapFinding: GapStageResult<TestGapCandidate> = { status: "ok", gaps: [] };
         let gapFiltering: GapStageResult<TestGapFinal> = { status: "ok", gaps: [] };
         if (runGapStages) {
-          ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("finding test gaps", completed, TOTAL_STAGES));
-          gapFinding = await runGapFinder({
+          const gapFinderBase = {
             tempDir: dir,
             model,
             thinkingLevel: config.thinkingLevel,
             testRubric: sections.tests,
             fairnessRules,
             cancelSignal: reviewAbort.signal,
-          });
-          completed += 1;
+          };
+
           ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("finding test gaps", completed, TOTAL_STAGES));
+          [positiveGapFinding, negativeGapFinding] = await Promise.all([
+            runGapFinder({ ...gapFinderBase, kind: "positive" }).then((result) => {
+              completed += 1;
+              ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("finding test gaps", completed, TOTAL_STAGES));
+              return result;
+            }),
+            runGapFinder({ ...gapFinderBase, kind: "negative" }).then((result) => {
+              completed += 1;
+              ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("finding test gaps", completed, TOTAL_STAGES));
+              return result;
+            }),
+          ]);
 
           if (reviewAbort.signal.aborted) {
             ctx.ui.notify("checks: cancelled.", "warning");
             return;
           }
 
-          if (gapFinding.status === "ok" && gapFinding.gaps.length > 0) {
+          const candidateGaps = [...positiveGapFinding.gaps, ...negativeGapFinding.gaps];
+          if (candidateGaps.length > 0) {
             ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("validating test gaps", completed, TOTAL_STAGES));
             gapFiltering = await runGapValidator({
               tempDir: dir,
@@ -316,7 +326,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
               thinkingLevel: config.thinkingLevel,
               testRubric: sections.tests,
               fairnessRules,
-              candidates: gapFinding.gaps,
+              candidates: candidateGaps,
               cancelSignal: reviewAbort.signal,
             });
           }
@@ -339,7 +349,12 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           if (reports[i]) byRole[role.key] = reports[i];
         });
         const testGaps = gapFiltering.gaps;
-        const gapAnalysisIncomplete = runGapStages && (gapFinding.status !== "ok" || gapFiltering.status !== "ok");
+        const hadGapCandidates = positiveGapFinding.gaps.length > 0 || negativeGapFinding.gaps.length > 0;
+        const gapAnalysisIncomplete =
+          runGapStages &&
+          (positiveGapFinding.status !== "ok" ||
+            negativeGapFinding.status !== "ok" ||
+            (hadGapCandidates && gapFiltering.status !== "ok"));
 
         // Merge into any existing shipd_report.json instead of clobbering it —
         // running --review/--description/--tests/--solution/--gap-finder
@@ -355,7 +370,8 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           runGapStages,
           testGaps,
           gapAnalysisIncomplete,
-          gapFinderStatus: gapFinding.status,
+          positiveGapFinderStatus: positiveGapFinding.status,
+          negativeGapFinderStatus: negativeGapFinding.status,
           gapFilterStatus: gapFiltering.status,
         });
 
