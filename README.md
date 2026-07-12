@@ -7,12 +7,12 @@ extensions, published to npm under the `@sreetej510` scope so each package name 
 
 ## Packages
 
-| Package | Description | Entry point |
-|---|---|---|
-| [`@sreetej510/pi-hpc-tools`](extensions/pi-hpc-tools) | Remote HPC/SSH exploration (`ls`/`read`/`grep`) via `plink`, gated per-project by `/hpc:on` | `src/hpc-tools.ts` |
-| [`@sreetej510/pi-prompt-manager`](extensions/pi-prompt-manager) | Save, browse, and paste reusable prompts via `/prompt` | `src/prompt-manager.ts` |
-| [`@sreetej510/pi-usage`](extensions/pi-usage) | Provider usage / rate-limit reporting + statusline via `/usage` | `src/usage.ts` |
-| [`@sreetej510/pi-shipd-checks`](extensions/pi-shipd-checks) | Multi-agent fairness review + test-gap analysis via `/checks` | `src/index.ts` |
+| Package | Description | Source entry | Published entry |
+|---|---|---|---|
+| [`@sreetej510/pi-hpc-tools`](extensions/pi-hpc-tools) | Remote HPC/SSH exploration (`ls`/`read`/`grep`) via `plink`, gated per-project by `/hpc:on` | `src/index.ts` | `dist/index.js` |
+| [`@sreetej510/pi-prompt-manager`](extensions/pi-prompt-manager) | Save, browse, and paste reusable prompts via `/prompt` | `src/index.ts` | `dist/index.js` |
+| [`@sreetej510/pi-usage`](extensions/pi-usage) | Provider usage / rate-limit reporting + statusline via `/usage` | `src/index.ts` | `dist/index.js` |
+| [`@sreetej510/pi-shipd-checks`](extensions/pi-shipd-checks) | Multi-agent fairness review + test-gap analysis via `/checks` | `src/index.ts` | `dist/index.js` |
 
 Each package has its own README with commands, configuration, and usage details.
 
@@ -31,12 +31,14 @@ pi-extensions/
 │   ├── pi-usage/
 │   └── pi-shipd-checks/
 ├── scripts/
+│   ├── build-extension.mjs   # bundle + minify one extension → dist/index.js
+│   ├── build-all.mjs         # build every extension workspace
 │   └── bump-shared-version.mjs
 ├── .github/workflows/
 │   ├── ci.yml              # lint + typecheck on push/PR
 │   ├── bump-version.yml    # manual: bump all package versions in lockstep + tag
 │   ├── release.yml         # tag push -> GitHub Release
-│   └── publish.yml         # tag push -> publish unpublished packages to npm
+│   └── publish.yml         # tag push -> build + publish minified dist/ to npm
 ├── package.json             # npm workspaces root (private)
 ├── tsconfig.json            # shared, workspace-wide typecheck config
 ├── biome.json                # shared lint/format config
@@ -59,12 +61,36 @@ npm install
 
 | Command | Effect |
 |---|---|
-| `npm run check` | Biome check + typecheck across all workspaces |
+| `npm run build` | Bundle + minify every extension to `dist/index.js` (comments stripped) |
+| `npm run check` | Biome check + typecheck + build across all workspaces |
 | `npm run lint` | Biome lint |
 | `npm run format` | Biome format (writes changes) |
 | `npm run typecheck` | `tsc --noEmit` in every workspace |
 | `npm run pack:<name>` | `npm pack --dry-run` for one package (sanity-check `files`/tarball contents) |
 | `npm run publish:dry` | Dry-run publish of every non-private workspace |
+
+### Build pipeline
+
+Source lives in `src/` (multi-file TypeScript, with comments). **npm publishes only `dist/`** —
+a single minified ESM bundle per extension, produced by [esbuild](https://esbuild.github.io/):
+
+```bash
+npm run build                              # all extensions
+npm run --workspace @sreetej510/pi-usage build   # one extension
+```
+
+What the build does:
+
+- Bundles all `src/**/*.ts` into one `dist/index.js` per package
+- Minifies and strips comments (`legalComments: "none"`)
+- Keeps `@earendil-works/*` external (provided by pi at runtime)
+- Bundles runtime deps like `typebox` into the output
+
+`prepublishOnly` on each package runs `build` automatically before `npm publish`. The GitHub
+**Publish** workflow also runs `npm run build` before publishing.
+
+For local pi development against source (not the minified npm build), point `settings.json` at
+`src/index.ts` directly — see each package README.
 
 You can also scope any script to a single package:
 
@@ -80,18 +106,21 @@ npm run --workspace @sreetej510/pi-usage typecheck
 2. Add a `package.json` (copy an existing one as a template) with:
    - `"name": "@sreetej510/pi-<name>"`
    - `"private": false`
-   - `"pi": { "extensions": ["./src/<entry-file>.ts"] }`
-   - `"files": ["src", "README.md", "LICENSE"]`
-3. Add a `tsconfig.json` (copy an existing one), a `README.md` documenting commands/config, and
-   a `LICENSE` (copy the root `LICENSE`, or symlink/duplicate it).
-4. Add a `pack:<name>` script to the root `package.json` for convenience (optional).
-5. Run `npm install` at the repo root so the new workspace is linked, then
+   - `"pi": { "extensions": ["./dist/index.js"] }`
+   - `"files": ["dist", "README.md", "LICENSE"]`
+   - `"build": "node ../../scripts/build-extension.mjs"`
+   - `"prepublishOnly": "npm run build"`
+3. Add `src/index.ts` as the extension entry (esbuild bundles from here).
+4. Add a `tsconfig.json` (copy an existing one), a `README.md` documenting commands/config, and
+   a `LICENSE` (copy the root `LICENSE`).
+5. Add a `pack:<name>` script to the root `package.json` for convenience (optional).
+6. Run `npm install` at the repo root so the new workspace is linked, then
    `npm run --workspace @sreetej510/pi-<name> check`.
-6. For local testing without publishing, point your pi `settings.json` at the file directly:
+7. For local testing without publishing, point your pi `settings.json` at the source file directly:
 
    ```json
    {
-     "extensions": ["/absolute/path/to/pi-extensions/extensions/pi-<name>/src/<entry-file>.ts"]
+     "extensions": ["/absolute/path/to/pi-extensions/extensions/pi-<name>/src/index.ts"]
    }
    ```
 

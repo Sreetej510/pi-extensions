@@ -1,5 +1,6 @@
 node_modules/
 dist/
+extensions/*/dist/
 *.tsbuildinfo
 .DS_Store
 npm-debug.log*

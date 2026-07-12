@@ -14,24 +14,24 @@
     "shipd"
   ],
   "files": [
-    "src",
+    "dist",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   },
   "scripts": {
+    "build": "node ../../scripts/build-extension.mjs",
+    "prepublishOnly": "npm run build",
     "check": "biome check . && npm run typecheck",
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-    "typebox": "^1.3.3"
-  },
   "devDependencies": {
+    "typebox": "^1.3.3",
     "@biomejs/biome": "^2.5.3",
     "@earendil-works/pi-coding-agent": "^0.80.3",
     "@earendil-works/pi-tui": "^0.80.3",
