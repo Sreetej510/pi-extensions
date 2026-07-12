@@ -1,6 +1,6 @@
 {
-  "name": "@omega/pi-prompt-manager",
-  "version": "0.1.0",
+  "name": "@sreetej510/pi-prompt-manager",
+  "version": "0.1.1",
   "description": "Pi extension to quickly save, manage, and paste reusable prompts without retyping.",
   "type": "module",
   "license": "MIT",
@@ -35,7 +35,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/omega/pi-extensions",
+    "url": "https://github.com/Sreetej510/pi-extensions",
     "directory": "extensions/pi-prompt-manager"
   },
   "publishConfig": {

@@ -1,4 +1,4 @@
-# @omega/pi-shipd-checks
+# @sreetej510/pi-shipd-checks
 
 A [pi](https://github.com/earendil-works/pi) coding agent extension that runs a strict,
 multi-agent review of a benchmark task's `agent_prompt.md`, `test.patch`, and `solution.patch`
@@ -55,14 +55,14 @@ model/level is highlighted `[current]` in the picker. Settings are saved globall
 ## Install
 
 ```bash
-npm install -g @omega/pi-shipd-checks
+npm install -g @sreetej510/pi-shipd-checks
 ```
 
 Then add it to your pi `settings.json`:
 
 ```json
 {
-  "packages": ["npm:@omega/pi-shipd-checks"]
+  "packages": ["npm:@sreetej510/pi-shipd-checks"]
 }
 ```
 
@@ -99,6 +99,6 @@ itself, edit `rubric.ts`. To add a new tool, add it in `tools.ts` and wire it up
 
 ```bash
 npm install
-npm run --workspace @omega/pi-shipd-checks check     # biome + typecheck
-npm run --workspace @omega/pi-shipd-checks format
+npm run --workspace @sreetej510/pi-shipd-checks check     # biome + typecheck
+npm run --workspace @sreetej510/pi-shipd-checks format
 ```

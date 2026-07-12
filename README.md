@@ -1,18 +1,18 @@
 # pi-extensions
 
 A monorepo of independently installable [pi coding agent](https://github.com/earendil-works/pi)
-extensions, published to npm under the `@omega` scope so each package name is globally unique
-(`@omega/pi-<extension-name>`). Structure and tooling are modeled after
+extensions, published to npm under the `@sreetej510` scope so each package name is globally unique
+(`@sreetej510/pi-<extension-name>`). Structure and tooling are modeled after
 [narumiruna/pi-extensions](https://github.com/narumiruna/pi-extensions).
 
 ## Packages
 
 | Package | Description | Entry point |
 |---|---|---|
-| [`@omega/pi-hpc-tools`](extensions/pi-hpc-tools) | Remote HPC/SSH exploration (`ls`/`read`/`grep`) via `plink`, gated per-project by `/hpc:on` | `src/hpc-tools.ts` |
-| [`@omega/pi-prompt-manager`](extensions/pi-prompt-manager) | Save, browse, and paste reusable prompts via `/prompt` | `src/prompt-manager.ts` |
-| [`@omega/pi-usage`](extensions/pi-usage) | Provider usage / rate-limit reporting + statusline via `/usage` | `src/usage.ts` |
-| [`@omega/pi-shipd-checks`](extensions/pi-shipd-checks) | Multi-agent fairness review + test-gap analysis via `/checks` | `src/index.ts` |
+| [`@sreetej510/pi-hpc-tools`](extensions/pi-hpc-tools) | Remote HPC/SSH exploration (`ls`/`read`/`grep`) via `plink`, gated per-project by `/hpc:on` | `src/hpc-tools.ts` |
+| [`@sreetej510/pi-prompt-manager`](extensions/pi-prompt-manager) | Save, browse, and paste reusable prompts via `/prompt` | `src/prompt-manager.ts` |
+| [`@sreetej510/pi-usage`](extensions/pi-usage) | Provider usage / rate-limit reporting + statusline via `/usage` | `src/usage.ts` |
+| [`@sreetej510/pi-shipd-checks`](extensions/pi-shipd-checks) | Multi-agent fairness review + test-gap analysis via `/checks` | `src/index.ts` |
 
 Each package has its own README with commands, configuration, and usage details.
 
@@ -69,8 +69,8 @@ npm install
 You can also scope any script to a single package:
 
 ```bash
-npm run --workspace @omega/pi-usage check
-npm run --workspace @omega/pi-usage typecheck
+npm run --workspace @sreetej510/pi-usage check
+npm run --workspace @sreetej510/pi-usage typecheck
 ```
 
 ## Adding a new extension
@@ -78,7 +78,7 @@ npm run --workspace @omega/pi-usage typecheck
 1. Create `extensions/pi-<name>/` with a `src/` folder containing your extension's entry file
    (and any supporting modules).
 2. Add a `package.json` (copy an existing one as a template) with:
-   - `"name": "@omega/pi-<name>"`
+   - `"name": "@sreetej510/pi-<name>"`
    - `"private": false`
    - `"pi": { "extensions": ["./src/<entry-file>.ts"] }`
    - `"files": ["src", "README.md", "LICENSE"]`
@@ -86,7 +86,7 @@ npm run --workspace @omega/pi-usage typecheck
    a `LICENSE` (copy the root `LICENSE`, or symlink/duplicate it).
 4. Add a `pack:<name>` script to the root `package.json` for convenience (optional).
 5. Run `npm install` at the repo root so the new workspace is linked, then
-   `npm run --workspace @omega/pi-<name> check`.
+   `npm run --workspace @sreetej510/pi-<name> check`.
 6. For local testing without publishing, point your pi `settings.json` at the file directly:
 
    ```json
@@ -125,12 +125,12 @@ The full pipeline is push-button once configured:
 
 ### One-time setup
 
-- Create an npm **automation/publish token** for the `@omega` org/scope and add it to the repo
+- Create an npm **automation/publish token** for the `@sreetej510` org/scope and add it to the repo
   as the `NPM_TOKEN` secret (used by `publish.yml`).
 - If `bump-version.yml` needs to push to a protected `main` branch, add a `PAT_TOKEN` secret
   with a personal access token that has `contents: write` (repo `Settings → Secrets`).
-- Make sure the `@omega` scope exists on npm and this repo's publishing account is a member with
-  publish rights: `npm org ls omega` / `npm access ls-packages @omega`.
+- Make sure the `@sreetej510` scope exists on npm and this repo's publishing account is a member with
+  publish rights: `npm org ls omega` / `npm access ls-packages @sreetej510`.
 
 ### Cutting a release manually (no CI)
 
@@ -143,11 +143,11 @@ git commit -m "chore(release): v$(node -p "require('./package.json').version")"
 git tag "v$(node -p "require('./package.json').version")"
 git push origin main --tags
 
-# Publish (requires npm login with publish rights on @omega)
-npm publish --workspace @omega/pi-hpc-tools --access public
-npm publish --workspace @omega/pi-prompt-manager --access public
-npm publish --workspace @omega/pi-usage --access public
-npm publish --workspace @omega/pi-shipd-checks --access public
+# Publish (requires npm login with publish rights on @sreetej510)
+npm publish --workspace @sreetej510/pi-hpc-tools --access public
+npm publish --workspace @sreetej510/pi-prompt-manager --access public
+npm publish --workspace @sreetej510/pi-usage --access public
+npm publish --workspace @sreetej510/pi-shipd-checks --access public
 ```
 
 ## Installing published extensions
@@ -158,10 +158,10 @@ Once published, add any package to your pi `settings.json` under `packages` (pi 
 ```json
 {
   "packages": [
-    "npm:@omega/pi-hpc-tools",
-    "npm:@omega/pi-prompt-manager",
-    "npm:@omega/pi-usage",
-    "npm:@omega/pi-shipd-checks"
+    "npm:@sreetej510/pi-hpc-tools",
+    "npm:@sreetej510/pi-prompt-manager",
+    "npm:@sreetej510/pi-usage",
+    "npm:@sreetej510/pi-shipd-checks"
   ]
 }
 ```

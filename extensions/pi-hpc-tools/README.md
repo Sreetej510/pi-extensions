@@ -1,4 +1,4 @@
-# @omega/pi-hpc-tools
+# @sreetej510/pi-hpc-tools
 
 A [pi](https://github.com/earendil-works/pi) coding agent extension for exploring a remote
 HPC/SSH host through [`plink`](https://www.chiark.greenend.org.uk/~sgtatham/putty/) without
@@ -47,14 +47,14 @@ to Git Bash on Windows and `bash` elsewhere.
 ## Install
 
 ```bash
-npm install -g @omega/pi-hpc-tools
+npm install -g @sreetej510/pi-hpc-tools
 ```
 
 Then add it to your pi `settings.json`:
 
 ```json
 {
-  "packages": ["npm:@omega/pi-hpc-tools"]
+  "packages": ["npm:@sreetej510/pi-hpc-tools"]
 }
 ```
 
@@ -85,8 +85,8 @@ Or, for local development, point at the file directly:
 
 ```bash
 npm install
-npm run --workspace @omega/pi-hpc-tools check     # biome + typecheck
-npm run --workspace @omega/pi-hpc-tools format
+npm run --workspace @sreetej510/pi-hpc-tools check     # biome + typecheck
+npm run --workspace @sreetej510/pi-hpc-tools format
 ```
 
 ## Security notes
