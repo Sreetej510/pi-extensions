@@ -48,7 +48,7 @@ export function formatHpcResult(
 
 export function hpcRenderCall(
   callText: string,
-  theme: import("@earendil-works/pi-coding-agent").Theme,
+  _theme: import("@earendil-works/pi-coding-agent").Theme,
   context: { lastComponent?: unknown },
 ): Text {
   const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);

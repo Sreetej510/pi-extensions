@@ -24,13 +24,15 @@ async function addPrompt(ui: PromptUi, nameHint?: string): Promise<void> {
   }
 
   const all = await loadPrompts();
-  const existIdx = all.findIndex((p) => p.name.toLowerCase() === name!.toLowerCase());
+  const existIdx = all.findIndex((p) => p.name.toLowerCase() === name.toLowerCase());
 
   if (existIdx >= 0) {
     const ok = await ui.confirm("Name already exists", `A prompt named "${name}" already exists. Overwrite it?`);
     if (!ok) return;
+    const existing = all[existIdx];
+    if (!existing) return;
     all[existIdx] = {
-      ...all[existIdx]!,
+      ...existing,
       content: content.trim(),
       updatedAt: Date.now(),
     };

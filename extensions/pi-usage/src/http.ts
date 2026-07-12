@@ -1,5 +1,3 @@
-import { errorMessage } from "./utils.js";
-
 export async function fetchWithTimeout(
   url: string,
   init: RequestInit,

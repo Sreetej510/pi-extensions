@@ -72,7 +72,7 @@ export class PromptManagerComponent {
     lines.push("");
 
     if (this.prompts.length === 0) {
-      lines.push(truncateToWidth("  " + th.fg("dim", "No prompts saved yet. Press [a] to add one."), width));
+      lines.push(truncateToWidth(`  ${th.fg("dim", "No prompts saved yet. Press [a] to add one.")}`, width));
     } else {
       const MAX_VISIBLE = 10;
       const half = Math.floor(MAX_VISIBLE / 2);
@@ -80,11 +80,12 @@ export class PromptManagerComponent {
       const end = Math.min(this.prompts.length, start + MAX_VISIBLE);
 
       if (start > 0) {
-        lines.push(truncateToWidth("  " + th.fg("dim", `↑ ${start} more above`), width));
+        lines.push(truncateToWidth(`  ${th.fg("dim", `↑ ${start} more above`)}`, width));
       }
 
       for (let i = start; i < end; i++) {
-        const p = this.prompts[i]!;
+        const p = this.prompts[i];
+        if (!p) continue;
         const isSel = i === this.selectedIndex;
 
         const arrow = isSel ? th.fg("accent", "❯ ") : "  ";
@@ -97,8 +98,8 @@ export class PromptManagerComponent {
           if (firstLine) {
             const avail = width - 2 - p.name.length - 4;
             if (avail > 8) {
-              const preview = firstLine.length > avail ? firstLine.slice(0, avail - 1) + "…" : firstLine;
-              row += "  " + th.fg("dim", preview);
+              const preview = firstLine.length > avail ? `${firstLine.slice(0, avail - 1)}…` : firstLine;
+              row += `  ${th.fg("dim", preview)}`;
             }
           }
         }
@@ -107,7 +108,7 @@ export class PromptManagerComponent {
       }
 
       if (end < this.prompts.length) {
-        lines.push(truncateToWidth("  " + th.fg("dim", `↓ ${this.prompts.length - end} more below`), width));
+        lines.push(truncateToWidth(`  ${th.fg("dim", `↓ ${this.prompts.length - end} more below`)}`, width));
       }
     }
 
@@ -117,7 +118,7 @@ export class PromptManagerComponent {
       this.prompts.length > 0
         ? "[↑↓/jk] navigate  [Enter] paste  [e] edit  [d] delete  [a] add  [Esc] close"
         : "[a] add a new prompt  [Esc] close";
-    lines.push(truncateToWidth("  " + th.fg("dim", hints), width));
+    lines.push(truncateToWidth(`  ${th.fg("dim", hints)}`, width));
     lines.push("");
 
     this.cache = { w: width, lines };
