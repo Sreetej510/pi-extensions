@@ -96,7 +96,7 @@ export function getPlinkCommand(): string {
   return "plink";
 }
 
-export const HPC_CONFIG_USAGE = "Usage: /hpc:config username@host password (password may contain spaces)";
+export const HPC_CONFIG_USAGE = "Usage: /hpc:config username@host password";
 
 export type ParsedHpcConfigArgs =
   | { ok: true; username: string; host: string; password: string }

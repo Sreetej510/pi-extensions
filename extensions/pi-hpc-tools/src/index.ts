@@ -34,7 +34,6 @@ export default function hpcToolsExtension(pi: ExtensionAPI) {
       const config = getHPCConfig();
       if (!config) {
         ctx.ui.notify(`HPC not configured. ${HPC_CONFIG_USAGE}`, "error");
-        ctx.ui.notify("Or set HPC_USERNAME, HPC_HOST, and HPC_PASSWORD.", "info");
         return;
       }
       setHpcEnabled(pi, ctx.cwd, true);
@@ -58,9 +57,6 @@ export default function hpcToolsExtension(pi: ExtensionAPI) {
       const parsed = parseHpcConfigArgs(args ?? "");
       if (!parsed.ok) {
         ctx.ui.notify(HPC_CONFIG_USAGE, parsed.reason === "empty" ? "info" : "error");
-        if (parsed.reason === "empty") {
-          ctx.ui.notify("Or set HPC_USERNAME, HPC_HOST, and HPC_PASSWORD.", "info");
-        }
         return;
       }
 
