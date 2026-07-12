@@ -1,4 +1,4 @@
-# @omega/pi-prompt-manager
+# @sreetej510/pi-prompt-manager
 
 A [pi](https://github.com/earendil-works/pi) coding agent extension to quickly save, manage,
 and paste reusable prompts without retyping them.
@@ -36,14 +36,14 @@ Saved prompts are stored as JSON at `<pi-agent-dir>/prompt-manager.json`:
 ## Install
 
 ```bash
-npm install -g @omega/pi-prompt-manager
+npm install -g @sreetej510/pi-prompt-manager
 ```
 
 Then add it to your pi `settings.json`:
 
 ```json
 {
-  "packages": ["npm:@omega/pi-prompt-manager"]
+  "packages": ["npm:@sreetej510/pi-prompt-manager"]
 }
 ```
 
@@ -69,6 +69,6 @@ Or, for local development, point at the file directly:
 
 ```bash
 npm install
-npm run --workspace @omega/pi-prompt-manager check     # biome + typecheck
-npm run --workspace @omega/pi-prompt-manager format
+npm run --workspace @sreetej510/pi-prompt-manager check     # biome + typecheck
+npm run --workspace @sreetej510/pi-prompt-manager format
 ```

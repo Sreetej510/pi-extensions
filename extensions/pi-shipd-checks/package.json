@@ -1,6 +1,6 @@
 {
-  "name": "@omega/pi-shipd-checks",
-  "version": "0.1.0",
+  "name": "@sreetej510/pi-shipd-checks",
+  "version": "0.1.1",
   "description": "Pi extension that runs a strict, multi-agent fairness review of a benchmark task's agent_prompt.md, test.patch, and solution.patch, plus behavioral test-gap analysis, via /checks.",
   "type": "module",
   "license": "MIT",
@@ -39,7 +39,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/omega/pi-extensions",
+    "url": "https://github.com/Sreetej510/pi-extensions",
     "directory": "extensions/pi-shipd-checks"
   },
   "publishConfig": {

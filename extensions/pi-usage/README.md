@@ -1,4 +1,4 @@
-# @omega/pi-usage
+# @sreetej510/pi-usage
 
 A [pi](https://github.com/earendil-works/pi) coding agent extension that reports provider
 usage / rate-limit budgets — OpenAI Codex, Anthropic OAuth, and pi-auth-backed providers — via
@@ -30,14 +30,14 @@ usage / rate-limit budgets — OpenAI Codex, Anthropic OAuth, and pi-auth-backed
 ## Install
 
 ```bash
-npm install -g @omega/pi-usage
+npm install -g @sreetej510/pi-usage
 ```
 
 Then add it to your pi `settings.json`:
 
 ```json
 {
-  "packages": ["npm:@omega/pi-usage"]
+  "packages": ["npm:@sreetej510/pi-usage"]
 }
 ```
 
@@ -80,6 +80,6 @@ Or, for local development, point at the file directly:
 
 ```bash
 npm install
-npm run --workspace @omega/pi-usage check     # biome + typecheck
-npm run --workspace @omega/pi-usage format
+npm run --workspace @sreetej510/pi-usage check     # biome + typecheck
+npm run --workspace @sreetej510/pi-usage format
 ```

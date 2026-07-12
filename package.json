@@ -1,9 +1,9 @@
 {
   "name": "pi-extensions",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "packageManager": "npm@11.16.0",
-  "description": "Monorepo for @omega pi extension packages.",
+  "description": "Monorepo for @sreetej510 pi extension packages.",
   "type": "module",
   "workspaces": [
     "extensions/*"
@@ -15,10 +15,10 @@
     "typecheck": "npm --workspaces run typecheck",
     "test": "npm --workspaces --if-present run test",
     "check": "npm run biome:check && npm run typecheck && npm test",
-    "pack:hpc-tools": "npm --workspace @omega/pi-hpc-tools pack --dry-run",
-    "pack:prompt-manager": "npm --workspace @omega/pi-prompt-manager pack --dry-run",
-    "pack:usage": "npm --workspace @omega/pi-usage pack --dry-run",
-    "pack:shipd-checks": "npm --workspace @omega/pi-shipd-checks pack --dry-run",
+    "pack:hpc-tools": "npm --workspace @sreetej510/pi-hpc-tools pack --dry-run",
+    "pack:prompt-manager": "npm --workspace @sreetej510/pi-prompt-manager pack --dry-run",
+    "pack:usage": "npm --workspace @sreetej510/pi-usage pack --dry-run",
+    "pack:shipd-checks": "npm --workspace @sreetej510/pi-shipd-checks pack --dry-run",
     "publish:dry": "npm --workspaces publish --dry-run --access public",
     "release:patch": "node ./scripts/bump-shared-version.mjs patch",
     "release:minor": "node ./scripts/bump-shared-version.mjs minor",
