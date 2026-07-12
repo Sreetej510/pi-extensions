@@ -94,7 +94,7 @@ async function runConfigFlow(ctx: ExtensionCommandContext) {
     .map((ref) => {
       const parsed = splitProviderModel(ref);
       if (!parsed) return null;
-      const found = available.find((m: any) => m.provider === parsed.provider && m.id === parsed.modelId);
+      const found = available.find((m) => m.provider === parsed.provider && m.id === parsed.modelId);
       const isCurrent = existingConfig?.provider === parsed.provider && existingConfig?.modelId === parsed.modelId;
       const base = found ? `${found.name} (${ref})` : ref;
       return { ref, parsed, display: isCurrent ? `${base} [current]` : base, found, isCurrent };

@@ -6,7 +6,12 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
-import { buildGapValidatorPrompt, buildNegativeGapFinderPrompt, buildPositiveGapFinderPrompt, buildReviewerPrompt } from "./prompts.js";
+import {
+  buildGapValidatorPrompt,
+  buildNegativeGapFinderPrompt,
+  buildPositiveGapFinderPrompt,
+  buildReviewerPrompt,
+} from "./prompts.js";
 import {
   createGapFinderTool,
   createGapValidatorTool,
@@ -27,6 +32,16 @@ import type {
 
 export const REVIEWER_TIMEOUT_MS = 15 * 60 * 1000;
 export const REVIEWER_TOOLS = ["read", "grep", "find", "ls"] as const;
+
+// biome-ignore lint/suspicious/noExplicitAny: Model/ThinkingLevel generics are not on pi-coding-agent's public surface
+function asSessionModel(model: unknown): any {
+  return model;
+}
+
+// biome-ignore lint/suspicious/noExplicitAny: see asSessionModel
+function sessionThinkingLevel(level: ThinkingLevel): any {
+  return level === "off" ? undefined : level;
+}
 
 /** Outcome of racing an agent turn against a timeout and an external cancel signal. */
 type AgentTurnOutcome = "done" | "timedOut" | "cancelled";
@@ -69,12 +84,11 @@ export async function runReviewer(opts: {
   cancelSignal: AbortSignal;
 }): Promise<ReviewReport> {
   const capture: { report?: ReviewReport } = {};
-  // biome-ignore lint: model typed loosely to avoid depending on internal Model<Api> generics
-  const model = opts.model as any;
+  const model = asSessionModel(opts.model);
   const { session } = await createAgentSession({
     cwd: opts.tempDir,
     model,
-    thinkingLevel: opts.thinkingLevel === "off" ? undefined : (opts.thinkingLevel as any),
+    thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
     tools: [...REVIEWER_TOOLS, REPORT_TOOL_NAME],
     customTools: [createReportTool(capture)],
     sessionManager: SessionManager.inMemory(),
@@ -135,12 +149,11 @@ export async function runGapFinder(opts: {
 }): Promise<GapStageResult<TestGapCandidate>> {
   const capture: { gaps?: TestGapCandidate[] } = {};
   const buildPrompt = opts.kind === "positive" ? buildPositiveGapFinderPrompt : buildNegativeGapFinderPrompt;
-  // biome-ignore lint: model typed loosely to avoid depending on internal Model<Api> generics
-  const model = opts.model as any;
+  const model = asSessionModel(opts.model);
   const { session } = await createAgentSession({
     cwd: opts.tempDir,
     model,
-    thinkingLevel: opts.thinkingLevel === "off" ? undefined : (opts.thinkingLevel as any),
+    thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
     tools: [...REVIEWER_TOOLS, GAP_FINDER_TOOL_NAME],
     customTools: [createGapFinderTool(capture)],
     sessionManager: SessionManager.inMemory(),
@@ -171,12 +184,11 @@ export async function runGapValidator(opts: {
   cancelSignal: AbortSignal;
 }): Promise<GapStageResult<TestGapFinal>> {
   const capture: { gaps?: TestGapFinal[] } = {};
-  // biome-ignore lint: model typed loosely to avoid depending on internal Model<Api> generics
-  const model = opts.model as any;
+  const model = asSessionModel(opts.model);
   const { session } = await createAgentSession({
     cwd: opts.tempDir,
     model,
-    thinkingLevel: opts.thinkingLevel === "off" ? undefined : (opts.thinkingLevel as any),
+    thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
     tools: [...REVIEWER_TOOLS, GAP_VALIDATOR_TOOL_NAME],
     customTools: [createGapValidatorTool(capture)],
     sessionManager: SessionManager.inMemory(),
