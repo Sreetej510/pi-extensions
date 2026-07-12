@@ -82,7 +82,6 @@ export async function runReviewer(opts: {
   try {
     const outcome = await raceAgentTurn(async () => {
       await session.prompt(buildReviewerPrompt(opts.role, opts.rubric, opts.fairnessRules));
-      await session.waitForIdle();
     }, opts.cancelSignal);
 
     if (outcome === "cancelled") {
@@ -147,7 +146,6 @@ export async function runGapFinder(opts: {
   try {
     const outcome = await raceAgentTurn(async () => {
       await session.prompt(buildGapFinderPrompt(opts.testRubric, opts.fairnessRules));
-      await session.waitForIdle();
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
@@ -184,7 +182,6 @@ export async function runGapValidator(opts: {
   try {
     const outcome = await raceAgentTurn(async () => {
       await session.prompt(buildGapValidatorPrompt(opts.candidates, opts.testRubric, opts.fairnessRules));
-      await session.waitForIdle();
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
