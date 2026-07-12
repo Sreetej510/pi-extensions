@@ -74,49 +74,52 @@ import type { Verdict } from "./types.js";
 const CANCEL_SHORTCUT = Key.ctrlShift("x");
 
 export default function shipdChecksExtension(pi: ExtensionAPI) {
-	pi.registerMessageRenderer<{
-		overall?: Verdict;
-		hasTestGaps?: boolean;
-		gapsCount?: number;
-		roleVerdicts?: Record<string, Verdict>;
-		showGaps?: boolean;
-	}>("shipd_checks_report", (message, _options, theme) => {
-		const details = message.details ?? {};
-		const colorVerdict = (verdict: Verdict) => (verdict === "PASS" ? theme.fg("success", verdict) : theme.fg("error", verdict));
-		const segments: string[] = [];
+  pi.registerMessageRenderer<{
+    overall?: Verdict;
+    hasTestGaps?: boolean;
+    gapsCount?: number;
+    roleVerdicts?: Record<string, Verdict>;
+    showGaps?: boolean;
+  }>("shipd_checks_report", (message, _options, theme) => {
+    const details = message.details ?? {};
+    const colorVerdict = (verdict: Verdict) =>
+      verdict === "PASS" ? theme.fg("success", verdict) : theme.fg("error", verdict);
+    const segments: string[] = [];
 
-		// Whichever reviewer(s) just ran, even if `overall` is still incomplete
-		// (e.g. only --tests has run so far) — a partial run must always show its
-		// own PASS/FAIL, not just silently defer to the gap-count message.
-		if (details.roleVerdicts) {
-			for (const [role, verdict] of Object.entries(details.roleVerdicts)) {
-				segments.push(`${role}: ${colorVerdict(verdict)}`);
-			}
-		}
+    // Whichever reviewer(s) just ran, even if `overall` is still incomplete
+    // (e.g. only --tests has run so far) — a partial run must always show its
+    // own PASS/FAIL, not just silently defer to the gap-count message.
+    if (details.roleVerdicts) {
+      for (const [role, verdict] of Object.entries(details.roleVerdicts)) {
+        segments.push(`${role}: ${colorVerdict(verdict)}`);
+      }
+    }
 
-		if (details.overall) {
-			const suffix = details.overall === "PASS" && details.hasTestGaps ? " (with test gaps)" : "";
-			segments.push(`Overall: ${colorVerdict(details.overall)}${suffix}`);
-		}
+    if (details.overall) {
+      const suffix = details.overall === "PASS" && details.hasTestGaps ? " (with test gaps)" : "";
+      segments.push(`Overall: ${colorVerdict(details.overall)}${suffix}`);
+    }
 
-		if (details.showGaps) {
-			const count = details.gapsCount ?? 0;
-			segments.push(count > 0 ? theme.fg("warning", `${count} test gap(s) found`) : theme.fg("success", "no test gaps found"));
-		}
+    if (details.showGaps) {
+      const count = details.gapsCount ?? 0;
+      segments.push(
+        count > 0 ? theme.fg("warning", `${count} test gap(s) found`) : theme.fg("success", "no test gaps found"),
+      );
+    }
 
-		const text = segments.length > 0 ? segments.join("  ") : theme.fg("dim", "nothing to report");
-		return new Text(`${theme.bold("Checks: ")}${text}`, 0, 0);
-	});
+    const text = segments.length > 0 ? segments.join("  ") : theme.fg("dim", "nothing to report");
+    return new Text(`${theme.bold("Checks: ")}${text}`, 0, 0);
+  });
 
-	pi.registerShortcut(CANCEL_SHORTCUT, {
-		description: "Cancel an in-progress /checks run",
-		handler: (ctx) => {
-			if (!isReviewInProgress()) return;
-			if (!cancelReview()) return;
-			ctx.ui.setWidget(PROGRESS_WIDGET_KEY, [`checks: cancelling (${CANCEL_SHORTCUT})...`]);
-			ctx.ui.notify("checks: cancelling...", "warning");
-		},
-	});
+  pi.registerShortcut(CANCEL_SHORTCUT, {
+    description: "Cancel an in-progress /checks run",
+    handler: (ctx) => {
+      if (!isReviewInProgress()) return;
+      if (!cancelReview()) return;
+      ctx.ui.setWidget(PROGRESS_WIDGET_KEY, [`checks: cancelling (${CANCEL_SHORTCUT})...`]);
+      ctx.ui.notify("checks: cancelling...", "warning");
+    },
+  });
 
-	registerChecksCommand(pi);
+  registerChecksCommand(pi);
 }

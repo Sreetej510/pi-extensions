@@ -12,8 +12,7 @@ export class PromptManagerComponent {
     private theme: Theme,
     private done: (result: ListResult) => void,
   ) {
-    this.selectedIndex =
-      prompts.length > 0 ? Math.max(0, Math.min(initialIndex, prompts.length - 1)) : 0;
+    this.selectedIndex = prompts.length > 0 ? Math.max(0, Math.min(initialIndex, prompts.length - 1)) : 0;
   }
 
   handleInput(data: string): void {
@@ -66,34 +65,22 @@ export class PromptManagerComponent {
     const rightDashes = Math.max(0, width - TITLE.length - 3);
     lines.push(
       truncateToWidth(
-        th.fg("borderMuted", "─".repeat(3)) +
-          th.fg("accent", TITLE) +
-          th.fg("borderMuted", "─".repeat(rightDashes)),
+        th.fg("borderMuted", "─".repeat(3)) + th.fg("accent", TITLE) + th.fg("borderMuted", "─".repeat(rightDashes)),
         width,
       ),
     );
     lines.push("");
 
     if (this.prompts.length === 0) {
-      lines.push(
-        truncateToWidth(
-          "  " + th.fg("dim", "No prompts saved yet. Press [a] to add one."),
-          width,
-        ),
-      );
+      lines.push(truncateToWidth("  " + th.fg("dim", "No prompts saved yet. Press [a] to add one."), width));
     } else {
       const MAX_VISIBLE = 10;
       const half = Math.floor(MAX_VISIBLE / 2);
-      const start = Math.max(
-        0,
-        Math.min(this.selectedIndex - half, this.prompts.length - MAX_VISIBLE),
-      );
+      const start = Math.max(0, Math.min(this.selectedIndex - half, this.prompts.length - MAX_VISIBLE));
       const end = Math.min(this.prompts.length, start + MAX_VISIBLE);
 
       if (start > 0) {
-        lines.push(
-          truncateToWidth("  " + th.fg("dim", `↑ ${start} more above`), width),
-        );
+        lines.push(truncateToWidth("  " + th.fg("dim", `↑ ${start} more above`), width));
       }
 
       for (let i = start; i < end; i++) {
@@ -101,9 +88,7 @@ export class PromptManagerComponent {
         const isSel = i === this.selectedIndex;
 
         const arrow = isSel ? th.fg("accent", "❯ ") : "  ";
-        const nameStyled = isSel
-          ? th.fg("text", th.bold(p.name))
-          : th.fg("muted", p.name);
+        const nameStyled = isSel ? th.fg("text", th.bold(p.name)) : th.fg("muted", p.name);
 
         let row = arrow + nameStyled;
 
@@ -112,10 +97,7 @@ export class PromptManagerComponent {
           if (firstLine) {
             const avail = width - 2 - p.name.length - 4;
             if (avail > 8) {
-              const preview =
-                firstLine.length > avail
-                  ? firstLine.slice(0, avail - 1) + "…"
-                  : firstLine;
+              const preview = firstLine.length > avail ? firstLine.slice(0, avail - 1) + "…" : firstLine;
               row += "  " + th.fg("dim", preview);
             }
           }
@@ -125,12 +107,7 @@ export class PromptManagerComponent {
       }
 
       if (end < this.prompts.length) {
-        lines.push(
-          truncateToWidth(
-            "  " + th.fg("dim", `↓ ${this.prompts.length - end} more below`),
-            width,
-          ),
-        );
+        lines.push(truncateToWidth("  " + th.fg("dim", `↓ ${this.prompts.length - end} more below`), width));
       }
     }
 

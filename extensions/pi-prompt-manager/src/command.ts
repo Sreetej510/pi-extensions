@@ -27,10 +27,7 @@ async function addPrompt(ui: PromptUi, nameHint?: string): Promise<void> {
   const existIdx = all.findIndex((p) => p.name.toLowerCase() === name!.toLowerCase());
 
   if (existIdx >= 0) {
-    const ok = await ui.confirm(
-      "Name already exists",
-      `A prompt named "${name}" already exists. Overwrite it?`,
-    );
+    const ok = await ui.confirm("Name already exists", `A prompt named "${name}" already exists. Overwrite it?`);
     if (!ok) return;
     all[existIdx] = {
       ...all[existIdx]!,
@@ -88,8 +85,7 @@ export function registerPromptCommand(pi: ExtensionAPI): void {
 
       for (;;) {
         const r = await ui.custom<ListResult>(
-          (_tui, theme, _kb, done) =>
-            new PromptManagerComponent(all, sel, theme, done),
+          (_tui, theme, _kb, done) => new PromptManagerComponent(all, sel, theme, done),
         );
 
         if (!r || r.action === "close") break;
@@ -127,17 +123,13 @@ export function registerPromptCommand(pi: ExtensionAPI): void {
           sel = r.index;
           const p = all[r.index];
           if (!p) continue;
-          const ok = await ui.confirm(
-            "Delete prompt",
-            `Delete "${p.name}"? This cannot be undone.`,
-          );
+          const ok = await ui.confirm("Delete prompt", `Delete "${p.name}"? This cannot be undone.`);
           if (ok) {
             all = all.filter((_, i) => i !== r.index);
             sel = Math.max(0, sel - 1);
             await savePrompts(all);
             ui.notify(`"${p.name}" deleted.`, "info");
           }
-          continue;
         }
       }
     },
