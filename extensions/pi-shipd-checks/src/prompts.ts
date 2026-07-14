@@ -355,7 +355,11 @@ function formatSolverStatusLine(result: SolverRunResult): string {
   );
 }
 
-export function buildSolverComparisonPrompt(solverResults: SolverRunResult[]): string {
+export function buildSolverComparisonPrompt(
+  solverResults: SolverRunResult[],
+  testRubric: string,
+  fairnessRules: string,
+): string {
   const parts = [
     "You are a strict, skeptical behavioral-gap auditor for a coding-agent benchmark task.",
     "You are working inside a throwaway, read-only copy of a git repository (this is your current directory). " +
@@ -393,23 +397,28 @@ export function buildSolverComparisonPrompt(solverResults: SolverRunResult[]): s
     "5. Treat multiple solvers converging on the same divergent-but-passing shortcut as stronger evidence of a " +
       "real gap, not proof it's acceptable — the tests are what's under scrutiny, not majority solver behavior.",
     "",
-    "Ground rules — do not overreach:",
-    "- Every gap must be grounded in a specific requirement/sentence in `agent_prompt.md` (or an unambiguous " +
-      "behavior in `solution.patch` that directly implements a prompt requirement) — do not invent requirements " +
-      "the prompt doesn't support.",
+    ...GAP_FINDER_GROUND_RULES,
     "- Every gap must be evidenced by an actual, cited part of a specific solver's diff — do not report a gap " +
       "that is purely theoretical with no solver diff demonstrating it.",
-    "- Do not flag a solver difference if `test.patch` already exercises and would catch the wrong behavior, or if " +
-      "the difference is a defensible implementation detail the prompt doesn't mandate (naming, file layout, " +
-      "helper structure, etc. — unless the prompt or repo conventions specifically call for it).",
     "- It is fine, and expected, to submit an empty list if the solvers that passed all converged on behavior " +
       "equivalent to the reference solution with no material gaps.",
     "- Do not self-censor for volume, but do not pad the list either — only include what you can concretely " +
       "justify with cited evidence.",
     "",
+    "For reference, here is the checklist for the tests focus area (use it to calibrate what good coverage looks " +
+      "like, not as a list of gaps to report verbatim):",
+    testRubric,
+  ];
+
+  if (fairnessRules) {
+    parts.push("", "Fairness methodology (context on what a fair, in-scope requirement looks like):", fairnessRules);
+  }
+
+  parts.push(
+    "",
     `When you are done, call the \`${SOLVER_GAP_TOOL_NAME}\` tool exactly once with your final list (which may ` +
       "be empty). That tool call is your only way to report a result.",
-  ];
+  );
 
   return parts.join("\n");
 }

@@ -752,6 +752,8 @@ export function registerChecksCommand(pi: ExtensionAPI) {
               model,
               thinkingLevel: config.thinkingLevel,
               solverResults,
+              testRubric: sections.tests,
+              fairnessRules,
               cancelSignal: reviewAbort.signal,
             });
           } else {
