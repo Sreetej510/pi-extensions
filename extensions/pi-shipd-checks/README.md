@@ -76,9 +76,13 @@ in `--all` since it's the most expensive stage (several full coding-agent runs w
 - **Reviewer**: model and thinking level used by the focus reviewers, gap-finders, gap-validator,
   and the solver-gap-finder's comparison reviewer.
 - **Solver Gap Finder**: model, thinking level, per-agent timeout in minutes (default 30, clamped to
-  1–120), and number of parallel solver agents (default 3, clamped to 1–10) — used only by the
-  TDD-style solver agents spawned by `--solver-gap-finder`. These write code and run shell commands
-  (a heavier job than the read-only reviewers), so you may want a stronger coding model here.
+  1–120), number of parallel solver agents (default 3, clamped to 1–10), and a "Save artifacts"
+  on/off toggle (default on) — used only by the TDD-style solver agents spawned by
+  `--solver-gap-finder`. These write code and run shell commands (a heavier job than the
+  read-only reviewers), so you may want a stronger coding model here. Turning "Save artifacts"
+  off skips persisting `trajectory.json`/`solution.patch`/test output to
+  `.pi/shipd-checks/<run-id>/` for each run — useful if you don't need to inspect solver runs
+  after the fact and want to save disk space.
 
 Use ↑/↓ to move between rows, Enter/Space to open a model picker or cycle a value in place, and
 `Ctrl+S` to save and exit (Esc cancels without discarding already-saved changes). Everything is

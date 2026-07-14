@@ -21,6 +21,8 @@ export const SOLVER_GAP_SOLVER_COUNT_MIN = 1;
 export const SOLVER_GAP_SOLVER_COUNT_MAX = 5;
 export const SOLVER_GAP_DEFAULT_SOLVER_COUNT = 3;
 
+export const SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS = true;
+
 /**
  * Mirrors `getSupportedThinkingLevels` from `@earendil-works/pi-ai` (not part of
  * pi-coding-agent's public export surface, so re-implemented here): a level is
@@ -67,6 +69,8 @@ export function loadSolverGapConfig(): SolverGapConfig | null {
     ...solverGap,
     timeoutMinutes: solverGap.timeoutMinutes > 0 ? solverGap.timeoutMinutes : SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
     solverCount: solverGap.solverCount > 0 ? solverGap.solverCount : SOLVER_GAP_DEFAULT_SOLVER_COUNT,
+    saveArtifacts:
+      typeof solverGap.saveArtifacts === "boolean" ? solverGap.saveArtifacts : SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
   };
 }
 
