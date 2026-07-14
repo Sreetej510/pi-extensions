@@ -16,6 +16,8 @@ export interface SolverGapConfig {
   timeoutMinutes: number;
   /** Number of parallel solver agents to run. */
   solverCount: number;
+  /** Whether to persist trajectory.json/solution.patch/test output to `.pi/shipd-checks/<runId>/` per run. */
+  saveArtifacts: boolean;
 }
 
 /** Single combined `checks-config.json`: reviewer settings at the top level, solver-gap-finder settings nested. */

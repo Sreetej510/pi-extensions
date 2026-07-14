@@ -13,6 +13,7 @@ import {
   loadChecksConfig,
   loadEnabledModelRefs,
   loadSolverGapConfig,
+  SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
   SOLVER_GAP_DEFAULT_SOLVER_COUNT,
   SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
   SOLVER_GAP_SOLVER_COUNT_MAX,
@@ -154,6 +155,7 @@ const DEFAULT_SOLVER_GAP: SolverGapConfig = {
   thinkingLevel: "off",
   timeoutMinutes: SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
   solverCount: SOLVER_GAP_DEFAULT_SOLVER_COUNT,
+  saveArtifacts: SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
 };
 
 type ConfigRowId =
@@ -162,7 +164,8 @@ type ConfigRowId =
   | "solvergap-model"
   | "solvergap-thinking"
   | "solvergap-timeout"
-  | "solvergap-solver-count";
+  | "solvergap-solver-count"
+  | "solvergap-save-artifacts";
 
 interface ConfigRow {
   id: ConfigRowId;
@@ -235,6 +238,14 @@ function buildConfigRows(
         { length: SOLVER_GAP_SOLVER_COUNT_MAX - SOLVER_GAP_SOLVER_COUNT_MIN + 1 },
         (_, i) => `${SOLVER_GAP_SOLVER_COUNT_MIN + i}`,
       ),
+    },
+    {
+      id: "solvergap-save-artifacts",
+      section: "Solver Gap Finder",
+      label: "Save artifacts",
+      value: solverGap.saveArtifacts ? "on" : "off",
+      kind: "cycle",
+      values: ["on", "off"],
     },
   ];
 }
@@ -333,6 +344,8 @@ class ConfigMenuComponent {
         saveChecksConfig({ ...current, solverGap: { ...solverGap, timeoutMinutes: Number.parseInt(nextValue, 10) } });
       } else if (row.id === "solvergap-solver-count") {
         saveChecksConfig({ ...current, solverGap: { ...solverGap, solverCount: Number.parseInt(nextValue, 10) } });
+      } else if (row.id === "solvergap-save-artifacts") {
+        saveChecksConfig({ ...current, solverGap: { ...solverGap, saveArtifacts: nextValue === "on" } });
       }
       this.refresh();
       this.onCycleSaved();
@@ -702,15 +715,17 @@ export function registerChecksCommand(pi: ExtensionAPI) {
                 status: outcome === "done" ? "ok" : outcome,
                 durationMs: Date.now() - startedAt,
               });
-              const artifactsDir = saveSolverArtifacts({
-                repoDir: ctx.cwd,
-                runId,
-                index,
-                trajectory,
-                solutionPatch: result.diff,
-                testOutputXmlPath,
-                testOutputTail: result.testOutputTail,
-              });
+              const artifactsDir = solverGapConfig.saveArtifacts
+                ? saveSolverArtifacts({
+                    repoDir: ctx.cwd,
+                    runId,
+                    index,
+                    trajectory,
+                    solutionPatch: result.diff,
+                    testOutputXmlPath,
+                    testOutputTail: result.testOutputTail,
+                  })
+                : undefined;
               completed += 1;
               ctx.ui.setWidget(
                 PROGRESS_WIDGET_KEY,
