@@ -226,6 +226,8 @@ export async function runSolverComparisonReviewer(opts: {
   model: unknown;
   thinkingLevel: ThinkingLevel;
   solverResults: SolverRunResult[];
+  testRubric: string;
+  fairnessRules: string;
   cancelSignal: AbortSignal;
 }): Promise<GapStageResult<SolverGap>> {
   const capture: { gaps?: SolverGap[] } = {};
@@ -241,7 +243,7 @@ export async function runSolverComparisonReviewer(opts: {
 
   try {
     const outcome = await raceAgentTurn(async () => {
-      await session.prompt(buildSolverComparisonPrompt(opts.solverResults));
+      await session.prompt(buildSolverComparisonPrompt(opts.solverResults, opts.testRubric, opts.fairnessRules));
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
