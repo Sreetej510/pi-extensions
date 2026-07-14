@@ -43,6 +43,7 @@
  *   /checks --tests       run only the tests reviewer
  *   /checks --solution    run only the solution reviewer
  *   /checks --gap-finder  run positive + negative gap finders, then validator
+ *   /checks --solver-gap-finder  run several TDD solver agents, then compare their solutions to find gaps
  *   /checks --config      set the reviewer model and thinking level
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.
  *
@@ -63,9 +64,11 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Key, Text } from "@earendil-works/pi-tui";
+import { Container, Key, Spacer, Text } from "@earendil-works/pi-tui";
 import { registerChecksCommand } from "./command.js";
 import { PROGRESS_WIDGET_KEY } from "./progress.js";
+import type { SolverSummaryDetail } from "./report.js";
+import { formatDuration } from "./report.js";
 import { cancelReview, isReviewInProgress } from "./state.js";
 import type { Verdict } from "./types.js";
 
@@ -78,35 +81,73 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
     gapsCount?: number;
     roleVerdicts?: Record<string, Verdict>;
     showGaps?: boolean;
+    showSolverGaps?: boolean;
+    solverDetails?: SolverSummaryDetail[];
+    solverGapsCount?: number;
   }>("shipd_checks_report", (message, _options, theme) => {
     const details = message.details ?? {};
     const colorVerdict = (verdict: Verdict) =>
       verdict === "PASS" ? theme.fg("success", verdict) : theme.fg("error", verdict);
-    const segments: string[] = [];
 
-    // Whichever reviewer(s) just ran, even if `overall` is still incomplete
-    // (e.g. only --tests has run so far) — a partial run must always show its
-    // own PASS/FAIL, not just silently defer to the gap-count message.
-    if (details.roleVerdicts) {
+    const container = new Container();
+    container.addChild(new Text(theme.bold(theme.fg("accent", "Checks")), 0, 0));
+
+    let wroteSection = false;
+    const addLine = (line: string) => {
+      container.addChild(new Text(line, 0, 0));
+      wroteSection = true;
+    };
+
+    // Whichever reviewer(s) just ran — a partial run (e.g. only --tests) always shows its own
+    // PASS/FAIL, and `overall` only appears when this invocation ran all 3 focus reviewers.
+    if (details.roleVerdicts && Object.keys(details.roleVerdicts).length > 0) {
       for (const [role, verdict] of Object.entries(details.roleVerdicts)) {
-        segments.push(`${role}: ${colorVerdict(verdict)}`);
+        const icon = verdict === "PASS" ? theme.fg("success", "✓") : theme.fg("error", "✗");
+        addLine(`  ${icon} ${theme.bold(role)}: ${colorVerdict(verdict)}`);
       }
-    }
-
-    if (details.overall) {
-      const suffix = details.overall === "PASS" && details.hasTestGaps ? " (with test gaps)" : "";
-      segments.push(`Overall: ${colorVerdict(details.overall)}${suffix}`);
+      if (details.overall) {
+        const suffix = details.overall === "PASS" && details.hasTestGaps ? " (with test gaps)" : "";
+        addLine(`  ${theme.bold("Overall:")} ${colorVerdict(details.overall)}${suffix}`);
+      }
     }
 
     if (details.showGaps) {
       const count = details.gapsCount ?? 0;
-      segments.push(
-        count > 0 ? theme.fg("warning", `${count} test gap(s) found`) : theme.fg("success", "no test gaps found"),
+      addLine(
+        count > 0
+          ? theme.fg("warning", `  ⚠ ${count} test gap(s) found`)
+          : theme.fg("success", "  ✓ no test gaps found"),
       );
     }
 
-    const text = segments.length > 0 ? segments.join("  ") : theme.fg("dim", "nothing to report");
-    return new Text(`${theme.bold("Checks: ")}${text}`, 0, 0);
+    if (details.showSolverGaps) {
+      const solvers = details.solverDetails ?? [];
+      const passCount = solvers.filter((s) => s.passed).length;
+      const gapsCount = details.solverGapsCount ?? 0;
+
+      container.addChild(new Spacer(1));
+      addLine(theme.bold(theme.fg("accent", "Solver gap finder")));
+      for (const s of solvers) {
+        const statusIcon = s.passed ? theme.fg("success", "✓") : theme.fg("error", "✗");
+        const statusLabel = s.passed ? "passed" : s.status === "ok" ? "failed tests" : s.status;
+        addLine(`  ${statusIcon} Solver ${s.index}: ${statusLabel} (${formatDuration(s.durationMs)})`);
+      }
+      const passSummary =
+        passCount === solvers.length && solvers.length > 0
+          ? theme.fg("success", `${passCount}/${solvers.length} solvers passed`)
+          : theme.fg("warning", `${passCount}/${solvers.length} solvers passed`);
+      const gapsSummary =
+        gapsCount > 0
+          ? theme.fg("warning", `${gapsCount} behavioral gap(s) found`)
+          : theme.fg("success", "no behavioral gaps found");
+      addLine(`  ${passSummary}, ${gapsSummary}`);
+    }
+
+    if (!wroteSection) {
+      container.addChild(new Text(theme.fg("dim", "  nothing to report"), 0, 0));
+    }
+
+    return container;
   });
 
   pi.registerShortcut(CANCEL_SHORTCUT, {

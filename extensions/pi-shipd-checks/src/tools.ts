@@ -6,11 +6,12 @@
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ReviewReport, TestGapCandidate, TestGapFinal } from "./types.js";
+import type { ReviewReport, SolverGap, TestGapCandidate, TestGapFinal } from "./types.js";
 
 export const REPORT_TOOL_NAME = "submit_review_report";
 export const GAP_FINDER_TOOL_NAME = "submit_test_gap_candidates";
 export const GAP_VALIDATOR_TOOL_NAME = "submit_filtered_test_gaps";
+export const SOLVER_GAP_TOOL_NAME = "submit_solver_gaps";
 
 // ── Reviewer report tool ─────────────────────────────────────────────
 
@@ -143,6 +144,56 @@ export function createGapValidatorTool(capture: {
       capture.gaps = gaps;
       return {
         content: [{ type: "text", text: `Confirmed ${gaps.length} gap(s) after filtering` }],
+        details: undefined,
+      };
+    },
+  };
+}
+
+// ── Solver-gap-finder comparison reviewer tool ──────────────────────────
+
+const solverGapToolParams = Type.Object({
+  gaps: Type.Array(
+    Type.Object({
+      description: Type.String({
+        description:
+          "The specific behavioral gap: a way one or more solver's diff differs materially from what " +
+          "agent_prompt.md/solution.patch require, despite that solver passing `./test.sh new`.",
+      }),
+      justification: Type.String({
+        description:
+          "Why this is a genuine requirement from agent_prompt.md or solution.patch (cite the specific " +
+          "requirement/line) that the solver's diff misses, contradicts, or diverges from — and why the current " +
+          "tests fail to catch that divergence.",
+      }),
+      evidence: Type.String({
+        description:
+          "Which solver(s) (by index) exhibit this, and the specific part of their diff that grounds the gap.",
+      }),
+    }),
+    {
+      description:
+        "Concrete, diff-grounded behavioral gaps — cases where a passing solver's materially different approach " +
+        "reveals that `test.sh new` under-specifies a real requirement. Use an empty array if the solvers " +
+        "converged on equivalent behavior; do not manufacture gaps just to report something.",
+    },
+  ),
+});
+
+export function createSolverGapTool(capture: { gaps?: SolverGap[] }): ToolDefinition<typeof solverGapToolParams> {
+  return {
+    name: SOLVER_GAP_TOOL_NAME,
+    label: "Submit Solver Gaps",
+    description:
+      "Submit your final list of behavioral gaps found by comparing the solver diffs against the real " +
+      "solution.patch. This is the ONLY way to report your result — call it exactly once, as your " +
+      "last action, after you have finished comparing every solver.",
+    parameters: solverGapToolParams,
+    async execute(_toolCallId, params) {
+      const gaps = params.gaps ?? [];
+      capture.gaps = gaps;
+      return {
+        content: [{ type: "text", text: `Recorded ${gaps.length} solver gap(s)` }],
         details: undefined,
       };
     },
