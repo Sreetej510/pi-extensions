@@ -1,13 +1,9 @@
-/**
- * All prompt text sent to the reviewer / gap-finder / gap-validator agents.
- * Keeping this in one file means future prompt tweaks never require touching
- * agents.ts or command.ts.
- */
+/** All prompt text sent to the reviewer / gap-finder / gap-validator / solver-gap-finder agents. */
 
-import { GAP_FINDER_TOOL_NAME, GAP_VALIDATOR_TOOL_NAME, REPORT_TOOL_NAME } from "./tools.js";
-import type { ReviewerRole, ReviewerRoleKey, TestGapCandidate } from "./types.js";
+import { SOLVER_GAP_SOLUTIONS_DIRNAME } from "./solvergap.js";
+import { GAP_FINDER_TOOL_NAME, GAP_VALIDATOR_TOOL_NAME, REPORT_TOOL_NAME, SOLVER_GAP_TOOL_NAME } from "./tools.js";
+import type { ReviewerRole, ReviewerRoleKey, SolverRunResult, TestGapCandidate } from "./types.js";
 
-/** Per-role instructions on what to look at and, for `tests`/`solution`, mandatory extra checks. */
 const ROLE_FOCUS: Record<ReviewerRoleKey, string> = {
   description:
     "Focus area: the task description in `agent_prompt.md`. Judge it strictly against rubric items P1-P5 below. " +
@@ -318,6 +314,102 @@ export function buildGapValidatorPrompt(
     `When you are done, call the \`${GAP_VALIDATOR_TOOL_NAME}\` tool exactly once with your final filtered list ` +
       "(which may be empty). That tool call is your only way to report a result.",
   );
+
+  return parts.join("\n");
+}
+
+// ── Solver gap finder: TDD solver + comparison reviewer ────────────
+
+export function buildSolverPrompt(): string {
+  return [
+    "You are a software engineer practicing test-driven development in a real git repository (this is your " +
+      "current directory).",
+    "`agent_prompt.md` in the repo root describes your task. Tests for it already exist and are currently " +
+      "failing — that's normal in TDD, the tests come first.",
+    "",
+    "Goal: make all of the new tests pass.",
+    "1. Read `agent_prompt.md`.",
+    "2. Run `bash test.sh new` to see the failures and what the tests expect.",
+    "3. Read the failing tests — they are the precise spec — and the surrounding repo code for conventions and " +
+      "utilities to reuse.",
+    "4. Implement the code needed to satisfy both `agent_prompt.md` and the tests, matching repo style.",
+    "5. Re-run `bash test.sh new` and iterate until everything passes, or you're confident you can't progress further.",
+    "",
+    "Rules:",
+    "- Do NOT modify the test files or `test.sh`. Only change application/library code.",
+    "- You have shell access — install any dependencies you need.",
+    "- Prefer the smallest, most direct change that satisfies the tests and `agent_prompt.md` using existing repo patterns.",
+  ].join("\n");
+}
+
+function formatSolverStatusLine(result: SolverRunResult): string {
+  const statusLine =
+    result.status === "ok"
+      ? result.passed
+        ? "PASSED all new tests"
+        : "did NOT pass all new tests"
+      : `did not complete normally (status: ${result.status})`;
+  return (
+    `- Solver ${result.index} — ${statusLine} — solution.diff / test_output.txt in ` +
+    `\`${SOLVER_GAP_SOLUTIONS_DIRNAME}/solver_${result.index}/\``
+  );
+}
+
+export function buildSolverComparisonPrompt(solverResults: SolverRunResult[]): string {
+  const parts = [
+    "You are a strict, skeptical behavioral-gap auditor for a coding-agent benchmark task.",
+    "You are working inside a throwaway, read-only copy of a git repository (this is your current directory). " +
+      "You have access to read/grep/find/ls tools only — you cannot execute code, apply patches, or edit files.",
+    "The repo root contains `agent_prompt.md` (the real task description), `solution.patch` (a unified diff of " +
+      "the real golden/reference solution), and `test.patch` (a unified diff adding the hidden tests).",
+    "",
+    "Separately, several coding agents ('solvers') were each given the same `agent_prompt.md` plus the failing " +
+      "tests from `test.patch` — but never `solution.patch` — and asked to implement the task TDD-style, iterating " +
+      "with real shell access until the tests passed or they gave up. Each solver's diff and full `test.sh new` " +
+      "output — captured and verified independently by the harness, not self-reported — is saved under " +
+      `\`${SOLVER_GAP_SOLUTIONS_DIRNAME}/solver_<index>/\` (\`solution.diff\`, \`test_output.txt\`), with a ` +
+      `\`${SOLVER_GAP_SOLUTIONS_DIRNAME}/manifest.json\` summary. Use read/grep/find/ls to open exactly what you ` +
+      "need. Status summary:",
+    "",
+    ...solverResults.map(formatSolverStatusLine),
+    "",
+    "Your job: read `agent_prompt.md` and `solution.patch` carefully, then read each PASSED solver's " +
+      "`solution.diff` to find concrete BEHAVIORAL GAPS — cases where a solver took a materially different " +
+      "approach from what `agent_prompt.md` requires or `solution.patch` implements, that solver's tests still " +
+      "PASSED, and the difference reveals a real requirement that `test.patch` fails to actually enforce.",
+    "",
+    "How to work:",
+    "1. Read `agent_prompt.md` sentence by sentence and note every distinct requirement, constraint, and " +
+      "prohibition.",
+    "2. Read `solution.patch` to see how the reference solution satisfies those requirements.",
+    "3. For each solver that PASSED, read its `solution.diff` and compare it against the reference approach. " +
+      "Look specifically for places where the solver's code takes a shortcut, ignores a constraint, mishandles " +
+      "an edge case, or omits a side effect that `agent_prompt.md` calls for or `solution.patch` implements — " +
+      "yet the tests didn't catch it.",
+    "4. A solver that FAILED is not itself a gap — but if you can see from its `solution.diff` that it was " +
+      "heading toward a plausible-but-wrong implementation of some requirement, and nothing in `test.patch` " +
+      "would have caught that wrong implementation even if it had otherwise passed, that is still worth " +
+      "surfacing; use its `test_output.txt` for extra context if useful.",
+    "5. Treat multiple solvers converging on the same divergent-but-passing shortcut as stronger evidence of a " +
+      "real gap, not proof it's acceptable — the tests are what's under scrutiny, not majority solver behavior.",
+    "",
+    "Ground rules — do not overreach:",
+    "- Every gap must be grounded in a specific requirement/sentence in `agent_prompt.md` (or an unambiguous " +
+      "behavior in `solution.patch` that directly implements a prompt requirement) — do not invent requirements " +
+      "the prompt doesn't support.",
+    "- Every gap must be evidenced by an actual, cited part of a specific solver's diff — do not report a gap " +
+      "that is purely theoretical with no solver diff demonstrating it.",
+    "- Do not flag a solver difference if `test.patch` already exercises and would catch the wrong behavior, or if " +
+      "the difference is a defensible implementation detail the prompt doesn't mandate (naming, file layout, " +
+      "helper structure, etc. — unless the prompt or repo conventions specifically call for it).",
+    "- It is fine, and expected, to submit an empty list if the solvers that passed all converged on behavior " +
+      "equivalent to the reference solution with no material gaps.",
+    "- Do not self-censor for volume, but do not pad the list either — only include what you can concretely " +
+      "justify with cited evidence.",
+    "",
+    `When you are done, call the \`${SOLVER_GAP_TOOL_NAME}\` tool exactly once with your final list (which may ` +
+      "be empty). That tool call is your only way to report a result.",
+  ];
 
   return parts.join("\n");
 }

@@ -3,11 +3,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellExecutable } from "./config.js";
 
-function toSlashPath(p: string): string {
+export function toSlashPath(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
-function bashQuote(value: string): string {
+export function bashQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 

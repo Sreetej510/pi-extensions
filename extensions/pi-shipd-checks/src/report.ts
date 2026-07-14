@@ -6,7 +6,15 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { ROLES } from "./roles.js";
-import type { ChecksConfig, ReviewerRole, ReviewReport, TestGapFinal, Verdict } from "./types.js";
+import type {
+  ChecksConfig,
+  ReviewerRole,
+  ReviewReport,
+  SolverGap,
+  SolverRunResult,
+  TestGapFinal,
+  Verdict,
+} from "./types.js";
 
 export const REQUIRED_FILES = ["agent_prompt.md", "solution.patch", "test.patch"] as const;
 
@@ -45,6 +53,11 @@ export interface MergeReportInput {
   positiveGapFinderStatus: string;
   negativeGapFinderStatus: string;
   gapFilterStatus: string;
+  runSolverGapFinder: boolean;
+  solverResults: SolverRunResult[];
+  solverGaps: SolverGap[];
+  solverGapAnalysisIncomplete: boolean;
+  solverComparisonStatus: string;
 }
 
 /** Merges this run's results into the prior report, keeping any roles/gaps not touched this time. */
@@ -60,6 +73,11 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
     positiveGapFinderStatus,
     negativeGapFinderStatus,
     gapFilterStatus,
+    runSolverGapFinder,
+    solverResults,
+    solverGaps,
+    solverGapAnalysisIncomplete,
+    solverComparisonStatus,
   } = input;
 
   const merged: Record<string, unknown> = {
@@ -76,9 +94,6 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
         : {};
     const mergedReports = { ...existingReports, ...byRole };
     merged.reports = mergedReports;
-    // `overall` only reflects a confident PASS/FAIL once all 3 focus
-    // reviewers have actually run (possibly across separate invocations
-    // of --description/--tests/--solution) — otherwise it's incomplete.
     if (ROLES.every((role) => mergedReports[role.key])) {
       merged.overall = ROLES.every((role) => mergedReports[role.key].verdict === "PASS") ? "PASS" : "FAIL";
     } else {
@@ -95,7 +110,38 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
     }
   }
 
+  if (runSolverGapFinder) {
+    merged.solverRunSummary = solverResults.map((r) => ({
+      index: r.index,
+      status: r.status,
+      passed: r.passed,
+      durationMs: r.durationMs,
+      artifactsDir: r.artifactsDir,
+    }));
+    merged.solverGaps = solverGaps;
+    if (solverGapAnalysisIncomplete) {
+      merged.solverGapAnalysisNote = `Solver-gap analysis did not fully complete (comparison reviewer: ${solverComparisonStatus}); solverGaps may be incomplete.`;
+    } else {
+      delete merged.solverGapAnalysisNote;
+    }
+  }
+
   return merged;
+}
+
+/** `m` `s` breakdown of a duration, e.g. `2m 34s` or `48s`. */
+export function formatDuration(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+export interface SolverSummaryDetail {
+  index: number;
+  status: SolverRunResult["status"];
+  passed: boolean;
+  durationMs: number;
 }
 
 export interface RunSummary {
@@ -106,31 +152,33 @@ export interface RunSummary {
     gapsCount: number;
     roleVerdicts?: Record<string, Verdict>;
     showGaps: boolean;
+    showSolverGaps: boolean;
+    solverDetails: SolverSummaryDetail[];
+    solverGapsCount: number;
   };
 }
 
-/** Builds the one-line chat summary + renderer details for this run's results. */
+/** Builds the chat summary + renderer details for this run's results — only sections actually run this invocation are populated. */
 export function buildRunSummary(opts: {
   merged: Record<string, unknown>;
   runReviewers: boolean;
   activeRoles: ReviewerRole[];
   byRole: Record<string, ReviewReport>;
   runGapStages: boolean;
+  runSolverGapFinder: boolean;
 }): RunSummary {
-  const { merged, runReviewers, activeRoles, byRole, runGapStages } = opts;
+  const { merged, runReviewers, activeRoles, byRole, runGapStages, runSolverGapFinder } = opts;
 
-  const overall = typeof merged.overall === "string" ? (merged.overall as Verdict) : undefined;
   const gapsCount = Array.isArray(merged.testGaps) ? merged.testGaps.length : 0;
 
-  // Always surface whichever reviewer(s) actually just ran, even when
-  // `overall` is still incomplete (e.g. --tests alone, before --description
-  // and --solution have run) — a partial run must never look like it
-  // produced no PASS/FAIL information at all.
   const roleVerdicts: Record<string, Verdict> | undefined = runReviewers
     ? Object.fromEntries(
         activeRoles.filter((role) => byRole[role.key]).map((role) => [role.key, byRole[role.key].verdict]),
       )
     : undefined;
+  // Only surface `overall` when this run actually included the reviewers — a solver-gap-finder-only
+  // invocation shouldn't resurface a PASS/FAIL verdict from a previous, unrelated run merged into the same report.
+  const overall = runReviewers && typeof merged.overall === "string" ? (merged.overall as Verdict) : undefined;
 
   const summaryParts: string[] = [];
   if (roleVerdicts) {
@@ -144,6 +192,20 @@ export function buildRunSummary(opts: {
     summaryParts.push(gapsCount > 0 ? `${gapsCount} test gap(s) found` : "no test gaps found");
   }
 
+  const solverDetails: SolverSummaryDetail[] = runSolverGapFinder
+    ? (Array.isArray(merged.solverRunSummary) ? (merged.solverRunSummary as SolverSummaryDetail[]) : []).map((s) => ({
+        index: s.index,
+        status: s.status,
+        passed: s.passed,
+        durationMs: s.durationMs ?? 0,
+      }))
+    : [];
+  const solverPassCount = solverDetails.filter((s) => s.passed).length;
+  const solverGapsCount = Array.isArray(merged.solverGaps) ? merged.solverGaps.length : 0;
+  if (runSolverGapFinder) {
+    summaryParts.push(`${solverPassCount}/${solverDetails.length} solvers passed, ${solverGapsCount} gap(s) found`);
+  }
+
   return {
     content: `Checks: ${summaryParts.join("  |  ")}`,
     details: {
@@ -152,6 +214,9 @@ export function buildRunSummary(opts: {
       gapsCount,
       roleVerdicts,
       showGaps: runGapStages,
+      showSolverGaps: runSolverGapFinder,
+      solverDetails,
+      solverGapsCount,
     },
   };
 }

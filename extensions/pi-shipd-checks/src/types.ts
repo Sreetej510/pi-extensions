@@ -8,10 +8,22 @@ export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "m
 
 export type Verdict = "PASS" | "FAIL";
 
+/** Model/thinking-level settings for the solver-gap-finder's solver agents (they write code + run shell, a heavier job than the read-only reviewers), plus their own timeout/parallelism knobs. Kept nested under `solverGap` in the same config file rather than a separate one. */
+export interface SolverGapConfig {
+  provider: string;
+  modelId: string;
+  thinkingLevel: ThinkingLevel;
+  timeoutMinutes: number;
+  /** Number of parallel solver agents to run. */
+  solverCount: number;
+}
+
+/** Single combined `checks-config.json`: reviewer settings at the top level, solver-gap-finder settings nested. */
 export interface ChecksConfig {
   provider: string;
   modelId: string;
   thinkingLevel: ThinkingLevel;
+  solverGap?: SolverGapConfig;
 }
 
 export interface ReviewReport {
@@ -55,4 +67,25 @@ export interface CommandOption {
   value: string;
   label: string;
   description: string;
+}
+
+/** Outcome of one solver-gap-finder solver agent (writes code + runs shell; sees agent_prompt.md + test.patch, never solution.patch). */
+export interface SolverRunResult {
+  index: number;
+  status: "ok" | "timedOut" | "cancelled" | "error" | "patchFailed";
+  passed: boolean;
+  diff: string;
+  testOutputTail: string;
+  /** Wall-clock time the solver agent + verification took, in ms. */
+  durationMs: number;
+  /** Dir under `.pi/shipd-checks/<runId>/solver_<index>/` where trajectory.json/solution.patch/test output were saved, if any. */
+  artifactsDir?: string;
+}
+
+/** A behavioral gap surfaced by comparing solver diffs against the real prompt/solution. */
+export interface SolverGap {
+  description: string;
+  justification: string;
+  /** Which solver(s) and what part of their diff grounds this gap. */
+  evidence: string;
 }
