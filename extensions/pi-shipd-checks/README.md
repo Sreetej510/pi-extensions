@@ -52,15 +52,16 @@ The two finder flags are additive/combinable; `--config` must be used alone.
 
 ## Configuration
 
-`/checks --config` lets you choose which setting to change:
+`/checks --config` opens the row-based settings menu with two sections:
 
-- **Reviewer model**: model and thinking level used by the behavioral gap finders, validator,
-  and solver-solution comparison agent.
-- **Solver model**: model and thinking level used by the TDD solver agents. Configure the
-  reviewer model first.
+- **Reviewer**: model and thinking level used by the behavioral gap finders, validator, and
+  solver-solution comparison agent.
+- **Solver**: model and thinking level for TDD solver agents, plus their timeout, parallel solver
+  count, and artifact-saving setting.
 
-Settings are saved to `~/.pi/agent/checks-config.json`; solver settings are nested under
-`solverGap`.
+Use ↑/↓ to select a row and Enter/Space to change it. The currently selected model is shown first
+in its picker. Settings are saved to `~/.pi/agent/checks-config.json`; solver settings are nested
+under `solverGap`.
 
 ## Install
 
