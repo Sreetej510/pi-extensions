@@ -4,7 +4,9 @@ import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
+import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { Container, Key, matchesKey, Spacer, Text } from "@earendil-works/pi-tui";
 import { runGapFinder, runGapValidator, runSolverAgent, runSolverComparisonReviewer } from "./agents.js";
 import {
   getSupportedThinkingLevels,
@@ -14,6 +16,10 @@ import {
   SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
   SOLVER_GAP_DEFAULT_SOLVER_COUNT,
   SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
+  SOLVER_GAP_SOLVER_COUNT_MAX,
+  SOLVER_GAP_SOLVER_COUNT_MIN,
+  SOLVER_GAP_TIMEOUT_MAX_MINUTES,
+  SOLVER_GAP_TIMEOUT_MIN_MINUTES,
   saveChecksConfig,
   splitProviderModel,
 } from "./config.js";
@@ -70,75 +76,329 @@ function getArgumentCompletions(prefix: string) {
   return matches.length ? matches.map((option) => ({ ...option, value: `${base}${option.value}` })) : null;
 }
 
-async function pickModel(ctx: ExtensionCommandContext, label: string, current?: { provider: string; modelId: string }) {
-  const models = ctx.modelRegistry.getAll();
-  const options = loadEnabledModelRefs()
-    .map((ref) => {
-      const parsed = splitProviderModel(ref);
-      if (!parsed) return null;
-      const model = models.find((item) => item.provider === parsed.provider && item.id === parsed.modelId);
-      return {
-        ref,
-        parsed,
-        label: `${model?.name ?? ref} (${ref})${current?.provider === parsed.provider && current.modelId === parsed.modelId ? " [current]" : ""}`,
-      };
-    })
-    .filter((item): item is NonNullable<typeof item> => item !== null);
-  if (!options.length) {
+/** Model-only picker (no thinking-level step) for the config menu's model rows; thinking level is a separate cycling row. */
+async function pickModelOnly(
+  ctx: ExtensionCommandContext,
+  existingConfig: { provider: string; modelId: string } | null,
+  selectLabel: string,
+): Promise<{ provider: string; modelId: string } | null> {
+  const refs = loadEnabledModelRefs();
+  if (refs.length === 0) {
     ctx.ui.notify("No enabledModels configured in settings.json.", "error");
     return null;
   }
-  const selected = await ctx.ui.select(
-    label,
-    options.map((option) => option.label),
+  const available = ctx.modelRegistry.getAll();
+  const labeled = refs
+    .map((ref) => {
+      const parsed = splitProviderModel(ref);
+      if (!parsed) return null;
+      const found = available.find((m) => m.provider === parsed.provider && m.id === parsed.modelId);
+      const isCurrent = existingConfig?.provider === parsed.provider && existingConfig?.modelId === parsed.modelId;
+      const base = found ? `${found.name} (${ref})` : ref;
+      return { ref, parsed, display: isCurrent ? `${base} [current]` : base, isCurrent };
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null);
+
+  if (labeled.length === 0) {
+    ctx.ui.notify("Could not resolve any enabledModels entries.", "error");
+    return null;
+  }
+
+  const orderedModels = [...labeled].sort((a, b) => (a.isCurrent === b.isCurrent ? 0 : a.isCurrent ? -1 : 1));
+  const choice = await ctx.ui.select(
+    selectLabel,
+    orderedModels.map((l) => l.display),
   );
-  return options.find((option) => option.label === selected)?.parsed ?? null;
+  if (!choice) return null;
+  const selected = labeled.find((l) => l.display === choice);
+  if (!selected) return null;
+  return { provider: selected.parsed.provider, modelId: selected.parsed.modelId };
 }
 
-async function runConfigFlow(ctx: ExtensionCommandContext) {
-  const existing = loadChecksConfig();
-  const target = await ctx.ui.select("Configure checks", ["Reviewer model", "Solver model"]);
-  if (!target) return;
+/** Supported thinking levels for the model currently saved at `provider`/`modelId`, or just `["off"]` if unresolvable. */
+function supportedThinkingLevelsFor(ctx: ExtensionCommandContext, provider: string, modelId: string): ThinkingLevel[] {
+  const model = ctx.modelRegistry.getAll().find((m) => m.provider === provider && m.id === modelId);
+  return getSupportedThinkingLevels(model);
+}
 
-  if (target === "Reviewer model") {
-    const reviewer = await pickModel(ctx, "Select reviewer model", existing ?? undefined);
-    if (!reviewer) return;
-    const levels = getSupportedThinkingLevels(ctx.modelRegistry.find(reviewer.provider, reviewer.modelId));
-    const thinkingLevel = (await ctx.ui.select("Select reviewer thinking level", levels)) as ThinkingLevel | undefined;
-    if (!thinkingLevel) return;
-    saveChecksConfig({
-      provider: reviewer.provider,
-      modelId: reviewer.modelId,
-      thinkingLevel,
-      solverGap: existing?.solverGap,
-    });
-    ctx.ui.notify("Reviewer model saved.", "info");
-    return;
-  }
+const DEFAULT_SOLVER_GAP: SolverGapConfig = {
+  provider: "",
+  modelId: "",
+  thinkingLevel: "off",
+  timeoutMinutes: SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
+  solverCount: SOLVER_GAP_DEFAULT_SOLVER_COUNT,
+  saveArtifacts: SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
+};
 
-  if (!existing) {
-    ctx.ui.notify("Configure the reviewer model first.", "warning");
-    return;
-  }
-  const solver = await pickModel(ctx, "Select solver model", existing.solverGap);
-  if (!solver) return;
-  const levels = getSupportedThinkingLevels(ctx.modelRegistry.find(solver.provider, solver.modelId));
-  const thinkingLevel = (await ctx.ui.select("Select solver thinking level", levels)) as ThinkingLevel | undefined;
-  if (!thinkingLevel) return;
-  saveChecksConfig({
-    provider: existing.provider,
-    modelId: existing.modelId,
-    thinkingLevel: existing.thinkingLevel,
-    solverGap: {
-      provider: solver.provider,
-      modelId: solver.modelId,
-      thinkingLevel,
-      timeoutMinutes: existing.solverGap?.timeoutMinutes ?? SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
-      solverCount: existing.solverGap?.solverCount ?? SOLVER_GAP_DEFAULT_SOLVER_COUNT,
-      saveArtifacts: existing.solverGap?.saveArtifacts ?? SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
+type ConfigRowId =
+  | "reviewer-model"
+  | "reviewer-thinking"
+  | "solvergap-model"
+  | "solvergap-thinking"
+  | "solvergap-timeout"
+  | "solvergap-solver-count"
+  | "solvergap-save-artifacts";
+
+interface ConfigRow {
+  id: ConfigRowId;
+  section: "Reviewer" | "Solver";
+  label: string;
+  value: string;
+  /** "model" rows open a picker (closes the menu, then reopens it); "cycle" rows step through `values` in place. */
+  kind: "model" | "cycle";
+  values?: string[];
+}
+
+/** Builds the current row list from config state — recomputed on every render so pickers' results show up immediately. */
+function buildConfigRows(
+  ctx: ExtensionCommandContext,
+  current: ChecksConfigLike | null,
+  solverGap: SolverGapConfig,
+): ConfigRow[] {
+  const reviewerLevels = current ? supportedThinkingLevelsFor(ctx, current.provider, current.modelId) : ["off"];
+  const solverGapLevels = solverGap.provider
+    ? supportedThinkingLevelsFor(ctx, solverGap.provider, solverGap.modelId)
+    : ["off"];
+  return [
+    {
+      id: "reviewer-model",
+      section: "Reviewer",
+      label: "Model",
+      value: current ? `${current.provider}/${current.modelId}` : "not set",
+      kind: "model",
     },
-  });
-  ctx.ui.notify("Solver model saved.", "info");
+    {
+      id: "reviewer-thinking",
+      section: "Reviewer",
+      label: "Thinking level",
+      value: current?.thinkingLevel ?? "off",
+      kind: "cycle",
+      values: reviewerLevels,
+    },
+    {
+      id: "solvergap-model",
+      section: "Solver",
+      label: "Model",
+      value: solverGap.provider ? `${solverGap.provider}/${solverGap.modelId}` : "not set",
+      kind: "model",
+    },
+    {
+      id: "solvergap-thinking",
+      section: "Solver",
+      label: "Thinking level",
+      value: solverGap.thinkingLevel,
+      kind: "cycle",
+      values: solverGapLevels,
+    },
+    {
+      id: "solvergap-timeout",
+      section: "Solver",
+      label: "Timeout",
+      value: `${solverGap.timeoutMinutes} min`,
+      kind: "cycle",
+      values: [10, 20, 30, 40, 50, SOLVER_GAP_TIMEOUT_MAX_MINUTES]
+        .filter((v, i, arr) => v >= SOLVER_GAP_TIMEOUT_MIN_MINUTES && arr.indexOf(v) === i)
+        .map((v) => `${v} min`),
+    },
+    {
+      id: "solvergap-solver-count",
+      section: "Solver",
+      label: "Parallel agents",
+      value: String(solverGap.solverCount),
+      kind: "cycle",
+      values: Array.from(
+        { length: SOLVER_GAP_SOLVER_COUNT_MAX - SOLVER_GAP_SOLVER_COUNT_MIN + 1 },
+        (_, i) => `${SOLVER_GAP_SOLVER_COUNT_MIN + i}`,
+      ),
+    },
+    {
+      id: "solvergap-save-artifacts",
+      section: "Solver",
+      label: "Save artifacts",
+      value: solverGap.saveArtifacts ? "on" : "off",
+      kind: "cycle",
+      values: ["on", "off"],
+    },
+  ];
+}
+
+type ChecksConfigLike = {
+  provider: string;
+  modelId: string;
+  thinkingLevel: ThinkingLevel;
+  solverGap?: SolverGapConfig;
+};
+
+/** Custom row-based menu component: renders section headers inline between "Reviewer" and "Solver" rows. Cycling rows update and persist in place (no overlay teardown); only model rows exit the overlay to run a picker. */
+class ConfigMenuComponent {
+  selectedIndex = 0;
+  private rows: ConfigRow[];
+  constructor(
+    private ctx: ExtensionCommandContext,
+    private settingsListTheme: ReturnType<typeof getSettingsListTheme>,
+    private theme: Theme,
+    private onCycleSaved: () => void,
+    private onActivateModel: (id: ConfigRowId) => void,
+    private onExit: () => void,
+  ) {
+    this.rows = buildConfigRows(ctx, loadChecksConfig(), loadChecksConfig()?.solverGap ?? DEFAULT_SOLVER_GAP);
+  }
+
+  /** Recompute rows from the latest saved config (used after a model picker returns) without resetting selection. */
+  refresh() {
+    const current = loadChecksConfig();
+    this.rows = buildConfigRows(this.ctx, current, current?.solverGap ?? DEFAULT_SOLVER_GAP);
+    this.selectedIndex = Math.min(this.selectedIndex, this.rows.length - 1);
+  }
+
+  invalidate() {}
+
+  render(_width: number): string[] {
+    const lines: string[] = [];
+    const maxLabelWidth = Math.min(30, Math.max(...this.rows.map((r) => r.label.length)));
+    let lastSection: string | undefined;
+    for (let i = 0; i < this.rows.length; i++) {
+      const row = this.rows[i];
+      if (!row) continue;
+      if (row.section !== lastSection) {
+        if (lastSection !== undefined) lines.push("");
+        lines.push(this.theme.bold(this.theme.fg("accent", row.section)));
+        lastSection = row.section;
+      }
+      const isSelected = i === this.selectedIndex;
+      const prefix = isSelected ? this.settingsListTheme.cursor : "  ";
+      const labelPadded = row.label + " ".repeat(Math.max(0, maxLabelWidth - row.label.length));
+      const labelText = this.settingsListTheme.label(labelPadded, isSelected);
+      const valueText = this.settingsListTheme.value(row.value, isSelected);
+      lines.push(`${prefix}${labelText}  ${valueText}`);
+    }
+    return lines;
+  }
+
+  handleInput(data: string) {
+    if (matchesKey(data, Key.ctrl("s")) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+      this.onExit();
+      return;
+    }
+    if (matchesKey(data, Key.up)) {
+      this.selectedIndex = this.selectedIndex === 0 ? this.rows.length - 1 : this.selectedIndex - 1;
+      return;
+    }
+    if (matchesKey(data, Key.down)) {
+      this.selectedIndex = this.selectedIndex === this.rows.length - 1 ? 0 : this.selectedIndex + 1;
+      return;
+    }
+    if (matchesKey(data, Key.enter) || matchesKey(data, Key.return) || data === " ") {
+      const row = this.rows[this.selectedIndex];
+      if (!row) return;
+      if (row.kind === "model") {
+        this.onActivateModel(row.id);
+        return;
+      }
+      if (!row.values || row.values.length === 0) return;
+      const current = loadChecksConfig();
+      if (!current) {
+        this.ctx.ui.notify(
+          "Set the reviewer model first — it's required before solver-gap-finder settings.",
+          "warning",
+        );
+        return;
+      }
+      const solverGap = current.solverGap ?? DEFAULT_SOLVER_GAP;
+      const currentIndex = row.values.indexOf(row.value);
+      const nextValue = row.values[(currentIndex + 1) % row.values.length];
+      if (nextValue === undefined) return;
+      if (row.id === "reviewer-thinking") {
+        saveChecksConfig({ ...current, thinkingLevel: nextValue as ThinkingLevel, solverGap });
+      } else if (row.id === "solvergap-thinking") {
+        saveChecksConfig({ ...current, solverGap: { ...solverGap, thinkingLevel: nextValue as ThinkingLevel } });
+      } else if (row.id === "solvergap-timeout") {
+        saveChecksConfig({ ...current, solverGap: { ...solverGap, timeoutMinutes: Number.parseInt(nextValue, 10) } });
+      } else if (row.id === "solvergap-solver-count") {
+        saveChecksConfig({ ...current, solverGap: { ...solverGap, solverCount: Number.parseInt(nextValue, 10) } });
+      } else if (row.id === "solvergap-save-artifacts") {
+        saveChecksConfig({ ...current, solverGap: { ...solverGap, saveArtifacts: nextValue === "on" } });
+      }
+      this.refresh();
+      this.onCycleSaved();
+    }
+  }
+}
+
+/** Interactive `/checks --config` settings menu: a single row-based menu with "Reviewer" / "Solver" section headers; Ctrl+S (or Esc) saves and exits. */
+async function runConfigFlow(ctx: ExtensionCommandContext) {
+  if (ctx.mode !== "tui") {
+    ctx.ui.notify("/checks --config requires interactive mode", "error");
+    return;
+  }
+
+  let selectedIndex = 0;
+  for (;;) {
+    const activated = await ctx.ui.custom<ConfigRowId | undefined>((tui, theme, _kb, done) => {
+      const menu = new ConfigMenuComponent(
+        ctx,
+        getSettingsListTheme(),
+        theme,
+        () => tui.requestRender(),
+        (id) => done(id),
+        () => done(undefined),
+      );
+      menu.selectedIndex = selectedIndex;
+
+      const container = new Container();
+      container.addChild(new Text(theme.bold(theme.fg("accent", "Checks settings"))));
+      container.addChild({
+        render: (width: number) => menu.render(width),
+        invalidate: () => menu.invalidate(),
+      });
+      container.addChild(new Spacer(1));
+      container.addChild(new Text(theme.fg("dim", "↑↓ navigate  enter select  ctrl+s save & exit  esc cancel")));
+
+      return {
+        render(width: number) {
+          return container.render(width);
+        },
+        invalidate() {
+          container.invalidate();
+        },
+        handleInput(data: string) {
+          menu.handleInput(data);
+          selectedIndex = menu.selectedIndex;
+          tui.requestRender();
+        },
+      };
+    });
+
+    if (!activated) return;
+
+    const current = loadChecksConfig();
+    const solverGap = current?.solverGap ?? DEFAULT_SOLVER_GAP;
+
+    if (activated === "reviewer-model") {
+      const picked = await pickModelOnly(ctx, current, "Select reviewer model");
+      if (!picked) continue;
+      const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
+      const thinkingLevel = levels.includes(current?.thinkingLevel ?? "off")
+        ? (current?.thinkingLevel ?? "off")
+        : (levels[0] ?? "off");
+      saveChecksConfig({ ...picked, thinkingLevel, solverGap });
+      ctx.ui.notify(`Reviewer model saved: ${picked.provider}/${picked.modelId}`, "info");
+      continue;
+    }
+
+    if (activated === "solvergap-model") {
+      if (!current) {
+        ctx.ui.notify("Set the reviewer model first — it's required before solver-gap-finder settings.", "warning");
+        continue;
+      }
+      const picked = await pickModelOnly(ctx, solverGap.provider ? solverGap : null, "Select solver model");
+      if (!picked) continue;
+      const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
+      const thinkingLevel = levels.includes(solverGap.thinkingLevel) ? solverGap.thinkingLevel : (levels[0] ?? "off");
+      saveChecksConfig({ ...current, solverGap: { ...solverGap, ...picked, thinkingLevel } });
+      ctx.ui.notify(`Solver model saved: ${picked.provider}/${picked.modelId}`, "info");
+    }
+  }
 }
 
 export function registerChecksCommand(pi: ExtensionAPI) {
