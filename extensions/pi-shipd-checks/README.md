@@ -1,9 +1,7 @@
 # @sreetej510/pi-shipd-checks
 
-A [pi](https://github.com/earendil-works/pi) coding agent extension that runs a strict,
-multi-agent review of a benchmark task's `agent_prompt.md`, `test.patch`, and `solution.patch`
-against a fairness rubric, and finds behavioral test-coverage gaps that could let an incorrect
-agent solution slip past the hidden tests.
+A [pi](https://github.com/earendil-works/pi) coding agent extension that finds behavioral
+coverage gaps in a benchmark task's hidden tests.
 
 ## What it does
 
@@ -14,15 +12,10 @@ For the flags you pass, `/checks`:
    uncommitted changes.
 2. Copies `agent_prompt.md`, `solution.patch`, and `test.patch` from your project root into
    that temp dir.
-3. Spawns one read-only reviewer agent per focus area you selected — **description**, **tests**,
-   **solution** — each restricted to `read`/`grep`/`find`/`ls` tools plus a single
-   `submit_review_report` tool it must call with a structured `PASS`/`FAIL` verdict, reasons,
-   and notes.
-4. Optionally runs a 3-agent behavioral test-gap analysis: two specialized finders
+3. Optionally runs a 3-agent behavioral test-gap analysis: two specialized finders
    run in parallel (positive required-behavior gaps + negative forbidden-behavior gaps),
-   then a strict validator filters the combined list. This never turns a `PASS` into a
-   `FAIL` — it's purely informational.
-5. Optionally runs the solver gap finder: several (configurable, default 3) TDD-style solver
+   then a strict validator filters the combined list.
+4. Optionally runs the solver gap finder: several (configurable, default 3) TDD-style solver
    agents, each in its own throwaway git repo with `test.patch` and `agent_prompt.md` applied
    (never `solution.patch`), given write/edit/bash access to iterate until `./test.sh new`
    passes or they give up. The extension independently re-verifies each
@@ -36,58 +29,38 @@ For the flags you pass, `/checks`:
    `agent_prompt.md`/`solution.patch` to surface behavioral gaps — cases where a passing
    solver's approach diverges from the intended behavior, indicating a test that's
    under-specified. This is empirical (grounded in real agent attempts) rather than
-   analytical, so it's reported separately from the `--gap-finder` results and is never
-   included in `--all` since it's by far the most expensive stage. Each solver's full
+   analytical, so it's reported separately from the `--gap-finder` results. Each solver's full
    `trajectory.json` (its raw session entries), `solution.patch`, and `./test.sh new` output
    are also persisted to `.pi/shipd-checks/<run-id>/solver_<n>/` in your project root, for
    later inspection independent of `shipd_report.json`.
-6. Posts a chat summary (only for the stage(s) actually run this invocation — a `--tests`-only
-   run won't show a stale `Overall` verdict from a previous, unrelated run) and merges the
-   results into `shipd_report.json` in your project root. Running flags separately, in any
-   order, builds up one combined report instead of overwriting it — `overall` only becomes a
-   confident `PASS`/`FAIL` once all 3 focus reviewers have run at least once, in the same
-   invocation.
+5. Posts a chat summary and merges the gap-finder results into `shipd_report.json` in your
+   project root. Running either finder separately builds up one combined report without any
+   PASS/FAIL verdict.
 
 ## Commands
 
-All flags except `--config` are additive/combinable, e.g. `/checks --tests --gap-finder` runs
-just the tests reviewer plus the gap-finder/filter stages. `--config` must be used alone.
-`--solver-gap-finder` is additive like the other stage flags, but deliberately **not** included
-in `--all` since it's the most expensive stage (several full coding-agent runs with shell access).
+The two finder flags are additive/combinable; `--config` must be used alone.
 
 | Command | Effect |
 |---|---|
 | `/checks` | List available options (runs nothing) |
-| `/checks --all` | Run all 3 focus reviewers + test-gap analysis |
-| `/checks --review` | Run only the 3 focus reviewer agents |
-| `/checks --description` | Run only the problem-description reviewer |
-| `/checks --tests` | Run only the tests reviewer |
-| `/checks --solution` | Run only the solution reviewer |
 | `/checks --gap-finder` | Run positive + negative gap finders (parallel), then validator |
 | `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
-| `/checks --config` | Open the settings menu (reviewer + solver-gap-finder settings) |
+| `/checks --config` | Configure behavioral and solver gap-finder models |
 
 **Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run.
 
 ## Configuration
 
-`/checks --config` opens a single row-based settings menu with two section headers:
+`/checks --config` lets you choose which setting to change:
 
-- **Reviewer**: model and thinking level used by the focus reviewers, gap-finders, gap-validator,
-  and the solver-gap-finder's comparison reviewer.
-- **Solver Gap Finder**: model, thinking level, per-agent timeout in minutes (default 30, clamped to
-  1–120), number of parallel solver agents (default 3, clamped to 1–10), and a "Save artifacts"
-  on/off toggle (default on) — used only by the TDD-style solver agents spawned by
-  `--solver-gap-finder`. These write code and run shell commands (a heavier job than the
-  read-only reviewers), so you may want a stronger coding model here. Turning "Save artifacts"
-  off skips persisting `trajectory.json`/`solution.patch`/test output to
-  `.pi/shipd-checks/<run-id>/` for each run — useful if you don't need to inspect solver runs
-  after the fact and want to save disk space.
+- **Reviewer model**: model and thinking level used by the behavioral gap finders, validator,
+  and solver-solution comparison agent.
+- **Solver model**: model and thinking level used by the TDD solver agents. Configure the
+  reviewer model first.
 
-Use ↑/↓ to move between rows, Enter/Space to open a model picker or cycle a value in place, and
-`Ctrl+S` to save and exit (Esc cancels without discarding already-saved changes). Everything is
-saved immediately to `~/.pi/agent/checks-config.json`, with the solver-gap-finder settings nested
-under a `solverGap` key.
+Settings are saved to `~/.pi/agent/checks-config.json`; solver settings are nested under
+`solverGap`.
 
 ## Install
 

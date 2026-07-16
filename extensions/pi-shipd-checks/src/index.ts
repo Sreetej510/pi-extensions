@@ -1,50 +1,26 @@
 /**
  * Shipd Checks Extension for pi
  *
- * Strict, parallel 3-agent review of a task's agent_prompt.md, test.patch, and
- * solution.patch against a combined rubric (see rubric.ts): the per-focus
- * P1-P5/T1-T6/S1-S4 checklist and the fairness methodology — agent-fault vs
- * prompt-ambiguity vs test-flaw, fair/unfair test examples. Reviewers only
- * FAIL for genuine blocking issues; everything else is captured as
- * non-blocking notes, mirroring how real shipd reviews mostly surface
- * optional/minor suggestions rather than hard failures.
+ * Behavioral test-gap analysis for a task's agent_prompt.md, test.patch, and
+ * solution.patch, with an optional solver-based gap finder.
  *
- * Flow (for whichever stages/roles the chosen option below runs):
+ * Flow:
  *   1. Snapshot the current git HEAD (no working-dir mutation) into a temp dir
  *      via `git archive HEAD | tar -x` (see git.ts).
  *   2. Copy agent_prompt.md, solution.patch, test.patch from the project root
  *      into that temp dir.
- *   3. (--all / --review / --description / --tests / --solution) Spawn the
- *      selected read-only reviewer agent(s) — description / tests / solution,
- *      all 3 in parallel for --all/--review, or just the one requested —
- *      each restricted to read/grep/find/ls plus a single
- *      `submit_review_report` tool they must call with a structured verdict
- *      (see agents.ts, tools.ts).
- *   4. (--all / --gap-finder) Run a 3-agent behavioral test-gap analysis: two
+ *   3. (--gap-finder) Run a 3-agent behavioral test-gap analysis: two
  *      specialized finders run in parallel — one for positive (missing required-
  *      behavior) gaps, one for negative (missing forbidden-behavior) gaps — then a
- *      strict validator filters the combined candidate list. This never turns a
- *      PASS into a FAIL; it only annotates the report/summary.
- *   5. Post a one-line chat message and merge results into shipd_report.json
- *      in the project root (merged, not overwritten — running any of
- *      --review/--description/--tests/--solution/--gap-finder separately, in
- *      any order, builds up one combined report; see report.ts). `overall`
- *      only reflects a confident PASS/FAIL once all 3 focus reviewers have
- *      run at least once; PASS gets "(with test gaps)" appended when the
- *      filter stage kept any.
+ *      strict validator filters the combined candidate list.
+ *   4. Post a one-line chat message and merge gap-finder results into
+ *      shipd_report.json in the project root.
  *
- * Commands (all flags below except --config are additive/combinable, e.g.
- * "/checks --tests --gap-finder" runs just the tests reviewer plus the
- * gap-finder/filter stages; --config must be used alone):
+ * Commands (the two finder flags are additive; --config must be used alone):
  *   /checks               list available options (runs nothing)
- *   /checks --all         run all 3 focus reviewers + test-gap analysis
- *   /checks --review      run only the 3 focus reviewer agents
- *   /checks --description run only the problem-description (prompt) reviewer
- *   /checks --tests       run only the tests reviewer
- *   /checks --solution    run only the solution reviewer
  *   /checks --gap-finder  run positive + negative gap finders, then validator
  *   /checks --solver-gap-finder  run several TDD solver agents, then compare their solutions to find gaps
- *   /checks --config      set the reviewer model and thinking level
+ *   /checks --config      set the gap-finder models and thinking levels
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.
  *
  * File layout:
@@ -70,25 +46,18 @@ import { PROGRESS_WIDGET_KEY } from "./progress.js";
 import type { SolverSummaryDetail } from "./report.js";
 import { formatDuration } from "./report.js";
 import { cancelReview, isReviewInProgress } from "./state.js";
-import type { Verdict } from "./types.js";
 
 const CANCEL_SHORTCUT = Key.ctrlShift("x");
 
 export default function shipdChecksExtension(pi: ExtensionAPI) {
   pi.registerMessageRenderer<{
-    overall?: Verdict;
-    hasTestGaps?: boolean;
     gapsCount?: number;
-    roleVerdicts?: Record<string, Verdict>;
     showGaps?: boolean;
     showSolverGaps?: boolean;
     solverDetails?: SolverSummaryDetail[];
     solverGapsCount?: number;
   }>("shipd_checks_report", (message, _options, theme) => {
     const details = message.details ?? {};
-    const colorVerdict = (verdict: Verdict) =>
-      verdict === "PASS" ? theme.fg("success", verdict) : theme.fg("error", verdict);
-
     const container = new Container();
     container.addChild(new Text(theme.bold(theme.fg("accent", "Checks")), 0, 0));
 
@@ -97,19 +66,6 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
       container.addChild(new Text(line, 0, 0));
       wroteSection = true;
     };
-
-    // Whichever reviewer(s) just ran — a partial run (e.g. only --tests) always shows its own
-    // PASS/FAIL, and `overall` only appears when this invocation ran all 3 focus reviewers.
-    if (details.roleVerdicts && Object.keys(details.roleVerdicts).length > 0) {
-      for (const [role, verdict] of Object.entries(details.roleVerdicts)) {
-        const icon = verdict === "PASS" ? theme.fg("success", "✓") : theme.fg("error", "✗");
-        addLine(`  ${icon} ${theme.bold(role)}: ${colorVerdict(verdict)}`);
-      }
-      if (details.overall) {
-        const suffix = details.overall === "PASS" && details.hasTestGaps ? " (with test gaps)" : "";
-        addLine(`  ${theme.bold("Overall:")} ${colorVerdict(details.overall)}${suffix}`);
-      }
-    }
 
     if (details.showGaps) {
       const count = details.gapsCount ?? 0;

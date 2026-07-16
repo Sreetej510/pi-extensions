@@ -1,5 +1,5 @@
 /**
- * Spawns the throwaway reviewer / gap-finder / gap-validator agent sessions,
+ * Spawns the throwaway gap-finder / gap-validator agent sessions,
  * races each against a timeout + external cancel signal, and pulls the
  * structured result back out of the tool-call capture object.
  */
@@ -10,25 +10,20 @@ import {
   buildGapValidatorPrompt,
   buildNegativeGapFinderPrompt,
   buildPositiveGapFinderPrompt,
-  buildReviewerPrompt,
   buildSolverComparisonPrompt,
   buildSolverPrompt,
 } from "./prompts.js";
 import {
   createGapFinderTool,
   createGapValidatorTool,
-  createReportTool,
   createSolverGapTool,
   GAP_FINDER_TOOL_NAME,
   GAP_VALIDATOR_TOOL_NAME,
-  REPORT_TOOL_NAME,
   SOLVER_GAP_TOOL_NAME,
 } from "./tools.js";
 import type {
   GapFinderKind,
   GapStageResult,
-  ReviewerRole,
-  ReviewReport,
   SolverGap,
   SolverRunResult,
   TestGapCandidate,
@@ -81,71 +76,6 @@ async function raceAgentTurn(
     }),
   ]);
   return outcome;
-}
-
-export async function runReviewer(opts: {
-  pi: ExtensionAPI;
-  role: ReviewerRole;
-  tempDir: string;
-  model: unknown;
-  thinkingLevel: ThinkingLevel;
-  rubric: string;
-  fairnessRules: string;
-  cancelSignal: AbortSignal;
-}): Promise<ReviewReport> {
-  const capture: { report?: ReviewReport } = {};
-  const model = asSessionModel(opts.model);
-  const { session } = await createAgentSession({
-    cwd: opts.tempDir,
-    model,
-    thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
-    tools: [...REVIEWER_TOOLS, REPORT_TOOL_NAME],
-    customTools: [createReportTool(capture)],
-    sessionManager: SessionManager.inMemory(),
-  });
-
-  try {
-    const outcome = await raceAgentTurn(async () => {
-      await session.prompt(buildReviewerPrompt(opts.role, opts.rubric, opts.fairnessRules));
-    }, opts.cancelSignal);
-
-    if (outcome === "cancelled") {
-      await session.abort();
-      return {
-        verdict: "FAIL",
-        summary: `${opts.role.label} reviewer cancelled`,
-        reasons: ["Cancelled by user."],
-        notes: [],
-      };
-    }
-
-    if (outcome === "timedOut") {
-      await session.abort();
-      return {
-        verdict: "FAIL",
-        summary: `${opts.role.label} reviewer timed out`,
-        reasons: [`Reviewer did not finish within ${REVIEWER_TIMEOUT_MS / 1000}s.`],
-        notes: [],
-      };
-    }
-  } catch (err) {
-    return {
-      verdict: "FAIL",
-      summary: `${opts.role.label} reviewer errored`,
-      reasons: [`Reviewer agent failed: ${err instanceof Error ? err.message : String(err)}`],
-      notes: [],
-    };
-  }
-
-  if (!capture.report) {
-    return {
-      verdict: "FAIL",
-      summary: `${opts.role.label} reviewer did not submit a report`,
-      reasons: [`The reviewer agent finished without calling ${REPORT_TOOL_NAME}.`],
-      notes: [],
-    };
-  }
-  return capture.report;
 }
 
 export async function runGapFinder(opts: {
