@@ -75,6 +75,12 @@ const GAP_FINDER_GROUND_RULES = [
     "details/style the prompt doesn't mandate.",
   "- Read `test.patch` carefully before deciding something is untested — do not propose a gap that an existing " +
     "test already covers (even indirectly).",
+  "- Keep findings strictly behavioral and publicly observable: a user, caller, or documented public contract must be " +
+    "able to observe the required outcome. Do not report internal helper calls, private state, implementation structure, " +
+    "call order, file placement, or other incidental mechanics.",
+  "- Do not require DOM classes, DOM/data/test attributes, selectors, or exact string literals unless the prompt explicitly " +
+    "names them or they are an established, already-present public contract in the repository. Prefer a visible outcome or " +
+    "public API behavior that accepts equivalent implementations.",
 ];
 
 export function buildReviewerPrompt(role: ReviewerRole, rubric: string, fairnessRules: string): string {
@@ -295,6 +301,10 @@ export function buildGapValidatorPrompt(
       "already covers, and drop near-duplicate candidates (keep only the clearest phrasing of each distinct gap). " +
       "For negative-case candidates, keep them only if `test.patch` does not already assert that the forbidden/" +
       "wrong outcome does not occur.",
+    "4. Behaviorally testable through a public contract — drop candidates that would require an internal helper, " +
+      "private state, implementation structure, call order, DOM class/attribute/data hook, selector, or exact " +
+      "string literal. The sole exceptions are details explicitly named in `agent_prompt.md` or already established " +
+      "as a public contract in the existing repository.",
     "",
     "Be strict: when genuinely unsure whether a candidate holds up, drop it rather than keep it. It is fine — " +
       "expected, even — to return an empty list if none of the candidates survive scrutiny.",
@@ -377,29 +387,31 @@ export function buildSolverComparisonPrompt(
     "",
     ...solverResults.map(formatSolverStatusLine),
     "",
-    "Your job: read `agent_prompt.md` and `solution.patch` carefully, then read each PASSED solver's " +
-      "`solution.diff` to find concrete BEHAVIORAL GAPS — cases where a solver took a materially different " +
-      "approach from what `agent_prompt.md` requires or `solution.patch` implements, that solver's tests still " +
-      "PASSED, and the difference reveals a real requirement that `test.patch` fails to actually enforce.",
+    "Your job: compare the reference `solution.patch` with each solver's `solution.diff` to find concrete " +
+      "BEHAVIORAL GAPS. Keep only a difference where: (a) `agent_prompt.md` explicitly requires the behavior, " +
+      "(b) the solver passed the relevant tests (even if it failed elsewhere), (c) the reference and solver produce observably different behavior for a real " +
+      "edge case or scenario, and (d) a fair public-facing test could distinguish them. The reference solution is " +
+      "evidence for scenarios to inspect, never a specification by itself.",
     "",
     "How to work:",
     "1. Read `agent_prompt.md` sentence by sentence and note every distinct requirement, constraint, and " +
       "prohibition.",
     "2. Read `solution.patch` to see how the reference solution satisfies those requirements.",
-    "3. For each solver that PASSED, read its `solution.diff` and compare it against the reference approach. " +
-      "Look specifically for places where the solver's code takes a shortcut, ignores a constraint, mishandles " +
-      "an edge case, or omits a side effect that `agent_prompt.md` calls for or `solution.patch` implements — " +
-      "yet the tests didn't catch it.",
-    "4. A solver that FAILED is not itself a gap — but if you can see from its `solution.diff` that it was " +
-      "heading toward a plausible-but-wrong implementation of some requirement, and nothing in `test.patch` " +
-      "would have caught that wrong implementation even if it had otherwise passed, that is still worth " +
-      "surfacing; use its `test_output.txt` for extra context if useful.",
+    "3. For each solver, read its `solution.diff` and compare it against the reference behavior. " +
+      "Look specifically for a solver shortcut, missed constraint, edge case, or side effect that the PROMPT " +
+      "requires, where the solver still passes because the tests do not observe the behavioral difference.",
+    "4. A solver that did not pass the full suite may still provide evidence for a completed, relevant part of its " +
+      "diff, but only when its test output shows the failure is unrelated to that behavior (or shows the relevant " +
+      "tests already passed). Do not treat its failing behavior as a gap, and do not infer gaps from a hypothetical " +
+      "wrong implementation.",
     "5. Treat multiple solvers converging on the same divergent-but-passing shortcut as stronger evidence of a " +
       "real gap, not proof it's acceptable — the tests are what's under scrutiny, not majority solver behavior.",
     "",
     ...GAP_FINDER_GROUND_RULES,
-    "- Every gap must be evidenced by an actual, cited part of a specific solver's diff — do not report a gap " +
-      "that is purely theoretical with no solver diff demonstrating it.",
+    "- Every gap must be evidenced by an actual, cited solver diff and a contrasting reference behavior. For a " +
+      "solver that failed the full suite, also cite its test output showing that the relevant behavior already passed " +
+      "or is unrelated to the failure. Cite the prompt sentence that makes the behavioral difference required; do " +
+      "not report a gap that is purely theoretical or based only on the reference implementation.",
     "- It is fine, and expected, to submit an empty list if the solvers that passed all converged on behavior " +
       "equivalent to the reference solution with no material gaps.",
     "- Do not self-censor for volume, but do not pad the list either — only include what you can concretely " +
