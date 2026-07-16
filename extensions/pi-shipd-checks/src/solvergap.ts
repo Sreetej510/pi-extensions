@@ -152,6 +152,25 @@ export async function setupSolverWorkspace(opts: {
   return { status: "ok", solverDir, testsAppliedCommit: rev.stdout.trim(), testPatchPaths };
 }
 
+/** Extract test totals from Vitest's JUnit `<testsuites>` element. Errors count as failed tests. */
+function readTestCounts(xmlPath: string): { totalTests: number | null; failedTests: number | null } {
+  try {
+    const tag = readFileSync(xmlPath, "utf-8").match(/<testsuites\b[^>]*>/i)?.[0];
+    if (!tag) return { totalTests: null, failedTests: null };
+    const attribute = (name: string) =>
+      Number.parseInt(tag.match(new RegExp(`\\b${name}="(\\d+)"`, "i"))?.[1] ?? "", 10);
+    const totalTests = attribute("tests");
+    const failures = attribute("failures");
+    const errors = attribute("errors");
+    return {
+      totalTests: Number.isFinite(totalTests) ? totalTests : null,
+      failedTests: Number.isFinite(failures) ? failures + (Number.isFinite(errors) ? errors : 0) : null,
+    };
+  } catch {
+    return { totalTests: null, failedTests: null };
+  }
+}
+
 /** Independently verifies the solver's work: captures its diff and re-runs `./test.sh new` from scratch. */
 export async function finalizeSolverRun(opts: {
   pi: ExtensionAPI;
@@ -182,6 +201,7 @@ export async function finalizeSolverRun(opts: {
   });
   const passed = testRun.code === 0;
   const testOutputTail = tail(`${testRun.stdout}\n${testRun.stderr}`.trim(), TEST_OUTPUT_TAIL_CHARS);
+  const { totalTests, failedTests } = readTestCounts(testOutputXmlPath);
 
   return {
     index,
@@ -190,6 +210,8 @@ export async function finalizeSolverRun(opts: {
     diff,
     testOutputTail,
     durationMs,
+    totalTests,
+    failedTests,
     testOutputXmlPath,
   };
 }
