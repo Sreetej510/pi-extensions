@@ -517,6 +517,18 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         let solverResults: SolverRunResult[] = [];
         let comparison: GapStageResult<SolverGap> = { status: "ok", gaps: [] };
         if (runSolverGapFinder && solverConfig) {
+          const completedSolvers: SolverRunResult[] = [];
+          const recordSolverCompletion = (result: SolverRunResult) => {
+            completedSolvers.push(result);
+            completed += 1;
+            ctx.ui.setWidget(
+              PROGRESS_WIDGET_KEY,
+              renderProgressLines("solver gap finder: solving", completed, total, {
+                passed: completedSolvers.filter((solver) => solver.passed).length,
+                failed: completedSolvers.filter((solver) => !solver.passed).length,
+              }),
+            );
+          };
           const setups = await Promise.all(
             Array.from({ length: solverCount }, async (_, i) => {
               const solverDir = join(tmpdir(), `checks-solvergap-${randomUUID()}`);
@@ -537,15 +549,20 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           const runId = formatLocalTimestamp().replace(/[:.]/g, "-");
           solverResults = await Promise.all(
             setups.map(async ({ index, setup }) => {
-              if (setup.status !== "ok")
-                return {
+              if (setup.status !== "ok") {
+                const result = {
                   index,
                   status: setup.status,
                   passed: false,
                   diff: "",
                   testOutputTail: setup.error,
                   durationMs: 0,
+                  totalTests: null,
+                  failedTests: null,
                 } satisfies SolverRunResult;
+                recordSolverCompletion(result);
+                return result;
+              }
               const started = Date.now();
               const { outcome, trajectory } = await runSolverAgent({
                 pi,
@@ -573,12 +590,9 @@ export function registerChecksCommand(pi: ExtensionAPI) {
                     testOutputTail: result.testOutputTail,
                   })
                 : undefined;
-              completed += 1;
-              ctx.ui.setWidget(
-                PROGRESS_WIDGET_KEY,
-                renderProgressLines("solver gap finder: solving", completed, total),
-              );
-              return { ...result, artifactsDir };
+              const solverResult = { ...result, artifactsDir };
+              recordSolverCompletion(solverResult);
+              return solverResult;
             }),
           );
           if (solverResults.some((result) => result.status !== "patchFailed" && result.status !== "error")) {

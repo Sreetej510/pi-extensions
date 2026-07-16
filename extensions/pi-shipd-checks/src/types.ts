@@ -80,6 +80,9 @@ export interface SolverRunResult {
   testOutputTail: string;
   /** Wall-clock time the solver agent + verification took, in ms. */
   durationMs: number;
+  /** Test totals parsed from the verifier's JUnit XML output; null when no report was produced. */
+  totalTests: number | null;
+  failedTests: number | null;
   /** Dir under `.pi/shipd-checks/<runId>/solver_<index>/` where trajectory.json/solution.patch/test output were saved, if any. */
   artifactsDir?: string;
 }
