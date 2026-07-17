@@ -8,8 +8,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   buildGapValidatorPrompt,
-  buildNegativeGapFinderPrompt,
-  buildPositiveGapFinderPrompt,
+  buildSentenceGapFinderPrompt,
   buildSolverComparisonPrompt,
   buildSolverPrompt,
 } from "./prompts.js";
@@ -22,11 +21,10 @@ import {
   SOLVER_GAP_TOOL_NAME,
 } from "./tools.js";
 import type {
-  GapFinderKind,
   GapStageResult,
   SolverGap,
   SolverRunResult,
-  TestGapCandidate,
+  StatementGapReport,
   TestGapFinal,
   ThinkingLevel,
 } from "./types.js";
@@ -79,16 +77,14 @@ async function raceAgentTurn(
 }
 
 export async function runGapFinder(opts: {
-  kind: GapFinderKind;
   tempDir: string;
   model: unknown;
   thinkingLevel: ThinkingLevel;
   testRubric: string;
   fairnessRules: string;
   cancelSignal: AbortSignal;
-}): Promise<GapStageResult<TestGapCandidate>> {
-  const capture: { gaps?: TestGapCandidate[] } = {};
-  const buildPrompt = opts.kind === "positive" ? buildPositiveGapFinderPrompt : buildNegativeGapFinderPrompt;
+}): Promise<GapStageResult<StatementGapReport>> {
+  const capture: { statements?: StatementGapReport[] } = {};
   const model = asSessionModel(opts.model);
   const { session } = await createAgentSession({
     cwd: opts.tempDir,
@@ -101,7 +97,7 @@ export async function runGapFinder(opts: {
 
   try {
     const outcome = await raceAgentTurn(async () => {
-      await session.prompt(buildPrompt(opts.testRubric, opts.fairnessRules));
+      await session.prompt(buildSentenceGapFinderPrompt(opts.testRubric, opts.fairnessRules));
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
@@ -110,8 +106,8 @@ export async function runGapFinder(opts: {
   } catch {
     return { status: "error", gaps: [] };
   }
-  if (!capture.gaps) return { status: "noSubmission", gaps: [] };
-  return { status: "ok", gaps: capture.gaps };
+  if (!capture.statements) return { status: "noSubmission", gaps: [] };
+  return { status: "ok", gaps: capture.statements };
 }
 
 export const SOLVER_AGENT_TOOLS = ["read", "grep", "find", "ls", "write", "edit", "bash"] as const;
@@ -192,7 +188,7 @@ export async function runGapValidator(opts: {
   thinkingLevel: ThinkingLevel;
   testRubric: string;
   fairnessRules: string;
-  candidates: TestGapCandidate[];
+  statementReports: StatementGapReport[];
   cancelSignal: AbortSignal;
 }): Promise<GapStageResult<TestGapFinal>> {
   const capture: { gaps?: TestGapFinal[] } = {};
@@ -208,7 +204,7 @@ export async function runGapValidator(opts: {
 
   try {
     const outcome = await raceAgentTurn(async () => {
-      await session.prompt(buildGapValidatorPrompt(opts.candidates, opts.testRubric, opts.fairnessRules));
+      await session.prompt(buildGapValidatorPrompt(opts.statementReports, opts.testRubric, opts.fairnessRules));
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();

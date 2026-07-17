@@ -37,12 +37,16 @@ export interface ReviewReport {
   notes: string[];
 }
 
-export type GapFinderKind = "positive" | "negative";
-
-/** A candidate behavioral test gap (positive or negative) proposed by a gap-finder agent. */
+/** A candidate behavioral test gap proposed for one sentence in the task prompt. */
 export interface TestGapCandidate {
   description: string;
   risk: string;
+}
+
+/** The finder must account for every prompt sentence, including sentences with no gaps. */
+export interface StatementGapReport {
+  statement: string;
+  gaps: TestGapCandidate[];
 }
 
 /** A gap that survived the strict fairness-filter agent — goes into the final report. */

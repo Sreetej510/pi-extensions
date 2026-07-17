@@ -6,7 +6,7 @@
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ReviewReport, SolverGap, TestGapCandidate, TestGapFinal } from "./types.js";
+import type { ReviewReport, SolverGap, StatementGapReport, TestGapFinal } from "./types.js";
 
 export const REPORT_TOOL_NAME = "submit_review_report";
 export const GAP_FINDER_TOOL_NAME = "submit_test_gap_candidates";
@@ -63,43 +63,34 @@ export function createReportTool(capture: { report?: ReviewReport }): ToolDefini
 // ── Test-gap finder / filter tools ────────────────────────────────────
 
 const gapFinderToolParams = Type.Object({
+  statement: Type.String({ description: "One sentence from agent_prompt.md, copied verbatim." }),
   gaps: Type.Array(
     Type.Object({
-      description: Type.String({
-        description:
-          "The specific untested behavior or edge case, in plain terms. Prefix with POSITIVE: or NEGATIVE: to " +
-          "indicate whether this is a missing required-behavior test or a missing forbidden/wrong-behavior test.",
-      }),
+      description: Type.String({ description: "A fair, publicly observable missing behavioral test." }),
       risk: Type.String({
-        description:
-          "Concretely why a plausible-but-incorrect implementation could still pass every test in test.patch " +
-          "despite missing, misimplementing, or violating this behavior (including doing a forbidden thing " +
-          "because no test asserts it must not happen).",
+        description: "Why an incorrect implementation could pass the current tests despite this missing behavior.",
       }),
     }),
-    {
-      description:
-        "Candidate behavioral test gaps (positive and negative) grounded in agent_prompt.md or clear existing " +
-        "repo behavior. Use an empty array if you found none — do not manufacture gaps just to report something.",
-    },
+    { description: "All candidate positive and negative gaps for this sentence; use an empty array when none exist." },
   ),
 });
 
 export function createGapFinderTool(capture: {
-  gaps?: TestGapCandidate[];
+  statements?: StatementGapReport[];
 }): ToolDefinition<typeof gapFinderToolParams> {
   return {
     name: GAP_FINDER_TOOL_NAME,
     label: "Submit Candidate Test Gaps",
     description:
-      "Submit your candidate list of behavioral test gaps. This is the ONLY way to report your result — call it " +
-      "exactly once, as your last action, after you have finished reading and analyzing the relevant files.",
+      "Submit one candidate-gap list for one prompt sentence. Call this after each sentence so the orchestrator can " +
+      "track the todo list; empty lists are required when that sentence has no gaps.",
     parameters: gapFinderToolParams,
     async execute(_toolCallId, params) {
-      const gaps = params.gaps ?? [];
-      capture.gaps = gaps;
+      const statements = capture.statements ?? [];
+      statements.push({ statement: params.statement, gaps: params.gaps ?? [] });
+      capture.statements = statements;
       return {
-        content: [{ type: "text", text: `Recorded ${gaps.length} candidate gap(s)` }],
+        content: [{ type: "text", text: `Recorded ${params.gaps?.length ?? 0} candidate gap(s)` }],
         details: undefined,
       };
     },

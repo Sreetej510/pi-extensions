@@ -12,9 +12,9 @@ For the flags you pass, `/checks`:
    uncommitted changes.
 2. Copies `agent_prompt.md`, `solution.patch`, and `test.patch` from your project root into
    that temp dir.
-3. Optionally runs a 3-agent behavioral test-gap analysis: two specialized finders
-   run in parallel (positive required-behavior gaps + negative forbidden-behavior gaps),
-   then a strict validator filters the combined list.
+3. Optionally runs a two-agent behavioral test-gap analysis: one finder works through every
+   meaningful prompt sentence, submitting positive and negative candidates for each; a strict
+   reviewer then filters the combined list for fair, public behavioral assertions.
 4. Optionally runs the solver gap finder: several (configurable, default 3) TDD-style solver
    agents, each in its own throwaway git repo with `test.patch` and `agent_prompt.md` applied
    (never `solution.patch`), given write/edit/bash access to iterate until `./test.sh new`
@@ -44,7 +44,7 @@ The two finder flags are additive/combinable; `--config` must be used alone.
 | Command | Effect |
 |---|---|
 | `/checks` | List available options (runs nothing) |
-| `/checks --gap-finder` | Run positive + negative gap finders (parallel), then validator |
+| `/checks --gap-finder` | Find gaps sentence-by-sentence, then review them for fairness |
 | `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
 | `/checks --config` | Configure behavioral and solver gap-finder models |
 
@@ -91,7 +91,7 @@ Or, for local development, point at the entry point directly:
 |---|---|
 | `src/index.ts` | Extension entry point: message renderer, cancel shortcut, command registration |
 | `src/command.ts` | The `/checks` command: argument parsing, `--config` flow, run orchestration |
-| `src/agents.ts` | Spawns and races the reviewer + gap-finder/validator/solver agent sessions |
+| `src/agents.ts` | Spawns and races the gap-finder/reviewer/solver agent sessions |
 | `src/solvergap.ts` | Solver-gap-finder workspace lifecycle: setup, verification, artifact persistence, cleanup |
 | `src/prompts.ts` | All prompt text sent to those agents |
 | `src/tools.ts` | Custom tools the agents call to submit their structured results |
