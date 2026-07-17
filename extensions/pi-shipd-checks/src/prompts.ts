@@ -2,7 +2,7 @@
 
 import { SOLVER_GAP_SOLUTIONS_DIRNAME } from "./solvergap.js";
 import { GAP_FINDER_TOOL_NAME, GAP_VALIDATOR_TOOL_NAME, REPORT_TOOL_NAME, SOLVER_GAP_TOOL_NAME } from "./tools.js";
-import type { ReviewerRole, ReviewerRoleKey, SolverRunResult, TestGapCandidate } from "./types.js";
+import type { ReviewerRole, ReviewerRoleKey, SolverRunResult, StatementGapReport } from "./types.js";
 
 const ROLE_FOCUS: Record<ReviewerRoleKey, string> = {
   description:
@@ -148,6 +148,41 @@ export function buildReviewerPrompt(role: ReviewerRole, rubric: string, fairness
   return parts.join("\n");
 }
 
+export function buildSentenceGapFinderPrompt(testRubric: string, fairnessRules: string): string {
+  const parts = [
+    ...gapFinderPreamble(
+      "You are an exhaustive behavioral test-gap finder. Review the task prompt sentence by sentence, finding both " +
+        "missing required-behavior (positive) and missing forbidden/wrong-behavior (negative) tests.",
+    ),
+    "",
+    "First split `agent_prompt.md` into its meaningful sentences using periods (`.`) as the sentence boundary. " +
+      "Create an explicit TODO checklist of every resulting requirement sentence. Work through it one item at a time; " +
+      "do not finish until every item is checked off.",
+    "",
+    "For each sentence: read `test.patch`, `solution.patch`, and relevant repository context; identify every distinct " +
+      "behavioral edge case or prohibition that the sentence requires but the tests do not catch. A candidate must " +
+      "describe a plausible incorrect implementation that still passes the current suite. Include positive and negative " +
+      "gaps together for that sentence.",
+    "",
+    ...GAP_FINDER_AGGRESSION,
+    "",
+    ...GAP_FINDER_GROUND_RULES,
+    "",
+    "Test-coverage checklist for calibration:",
+    testRubric,
+  ];
+  if (fairnessRules) parts.push("", "Fairness methodology:", fairnessRules);
+  parts.push(
+    "",
+    "For every candidate, state the missing fair behavioral test and why the current suite permits the incorrect " +
+      "behavior. Do not propose the exact test implementation.",
+    `After completing EACH TODO sentence, call \`${GAP_FINDER_TOOL_NAME}\` with that exact sentence and its gap array ` +
+      "(including an empty array when none exist). You may and must call the tool multiple times: once per sentence. " +
+      "Only finish after every TODO item has been submitted.",
+  );
+  return parts.join("\n");
+}
+
 export function buildPositiveGapFinderPrompt(testRubric: string, fairnessRules: string): string {
   const parts = [
     ...gapFinderPreamble(
@@ -275,7 +310,7 @@ export function buildNegativeGapFinderPrompt(testRubric: string, fairnessRules: 
 }
 
 export function buildGapValidatorPrompt(
-  candidates: TestGapCandidate[],
+  statementReports: StatementGapReport[],
   testRubric: string,
   fairnessRules: string,
 ): string {
@@ -284,10 +319,10 @@ export function buildGapValidatorPrompt(
     "You are working inside a throwaway, read-only copy of a git repository (this is your current directory). " +
       "You have access to read/grep/find/ls tools only — you cannot execute code, apply patches, or edit files.",
     "Two specialized research agents reviewed this same task (`agent_prompt.md`, `test.patch`, `solution.patch`, " +
-      "and the repo) in parallel — one hunting POSITIVE gaps (missing required-behavior tests), one hunting " +
-      "NEGATIVE gaps (missing forbidden/wrong-behavior tests). They proposed the following combined CANDIDATE list:",
+      "and the repo) sentence by sentence, proposing both positive (missing required-behavior) and negative " +
+      "(missing forbidden/wrong-behavior) gaps. It submitted the following per-sentence candidate report:",
     "",
-    JSON.stringify(candidates, null, 2),
+    JSON.stringify(statementReports, null, 2),
     "",
     "Your job is to independently re-verify the files yourself and FILTER this list down to only candidates that " +
       "are ALL of the following:",

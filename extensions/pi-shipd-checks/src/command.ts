@@ -7,7 +7,12 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, Spacer, Text } from "@earendil-works/pi-tui";
-import { runGapFinder, runGapValidator, runSolverAgent, runSolverComparisonReviewer } from "./agents.js";
+import {
+  runGapValidator,
+  runGapFinder as runSentenceGapFinder,
+  runSolverAgent,
+  runSolverComparisonReviewer,
+} from "./agents.js";
 import {
   getSupportedThinkingLevels,
   loadChecksConfig,
@@ -41,7 +46,7 @@ import type {
   SolverGap,
   SolverGapConfig,
   SolverRunResult,
-  TestGapCandidate,
+  StatementGapReport,
   TestGapFinal,
   ThinkingLevel,
 } from "./types.js";
@@ -470,7 +475,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
       }
       const abort = startReview();
       const solverCount = solverConfig?.solverCount ?? 0;
-      const total = (runGapFinder ? 3 : 0) + (runSolverGapFinder ? solverCount + 1 : 0);
+      const total = (runGapFinder ? 2 : 0) + (runSolverGapFinder ? solverCount + 1 : 0);
       ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("preparing clean snapshot", 0, total));
       ctx.ui.notify(`gap finders (${tokens.join(" ")}) started. Press ${CANCEL_SHORTCUT_LABEL} to cancel.`, "info");
       let tempDir: string | undefined;
@@ -488,8 +493,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         const testRubric = loadTestGuidelines();
         const fairnessRules = loadFairnessRules();
         let completed = 0;
-        let positive: GapStageResult<TestGapCandidate> = { status: "ok", gaps: [] };
-        let negative: GapStageResult<TestGapCandidate> = { status: "ok", gaps: [] };
+        let statementReports: GapStageResult<StatementGapReport> = { status: "ok", gaps: [] };
         let filtered: GapStageResult<TestGapFinal> = { status: "ok", gaps: [] };
         if (runGapFinder) {
           const base = {
@@ -500,14 +504,16 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             fairnessRules,
             cancelSignal: abort.signal,
           };
-          [positive, negative] = await Promise.all([
-            runGapFinderAgent(base, "positive"),
-            runGapFinderAgent(base, "negative"),
-          ]);
-          completed += 2;
-          ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("validating test gaps", completed, total));
-          const candidates = [...positive.gaps, ...negative.gaps];
-          if (candidates.length) filtered = await runGapValidator({ ...base, candidates });
+          ctx.ui.setWidget(
+            PROGRESS_WIDGET_KEY,
+            renderProgressLines("finding sentence-by-sentence test gaps", completed, total),
+          );
+          statementReports = await runSentenceGapFinder(base);
+          completed += 1;
+          ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("reviewing test gaps", completed, total));
+          const candidateCount = statementReports.gaps.reduce((count, report) => count + report.gaps.length, 0);
+          if (candidateCount > 0)
+            filtered = await runGapValidator({ ...base, statementReports: statementReports.gaps });
           completed += 1;
           if (abort.signal.aborted) {
             ctx.ui.notify("checks: cancelled.", "warning");
@@ -615,17 +621,14 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         }
         const incomplete =
           runGapFinder &&
-          (positive.status !== "ok" ||
-            negative.status !== "ok" ||
-            ((positive.gaps.length > 0 || negative.gaps.length > 0) && filtered.status !== "ok"));
+          (statementReports.status !== "ok" || (statementReports.gaps.length > 0 && filtered.status !== "ok"));
         const merged = mergeReport({
           existingReport: loadExistingReport(join(ctx.cwd, "shipd_report.json")),
           config,
           runGapFinder,
           testGaps: filtered.gaps,
           gapAnalysisIncomplete: incomplete,
-          positiveGapFinderStatus: positive.status,
-          negativeGapFinderStatus: negative.status,
+          gapFinderStatus: statementReports.status,
           gapFilterStatus: filtered.status,
           runSolverGapFinder,
           solverResults,
@@ -655,18 +658,4 @@ export function registerChecksCommand(pi: ExtensionAPI) {
       }
     },
   });
-}
-
-async function runGapFinderAgent(
-  base: {
-    tempDir: string;
-    model: unknown;
-    thinkingLevel: ThinkingLevel;
-    testRubric: string;
-    fairnessRules: string;
-    cancelSignal: AbortSignal;
-  },
-  kind: "positive" | "negative",
-) {
-  return runGapFinder({ ...base, kind });
 }
