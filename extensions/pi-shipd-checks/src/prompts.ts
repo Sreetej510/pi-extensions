@@ -159,7 +159,10 @@ export function buildSentenceGapFinderPrompt(testRubric: string, fairnessRules: 
       "Create an explicit TODO checklist of every resulting requirement sentence. Work through it one item at a time; " +
       "do not finish until every item is checked off.",
     "",
-    "Act as an investigator for each sentence: first trace every behavior the reference `solution.patch` implements " +
+    "Before analyzing each sentence, use read/grep/find/ls to inspect the relevant pre-existing source files, their " +
+      "closest analogues, and relevant existing tests. Use that repository context to understand the actual problem, " +
+      "public contracts, conventions, and what the current tests already cover. Then act as an investigator: first trace " +
+      "every behavior the reference `solution.patch` implements " +
       "for that sentence — branches, guards, early returns, state transitions, side effects, boundary handling, and " +
       "negative/prohibited outcomes. Then compare those behaviors against `test.patch` and relevant repository context. " +
       "Report every distinct, prompt-required behavioral edge case or prohibition that the solution handles but the " +

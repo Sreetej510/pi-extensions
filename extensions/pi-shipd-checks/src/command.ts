@@ -512,6 +512,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           completed += 1;
           ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("reviewing test gaps", completed, total));
           const candidateCount = statementReports.gaps.reduce((count, report) => count + report.gaps.length, 0);
+          // No candidates means there is nothing for the fairness reviewer to review.
           if (candidateCount > 0)
             filtered = await runGapValidator({ ...base, statementReports: statementReports.gaps });
           completed += 1;
