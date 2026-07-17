@@ -159,10 +159,12 @@ export function buildSentenceGapFinderPrompt(testRubric: string, fairnessRules: 
       "Create an explicit TODO checklist of every resulting requirement sentence. Work through it one item at a time; " +
       "do not finish until every item is checked off.",
     "",
-    "For each sentence: read `test.patch`, `solution.patch`, and relevant repository context; identify every distinct " +
-      "behavioral edge case or prohibition that the sentence requires but the tests do not catch. A candidate must " +
-      "describe a plausible incorrect implementation that still passes the current suite. Include positive and negative " +
-      "gaps together for that sentence.",
+    "Act as an investigator for each sentence: first trace every behavior the reference `solution.patch` implements " +
+      "for that sentence — branches, guards, early returns, state transitions, side effects, boundary handling, and " +
+      "negative/prohibited outcomes. Then compare those behaviors against `test.patch` and relevant repository context. " +
+      "Report every distinct, prompt-required behavioral edge case or prohibition that the solution handles but the " +
+      "tests do not catch. A candidate must describe a plausible incorrect implementation that still passes the current " +
+      "suite. Include positive and negative gaps together for that sentence.",
     "",
     ...GAP_FINDER_AGGRESSION,
     "",
@@ -174,8 +176,10 @@ export function buildSentenceGapFinderPrompt(testRubric: string, fairnessRules: 
   if (fairnessRules) parts.push("", "Fairness methodology:", fairnessRules);
   parts.push(
     "",
-    "For every candidate, state the missing fair behavioral test and why the current suite permits the incorrect " +
-      "behavior. Do not propose the exact test implementation.",
+    "For every candidate, state the missing fair behavioral test, the relevant solution behavior or branch that led " +
+      "you to investigate it, and why the current suite permits the incorrect behavior. The prompt sentence is the " +
+      "required specification: do not report incidental reference-solution details it does not require. Do not propose " +
+      "the exact test implementation.",
     `After completing EACH TODO sentence, call \`${GAP_FINDER_TOOL_NAME}\` with that exact sentence and its gap array ` +
       "(including an empty array when none exist). You may and must call the tool multiple times: once per sentence. " +
       "Only finish after every TODO item has been submitted.",
