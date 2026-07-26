@@ -24,27 +24,16 @@ export function completeCodexStatusArguments(argumentPrefix: string): CommandArg
 
 export function parseArgs(args: string): { ok: true; value: QueryUsageOptions } | { ok: false; error: string } {
   const tokens = args.trim().split(/\s+/).filter(Boolean);
-  let clearStatusline = false;
   let consumeBankedReset = false;
   let consumeBankedResetId: string | undefined;
-  let listBankedResets = false;
   let raw = false;
   let refresh = false;
-  let statusline = true;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
 
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
-    if (token === "--clear-statusline") {
-      clearStatusline = true;
-      continue;
-    }
     if (token === "--raw") {
       raw = true;
-      continue;
-    }
-    if (token === "--list-banked-resets") {
-      listBankedResets = true;
       continue;
     }
     if (token === "--consume-banked-reset") {
@@ -56,10 +45,6 @@ export function parseArgs(args: string): { ok: true; value: QueryUsageOptions } 
       }
       continue;
     }
-    if (token === "--no-statusline") {
-      statusline = false;
-      continue;
-    }
     if (token === "--refresh") {
       refresh = true;
       continue;
@@ -69,8 +54,7 @@ export function parseArgs(args: string): { ok: true; value: QueryUsageOptions } 
       if (!rawValue)
         return {
           ok: false,
-          error:
-            "Usage: /usage [--refresh] [--raw] [--list-banked-resets] [--consume-banked-reset <id>] [--timeout seconds]",
+          error: "Usage: /usage [--refresh] [--raw] [--consume-banked-reset [id]] [--timeout seconds]",
         };
       const parsed = Number(rawValue);
       if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 120) {
@@ -82,28 +66,24 @@ export function parseArgs(args: string): { ok: true; value: QueryUsageOptions } 
     }
     return {
       ok: false,
-      error: `Unknown option: ${token}. Usage: /usage [--refresh] [--raw] [--list-banked-resets] [--consume-banked-reset <id>] [--no-statusline] [--clear-statusline] [--timeout seconds]`,
+      error: `Unknown option: ${token}. Usage: /usage [--refresh] [--raw] [--consume-banked-reset [id]] [--timeout seconds]`,
     };
   }
 
-  const exclusiveActionCount = [clearStatusline, raw, listBankedResets, consumeBankedReset].filter(Boolean).length;
-  if (exclusiveActionCount > 1) {
+  if (raw && consumeBankedReset) {
     return {
       ok: false,
-      error: "Choose only one of: --clear-statusline, --raw, --list-banked-resets, --consume-banked-reset.",
+      error: "Choose only one of: --raw, --consume-banked-reset.",
     };
   }
 
   return {
     ok: true,
     value: {
-      clearStatusline,
       consumeBankedReset,
       consumeBankedResetId,
-      listBankedResets,
       raw,
       refresh,
-      statusline,
       timeoutMs,
     },
   };

@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { queryViaCodexAppServer } from "./codex-app-server.js";
 import { resolvePiCodexAuth } from "./codex-auth.js";
+import { fetchCodexResetCredits, nextCodexResetCreditExpiry } from "./codex-reset-credits.js";
 import { CODEX_USAGE_URL } from "./constants.js";
 import { isStaleExtensionContextError, throwUsageEndpointError } from "./errors.js";
 import { fetchWithTimeout } from "./http.js";
@@ -23,7 +24,8 @@ export async function queryViaPiAuth(ctx: ExtensionContext, timeoutMs: number): 
   }
 
   const payload = parseJsonObject(text, "Codex usage endpoint response");
-  return normalizeBackendPayload(payload as RateLimitStatusPayload, Date.now(), "pi-auth");
+  const report = normalizeBackendPayload(payload as RateLimitStatusPayload, Date.now(), "pi-auth");
+  return addBankedResetDetails(ctx, timeoutMs, report);
 }
 
 export async function queryCodexUsageWithFallback(
@@ -38,7 +40,9 @@ export async function queryCodexUsageWithFallback(
     const errors: UsageQueryError[] = [{ source: "pi-auth", message: errorMessage(cause), cause }];
     try {
       const report = await queryViaCodexAppServer(timeoutMs);
-      return { report, errors };
+      // The fallback fulfilled the Codex query, so the primary auth failure is
+      // diagnostic noise rather than a provider-level failure.
+      return { report: await addBankedResetDetails(ctx, timeoutMs, report), errors: [] };
     } catch (fallbackCause) {
       if (isStaleExtensionContextError(fallbackCause)) throw fallbackCause;
       errors.push({
@@ -48,5 +52,24 @@ export async function queryCodexUsageWithFallback(
       });
       return { errors };
     }
+  }
+}
+
+async function addBankedResetDetails(
+  ctx: ExtensionContext,
+  timeoutMs: number,
+  report: CodexUsageReport,
+): Promise<CodexUsageReport> {
+  if (report.bankedResetsAvailable === 0) return report;
+  try {
+    const resets = await fetchCodexResetCredits(ctx, timeoutMs);
+    return {
+      ...report,
+      bankedResetsAvailable: resets.availableCount,
+      nextBankedResetExpiresAt: nextCodexResetCreditExpiry(resets),
+    };
+  } catch {
+    // Reset metadata is supplementary; usage should still be displayed.
+    return report;
   }
 }
