@@ -2,7 +2,7 @@
  * Pi Usage Extension
  *
  * Reports provider usage and rate-limit budgets for OpenAI Codex and Anthropic
- * OAuth subscriptions via /usage, with an optional statusline widget and custom
+ * OAuth subscriptions via /usage, with a live statusline widget and custom
  * footer that right-aligns usage status.
  *
  * File layout:
@@ -16,7 +16,7 @@
  *   models.ts             provider/model matching and auth candidate enumeration
  *   shared-cache.ts       on-disk shared usage cache read/write across pi sessions
  *   codex-auth.ts         resolve Pi Codex auth headers (+ WHAM + account id)
- *   codex-reset-credits.ts fetch/consume/format Codex banked resets
+ *   codex-reset-credits.ts fetch/consume/expiry helpers for Codex banked resets
  *   codex-app-server.ts   CodexAppServerClient + queryViaCodexAppServer fallback
  *   normalize-codex.ts    normalize backend + app-server Codex rate-limit payloads
  *   normalize-anthropic.ts normalize Anthropic OAuth usage payloads

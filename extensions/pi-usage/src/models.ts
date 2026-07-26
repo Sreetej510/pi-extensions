@@ -26,36 +26,31 @@ export function providerKeyForModel(model: Pick<PiModel, "provider"> | undefined
   return "codex";
 }
 
-export function codexAuthCandidateModels(ctx: {
+type AuthCandidateContext = {
   model?: PiModel;
   modelRegistry: {
     getAvailable: () => PiModel[];
-    getAll: () => PiModel[];
   };
-}): PiModel[] {
+};
+
+export function codexAuthCandidateModels(ctx: AuthCandidateContext): PiModel[] {
   return providerAuthCandidateModels(ctx, CODEX_PROVIDER_ID);
 }
 
-export function anthropicAuthCandidateModels(ctx: {
-  model?: PiModel;
-  modelRegistry: {
-    getAvailable: () => PiModel[];
-    getAll: () => PiModel[];
-  };
-}): PiModel[] {
+export function anthropicAuthCandidateModels(ctx: AuthCandidateContext): PiModel[] {
   return providerAuthCandidateModels(ctx, ANTHROPIC_PROVIDER_ID);
 }
 
-function providerAuthCandidateModels(
-  ctx: {
-    model?: PiModel;
-    modelRegistry: {
-      getAvailable: () => PiModel[];
-      getAll: () => PiModel[];
-    };
-  },
-  providerId: string,
-): PiModel[] {
+export function filterReportsForConfiguredProviders(ctx: AuthCandidateContext, reports: UsageReport[]): UsageReport[] {
+  const hasCodex = codexAuthCandidateModels(ctx).length > 0;
+  const hasAnthropic = anthropicAuthCandidateModels(ctx).length > 0;
+  return reports.filter(
+    (report) => (report.provider === "codex" && hasCodex) || (report.provider === "anthropic" && hasAnthropic),
+  );
+}
+
+function providerAuthCandidateModels(ctx: AuthCandidateContext, providerId: string): PiModel[] {
+  const available = ctx.modelRegistry.getAvailable();
   const candidates: PiModel[] = [];
   const seen = new Set<string>();
   const add = (model: PiModel | undefined) => {
@@ -66,8 +61,10 @@ function providerAuthCandidateModels(
     candidates.push(model);
   };
 
-  add(ctx.model);
-  for (const model of ctx.modelRegistry.getAvailable()) add(model);
-  for (const model of ctx.modelRegistry.getAll()) add(model);
+  // Prefer the active model, but only when Pi says its auth is configured.
+  if (ctx.model) {
+    add(available.find((model) => model.provider === ctx.model?.provider && model.id === ctx.model.id));
+  }
+  for (const model of available) add(model);
   return candidates;
 }

@@ -2,7 +2,7 @@
 
 A [pi](https://github.com/earendil-works/pi) coding agent extension that reports provider
 usage / rate-limit budgets — OpenAI Codex, Anthropic OAuth, and pi-auth-backed providers — via
-`/usage`, with an optional live statusline widget.
+`/usage`, with a live statusline widget.
 
 ## What it does
 
@@ -10,9 +10,9 @@ usage / rate-limit budgets — OpenAI Codex, Anthropic OAuth, and pi-auth-backed
   APIs, or Anthropic's OAuth usage API) and renders remaining budget/reset windows.
 - Caches results on disk (`~/.pi/agent/usage-cache.json`) for a few minutes so multiple
   concurrent pi sessions don't hammer the provider APIs.
-- Can push a compact usage summary into the statusline, refreshed automatically with retry/backoff
+- Pushes a compact usage summary into the statusline, refreshed automatically with retry/backoff
   on rate limits (`429`).
-- Supports listing and consuming Codex "banked" rate-limit resets.
+- Shows the next Codex banked-reset expiry and supports confirmed, interactive consumption.
 
 ## Commands
 
@@ -20,12 +20,9 @@ usage / rate-limit budgets — OpenAI Codex, Anthropic OAuth, and pi-auth-backed
 |---|---|
 | `/usage` | Show cached usage (fetches fresh data if the cache is stale) |
 | `/usage --refresh` | Force a fresh fetch, bypassing the cache |
-| `/usage --no-statusline` | Don't update the statusline widget |
-| `/usage --clear-statusline` | Clear the usage statusline widget |
 | `/usage --timeout <seconds>` | Set the query timeout |
 | `/usage --raw` | Show raw usage API responses (debugging) |
-| `/usage --list-banked-resets` | List available Codex banked resets and expiry dates |
-| `/usage --consume-banked-reset <id>` | Consume a specific Codex banked reset |
+| `/usage --consume-banked-reset` | Select and consume a Codex banked reset after confirmation |
 
 ## Install
 

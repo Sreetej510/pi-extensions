@@ -11,13 +11,10 @@ export type PiModel = NonNullable<ExtensionContext["model"]>;
 export type ProviderUsageModel = Pick<PiModel, "id" | "name" | "provider">;
 
 export type QueryUsageOptions = {
-  clearStatusline: boolean;
   consumeBankedReset: boolean;
   consumeBankedResetId?: string;
-  listBankedResets: boolean;
   raw: boolean;
   refresh: boolean;
-  statusline: boolean;
   timeoutMs: number;
 };
 
@@ -40,6 +37,7 @@ export type CodexUsageReport = {
   capturedAt: number;
   planType?: string;
   bankedResetsAvailable?: number;
+  nextBankedResetExpiresAt?: number;
   snapshots: NormalizedRateLimitSnapshot[];
 };
 

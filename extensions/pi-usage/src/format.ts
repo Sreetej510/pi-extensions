@@ -18,6 +18,7 @@ import {
   formatNumber,
   normalizedKeyHasToken,
   normalizedUsageKey,
+  truncateEnd,
 } from "./utils.js";
 
 export function formatCodexUsageReport(report: CodexUsageReport, _cacheAgeMs?: number): string {
@@ -28,16 +29,19 @@ export function formatCodexUsageReport(report: CodexUsageReport, _cacheAgeMs?: n
     if (!isPrimaryCodexSnapshot(snapshot)) {
       lines.push(`  ${label} limit:`);
     }
-    if (snapshot.primary) lines.push(formatWindowLine("5h limit:", snapshot.primary));
-    if (snapshot.secondary) lines.push(formatWindowLine("Weekly limit:", snapshot.secondary));
-    if (!snapshot.primary && !snapshot.secondary) {
+    const weeklyWindow = selectCodexWeeklyWindow(snapshot);
+    if (weeklyWindow) lines.push(formatWindowLine("Weekly limit:", weeklyWindow));
+    if (!weeklyWindow) {
       lines.push("  Limits unavailable for this account");
     }
   }
 
   if (report.bankedResetsAvailable !== undefined) {
     lines.push("");
-    lines.push(`  Banked resets available: ${report.bankedResetsAvailable}`);
+    const expiry = report.nextBankedResetExpiresAt
+      ? ` (next expires ${formatReset(report.nextBankedResetExpiresAt)})`
+      : "";
+    lines.push(`  Banked resets available: ${report.bankedResetsAvailable}${expiry}`);
   }
 
   return lines.join("\n");
@@ -48,8 +52,8 @@ export function formatCodexUsageStatusline(report: CodexUsageReport, model?: Pro
   if (!snapshot) return "usage unavailable";
 
   const parts = [formatStatuslinePrefix(snapshot)];
-  if (snapshot.primary) parts.push(`${clampPercent(snapshot.primary.usedPercent).toFixed(0)}% 5h`);
-  if (snapshot.secondary) parts.push(`${clampPercent(snapshot.secondary.usedPercent).toFixed(0)}% wk`);
+  const weeklyWindow = selectCodexWeeklyWindow(snapshot);
+  if (weeklyWindow) parts.push(`${clampPercent(weeklyWindow.usedPercent).toFixed(0)}% wk`);
   if (parts.length === 1 && snapshot.credits) parts.push(formatCredits(snapshot.credits));
   return parts.join(" ");
 }
@@ -75,22 +79,31 @@ export function showReports(ctx: ExtensionCommandContext, reports: UsageReport[]
   ctx.ui.notify(ctx.hasUI ? brightenInfoNotification(text) : text, "info");
 }
 
-export function formatQueryErrors(errors: UsageQueryError[]): string {
-  const lines = ["Unable to read usage for the current provider."];
+export function formatQueryErrors(errors: UsageQueryError[], partial = false): string {
+  if (errors.length === 0) {
+    return "No logged-in Codex or Anthropic providers. Run /login to connect one.";
+  }
+
+  const lines = [partial ? "Some provider usage is unavailable:" : "Usage unavailable:"];
   for (const error of errors) {
     const source =
-      error.source === "pi-auth"
-        ? "Pi Codex auth"
-        : error.source === "codex-app-server"
-          ? "Codex app-server fallback"
-          : "Anthropic OAuth usage";
-    lines.push(`- ${source}: ${error.message}`);
+      error.source === "pi-auth" ? "Codex" : error.source === "codex-app-server" ? "Codex fallback" : "Anthropic";
+    lines.push(`- ${source}: ${compactQueryError(error.message)}`);
   }
-  lines.push("");
-  lines.push(
-    "Tip: use a Pi OpenAI Codex model or Pi Anthropic model. For Codex, /login with OpenAI ChatGPT Plus/Pro. For Anthropic, /login with Anthropic so the OAuth usage endpoint can be queried.",
-  );
   return lines.join("\n");
+}
+
+function compactQueryError(message: string): string {
+  const normalized = message.replace(/\s+/g, " ").trim();
+  if (/invalid_grant|refresh token not found|token refresh request failed/i.test(normalized)) {
+    return "login expired or invalid; run /login to reconnect.";
+  }
+  if (/no .*auth|no api key|not logged in/i.test(normalized)) {
+    return "not logged in; run /login to connect.";
+  }
+
+  const summary = normalized.split(/;\s*(?:details|stack)=/i, 1)[0] ?? normalized;
+  return truncateEnd(summary, 180);
 }
 
 export function progressBarUsed(percentUsed: number): string {
@@ -150,6 +163,19 @@ function codexModelVariantKeys(modelKeys: Set<string>): string[] {
     if (match?.[1]) variants.add(match[1]);
   }
   return [...variants];
+}
+
+function selectCodexWeeklyWindow(snapshot: NormalizedRateLimitSnapshot): NormalizedRateLimitWindow | undefined {
+  const { primary, secondary } = snapshot;
+  if (!primary) return secondary;
+  if (!secondary) return primary;
+
+  if (primary.windowMinutes !== undefined && secondary.windowMinutes !== undefined) {
+    return primary.windowMinutes > secondary.windowMinutes ? primary : secondary;
+  }
+
+  // In the former two-window payload, the weekly limit was secondary.
+  return secondary;
 }
 
 function formatStatuslinePrefix(snapshot: NormalizedRateLimitSnapshot): string {

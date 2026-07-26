@@ -97,26 +97,19 @@ function normalizeCodexResetCreditRow(value: unknown): CodexResetCredit | undefi
   };
 }
 
-export function formatCodexResetCreditList(list: CodexResetCreditList): string {
-  const lines = ["  >_ Codex Banked Resets", ""];
-  lines.push(`  Banked resets available: ${list.availableCount}`);
-  if (list.credits.length === 0) {
-    lines.push("  No banked reset credits found.");
-    return lines.join("\n");
-  }
-  for (const credit of list.credits) {
-    const status = credit.status ? ` [${credit.status}]` : "";
-    const granted = credit.grantedAt ? `granted ${formatIsoReset(credit.grantedAt)}` : undefined;
-    const expires = credit.expiresAt ? `expires ${formatIsoReset(credit.expiresAt)}` : undefined;
-    const timing = [granted, expires].filter(Boolean).join(" • ");
-    lines.push(`  ${credit.id}${status}${timing ? ` — ${timing}` : ""}`);
-  }
-  return lines.join("\n");
-}
-
 export function formatCodexResetCreditChoice(credit: CodexResetCredit): string {
   const expires = credit.expiresAt ? `expires ${formatIsoReset(credit.expiresAt)}` : "no expiry shown";
   return `${credit.id} — ${expires}`;
+}
+
+export function nextCodexResetCreditExpiry(list: CodexResetCreditList): number | undefined {
+  const now = Date.now();
+  const expiries = list.credits
+    .filter((credit) => (credit.status ?? "available").toLowerCase() === "available")
+    .map((credit) => (credit.expiresAt ? Date.parse(credit.expiresAt) : Number.NaN))
+    .filter((expiry) => Number.isFinite(expiry) && expiry > now);
+  if (expiries.length === 0) return undefined;
+  return Math.min(...expiries) / 1000;
 }
 
 function formatIsoReset(value: string, showDay = true): string {

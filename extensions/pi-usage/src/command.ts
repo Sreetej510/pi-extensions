@@ -5,11 +5,11 @@ import {
   consumeCodexResetCredit,
   fetchCodexResetCredits,
   formatCodexResetCreditChoice,
-  formatCodexResetCreditList,
 } from "./codex-reset-credits.js";
 import { CACHE_TTL_MS, COMMAND_NAME } from "./constants.js";
 import { isRateLimitErrorMessage, rateLimitBackoffMs } from "./errors.js";
 import { formatQueryErrors, showReports } from "./format.js";
+import { filterReportsForConfiguredProviders } from "./models.js";
 import { queryAllUsage } from "./query.js";
 import {
   clearSharedBackoff,
@@ -22,7 +22,6 @@ import {
   applyCurrentProviderStatusline,
   clearCodexMemoryCache,
   clearStatuslineValue,
-  clearUsageStatusline,
   getCombinedCache,
   handleStaleContextError,
   isSessionActive,
@@ -44,12 +43,6 @@ export function registerUsageCommand(pi: ExtensionAPI): void {
           return;
         }
 
-        if (options.value.clearStatusline) {
-          clearUsageStatusline(ctx);
-          ctx.ui.notify("Usage statusline cleared.", "info");
-          return;
-        }
-
         if (options.value.raw) {
           const rawTimeoutMs = options.value.timeoutMs;
           void fetchRawUsagePayloads(ctx, rawTimeoutMs)
@@ -64,38 +57,45 @@ export function registerUsageCommand(pi: ExtensionAPI): void {
           return;
         }
 
-        if (options.value.listBankedResets) {
-          const resets = await fetchCodexResetCredits(ctx, options.value.timeoutMs);
-          ctx.ui.notify(formatCodexResetCreditList(resets), "info");
-          return;
-        }
-
         if (options.value.consumeBankedReset) {
           const resets = await fetchCodexResetCredits(ctx, options.value.timeoutMs);
-          if (resets.availableCount <= 0 || resets.credits.length === 0) {
+          const availableCredits = resets.credits.filter(
+            (credit) => (credit.status ?? "available").toLowerCase() === "available",
+          );
+          if (resets.availableCount <= 0 || availableCredits.length === 0) {
             ctx.ui.notify("No Codex banked resets are available.", "info");
             return;
           }
+          if (!ctx.hasUI) {
+            ctx.ui.notify("Consuming a Codex banked reset requires interactive confirmation.", "warning");
+            return;
+          }
+
           let resetId = options.value.consumeBankedResetId;
           if (!resetId) {
-            if (!ctx.hasUI) {
-              ctx.ui.notify(
-                "Usage: /usage --consume-banked-reset <id> (or run with a TUI to pick interactively)",
-                "warning",
-              );
-              return;
-            }
             const selected = await ctx.ui.select(
               "Choose a Codex banked reset to consume",
-              resets.credits.map((credit) => formatCodexResetCreditChoice(credit)),
+              availableCredits.map((credit) => formatCodexResetCreditChoice(credit)),
             );
             if (!selected) return;
-            resetId = resets.credits.find((credit) => formatCodexResetCreditChoice(credit) === selected)?.id;
+            resetId = availableCredits.find((credit) => formatCodexResetCreditChoice(credit) === selected)?.id;
           }
           if (!resetId) {
             ctx.ui.notify("Could not determine which banked reset to consume.", "warning");
             return;
           }
+
+          const credit = availableCredits.find((item) => item.id === resetId);
+          if (!credit) {
+            ctx.ui.notify(`Codex banked reset ${resetId} is not available.`, "warning");
+            return;
+          }
+          const confirmed = await ctx.ui.confirm(
+            "Consume Codex banked reset?",
+            `${formatCodexResetCreditChoice(credit)}\n\nThis action cannot be undone.`,
+          );
+          if (!confirmed) return;
+
           await consumeCodexResetCredit(ctx, options.value.timeoutMs, resetId);
           clearCodexMemoryCache();
           setCombinedCache(undefined);
@@ -130,8 +130,12 @@ export function registerUsageCommand(pi: ExtensionAPI): void {
             }
           }
         }
+        if (cached) {
+          const configuredReports = filterReportsForConfiguredProviders(ctx, cached.reports);
+          cached = configuredReports.length > 0 ? { ...cached, reports: configuredReports } : undefined;
+        }
         if (cached && !options.value.refresh) {
-          if (options.value.statusline) applyCurrentProviderStatusline(ctx, cached.reports);
+          applyCurrentProviderStatusline(ctx, cached.reports);
           showReports(ctx, cached.reports, true);
           return;
         }
@@ -141,13 +145,24 @@ export function registerUsageCommand(pi: ExtensionAPI): void {
         const cmdOptions = options.value;
         // Explicit refresh is a manual override — drop any stored backoff.
         if (cmdOptions.refresh) clearSharedBackoff();
-        if (cmdOptions.statusline) setStatuslineChecking(ctx);
+        setStatuslineChecking(ctx);
         void queryAllUsage(ctx, cmdOptions)
           .then((result) => {
             if (!isSessionActive()) return;
+            const reportedProviders = new Set(result.reports.map((report) => report.provider));
+            if (
+              !reportedProviders.has("anthropic") &&
+              result.errors.some((error) => error.source === "anthropic-oauth")
+            ) {
+              clearSharedUsageReport("anthropic");
+            }
+            if (!reportedProviders.has("codex") && result.errors.some((error) => error.source !== "anthropic-oauth")) {
+              clearSharedUsageReport("codex");
+            }
             if (result.reports.length === 0) {
-              if (cmdOptions.statusline) clearStatuslineValue(ctx);
-              ctx.ui.notify(formatQueryErrors(result.errors), "error");
+              setCombinedCache(undefined);
+              clearStatuslineValue(ctx);
+              ctx.ui.notify(formatQueryErrors(result.errors), "warning");
               return;
             }
             setCombinedCache({ createdAt: Date.now(), reports: result.reports });
@@ -160,16 +175,16 @@ export function registerUsageCommand(pi: ExtensionAPI): void {
                 );
               }
             }
-            const kept = cmdOptions.statusline ? applyCurrentProviderStatusline(ctx, result.reports) : false;
-            if (cmdOptions.statusline && !kept) clearStatuslineValue(ctx);
+            const kept = applyCurrentProviderStatusline(ctx, result.reports);
+            if (!kept) clearStatuslineValue(ctx);
             showReports(ctx, result.reports, false);
             // Surface partial failures (e.g. one provider worked, the other didn't).
             if (result.errors.length > 0) {
-              ctx.ui.notify(formatQueryErrors(result.errors), "warning");
+              ctx.ui.notify(formatQueryErrors(result.errors, true), "warning");
             }
           })
           .catch((error: unknown) => {
-            if (cmdOptions.statusline) clearStatuslineValue(ctx);
+            clearStatuslineValue(ctx);
             if (!handleStaleContextError(ctx, error)) {
               ctx.ui.notify(errorMessage(error), "error");
             }

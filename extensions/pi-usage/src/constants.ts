@@ -35,22 +35,11 @@ export const ANTHROPIC_NON_WINDOW_KEYS = new Set(["five_hour", "seven_day", "ext
 
 export const COMMAND_COMPLETIONS: readonly CommandArgumentCompletion[] = [
   { value: "--refresh", label: "--refresh", description: "Refresh usage instead of cached data" },
-  { value: "--no-statusline", label: "--no-statusline", description: "Do not update the statusline" },
-  {
-    value: "--clear-statusline",
-    label: "--clear-statusline",
-    description: "Clear the usage statusline",
-  },
   { value: "--timeout ", label: "--timeout", description: "Set query timeout in seconds" },
   { value: "--raw", label: "--raw", description: "Show raw usage API responses (for debugging)" },
   {
-    value: "--list-banked-resets",
-    label: "--list-banked-resets",
-    description: "List available Codex banked resets and expiry dates",
-  },
-  {
-    value: "--consume-banked-reset ",
+    value: "--consume-banked-reset",
     label: "--consume-banked-reset",
-    description: "Consume a Codex banked reset by id",
+    description: "Select and consume a Codex banked reset",
   },
 ];
