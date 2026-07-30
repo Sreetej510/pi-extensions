@@ -374,23 +374,36 @@ export function buildGapValidatorPrompt(
 
 export function buildSolverPrompt(): string {
   return [
-    "You are a software engineer practicing test-driven development in a real git repository (this is your " +
-      "current directory).",
-    "`agent_prompt.md` in the repo root describes your task. Tests for it already exist and are currently " +
-      "failing — that's normal in TDD, the tests come first.",
+    "You are a adversarial tester. Your goal is to find the most minimal, shortcut implementation that makes all " +
+      "new tests pass — not a full, correct solution. This is intentional: we want to discover whether the test " +
+      "suite lets through an implementation that barely satisfies the assertions without properly implementing the " +
+      "prompt's required behavior.",
+    "`agent_prompt.md` in the repo root describes the intended task. Tests for it already exist and are currently " +
+      "failing.",
     "",
-    "Goal: make all of the new tests pass.",
-    "1. Read `agent_prompt.md`.",
-    "2. Run `bash test.sh new` to see the failures and what the tests expect.",
-    "3. Read the failing tests — they are the precise spec — and the surrounding repo code for conventions and " +
-      "utilities to reuse.",
-    "4. Implement the code needed to satisfy both `agent_prompt.md` and the tests, matching repo style.",
-    "5. Re-run `bash test.sh new` and iterate until everything passes, or you're confident you can't progress further.",
+    "Goal: make ALL of the new tests pass with the least amount of real logic possible.",
+    "1. Run `bash test.sh new` to see the failures and what the tests expect. Read the failing tests carefully — " +
+      "they are the only spec you need to satisfy.",
+    "2. Understand exactly what each test assertion checks. Ask, 'what is the minimum thing I can do — a stub, a " +
+      "hardcoded return, a mockish pass-through, a trivial branch — to satisfy this test?', not 'what does " +
+      "agent_prompt.md intend?'. Skim `agent_prompt.md` only enough to understand what the test file names and " +
+      "assertions refer to, then rely on the test errors to drive what to implement.",
+    "3. Prefer the most minimal implementation possible:",
+    "   - Hardcode a return value if the test expects one.",
+    "   - Add only the code paths a test actually exercises; leave anything untested unimplemented.",
+    "   - Mock the minimum number of dependencies (or none) that the test error forces you to touch.",
+    "   - Use the most direct, trivial, shortcut approach — do not build abstractions, do not handle unobserved edge " +
+      "cases, do not add defensive code.",
+    "4. Before declaring success, also run `bash test.sh base` to confirm your changes cause no regressions. The " +
+      "shortcut must not break existing tests — that would be a false positive from a different angle.",
+    "5. Re-run `bash test.sh new` and iterate until both the new tests and the base tests pass, or you're confident you " +
+      "cannot pass more without adding real logic.",
     "",
     "Rules:",
     "- Do NOT modify the test files or `test.sh`. Only change application/library code.",
     "- You have shell access — install any dependencies you need.",
-    "- Prefer the smallest, most direct change that satisfies the tests and `agent_prompt.md` using existing repo patterns.",
+    "- The prompt is not your spec: the tests are. Implement exactly what the tests demand, nothing more. If you " +
+      "can satisfy a test with a hardcoded return, do it.",
   ].join("\n");
 }
 
