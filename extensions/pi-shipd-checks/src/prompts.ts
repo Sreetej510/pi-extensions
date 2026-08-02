@@ -45,13 +45,9 @@ function gapFinderPreamble(focusLine: string): string[] {
   return [
     focusLine,
     "You are working inside the actual repository (this is your current directory) in read-only mode. " +
-      "You have access to read/grep/find/ls tools only — you cannot execute code, apply patches, or edit files.",
-    "The repo root contains `agent_prompt.md` (the task description given to a coding agent), `test.patch` (a " +
-      "unified diff adding the hidden tests that will grade that agent's solution), and `solution.patch` (a " +
-      "unified diff of one golden/reference solution).",
-    "Do not rely only on the patch files: read the actual repository files in the working tree to see the file " +
-      "changes in place and to understand which files and behaviors the patches touch. Use `git`-equivalent " +
-      "reasoning by comparing the patched files against their surrounding code.",
+      "You have access to read/grep/find/ls tools only — you cannot execute code or edit files.",
+    "Read `agent_prompt.md` for the task requirements and inspect the repository's existing source/code files " +
+      "with read/grep/find/ls. Base the analysis on the prompt and the observable behavior supported by those code files.",
   ];
 }
 
@@ -61,13 +57,13 @@ const GAP_FINDER_AGGRESSION = [
     "enumerate as many distinct uncovered required behaviors and edge cases as the files justify, then continue " +
     "until an additional sweep finds no new genuine gap.",
   "- Find every gap you can justify with concrete evidence. Do not stop after the first obvious ones — keep reading until " +
-    "you have systematically covered the prompt, `solution.patch`, and relevant repo context.",
-  "- After your first pass, run at least one deliberate second sweep (re-read `agent_prompt.md`, re-scan `solution.patch`, " +
-    "grep the repo) before submitting — but if that sweep still finds nothing, submit an empty list.",
+    "you have systematically covered the prompt and relevant repository code.",
+  "- After your first pass, run at least one deliberate second sweep (re-read `agent_prompt.md` and grep/read the " +
+    "relevant code files) before submitting — but if that sweep still finds nothing, submit an empty list.",
   "- Do not self-censor or merge distinct genuine gaps into one — the validator will prune. Never invent or pad the list " +
     "to seem thorough; an empty array is correct when exhaustive analysis truly finds none.",
-  "- Hunt subtle gaps too: partial coverage (asserted once but not under other valid inputs), behaviors implied by repo " +
-    "convention, interaction effects, ordering/timing, and branches visible in `solution.patch` that no test forces.",
+  "- Hunt subtle gaps too: behaviors that may be missed under other valid inputs, repository conventions, interaction " +
+    "effects, ordering/timing, and branches in the relevant source code that need behavioral coverage.",
   "- Include a candidate only when you can cite specific grounding and a concrete false-pass risk — not to meet a quota.",
 ];
 
@@ -77,8 +73,8 @@ const GAP_FINDER_GROUND_RULES = [
     "is unambiguous from the existing, visible repo. Do not invent requirements the prompt doesn't support.",
   "- Do not propose gaps for things `agent_prompt.md` leaves intentionally open, or for implementation " +
     "details/style the prompt doesn't mandate.",
-  "- Read `test.patch` carefully before deciding something is untested — do not propose a gap that an existing " +
-    "test already covers (even indirectly).",
+  "- Read the relevant source files carefully and distinguish genuinely required behavior from speculation; focus on " +
+    "public outcomes and edge cases that deserve behavioral coverage.",
   "- Keep findings strictly behavioral and publicly observable: a user, caller, or documented public contract must be " +
     "able to observe the required outcome. Do not report internal helper calls, private state, implementation structure, " +
     "call order, file placement, or other incidental mechanics.",
@@ -152,7 +148,7 @@ export function buildReviewerPrompt(role: ReviewerRole, rubric: string, fairness
   return parts.join("\n");
 }
 
-export function buildSentenceGapFinderPrompt(testRubric: string, fairnessRules: string): string {
+export function buildSentenceGapFinderPrompt(testRubric: string, _fairnessRules: string): string {
   const parts = [
     ...gapFinderPreamble(
       "You are an exhaustive behavioral test-gap finder. Review the task prompt sentence by sentence, finding both " +
@@ -163,17 +159,13 @@ export function buildSentenceGapFinderPrompt(testRubric: string, fairnessRules: 
       "Create an explicit TODO checklist of every resulting requirement sentence. Work through it one item at a time; " +
       "do not finish until every item is checked off.",
     "",
-    "Before analyzing each sentence, use read/grep/find/ls to inspect the relevant pre-existing source files, their " +
-      "closest analogues, and relevant existing tests. Use that repository context to understand the actual problem, " +
-      "public contracts, conventions, and what the current tests already cover. Then act as an investigator: first trace " +
-      "every behavior the reference `solution.patch` implements " +
-      "for that sentence — branches, guards, early returns, state transitions, side effects, boundary handling, and " +
-      "negative/prohibited outcomes. Then compare those behaviors against `test.patch` and relevant repository context. " +
-      "Report every distinct, prompt-required behavioral edge case or prohibition that the solution handles but the " +
-      "tests do not catch. A candidate must describe a plausible incorrect implementation that still passes the current " +
-      "suite. Include positive and negative gaps together for that sentence. There is no maximum number of gaps: " +
-      "keep enumerating distinct missing behaviors for this sentence, including boundary, empty, repeated, " +
-      "interacting, and other relevant edge cases; do not treat 10 as sufficient.",
+    "Before analyzing each sentence, use read/grep/find/ls to inspect the relevant source files and their closest " +
+      "analogues. Use that code context to understand the public contracts, conventions, branches, guards, early returns, " +
+      "state transitions, side effects, boundary handling, and negative/prohibited outcomes required by the sentence. " +
+      "Report every distinct, prompt-required behavioral edge case or prohibition that a plausible implementation could " +
+      "miss. Include positive and negative gaps together for that sentence. There is no maximum number of gaps: keep " +
+      "enumerating distinct missing behaviors for this sentence, including boundary, empty, repeated, interacting, " +
+      "and other relevant edge cases; do not treat 10 as sufficient.",
     "",
     ...GAP_FINDER_AGGRESSION,
     "",
@@ -182,12 +174,17 @@ export function buildSentenceGapFinderPrompt(testRubric: string, fairnessRules: 
     "Test-coverage checklist for calibration:",
     testRubric,
   ];
-  if (fairnessRules) parts.push("", "Fairness methodology:", fairnessRules);
   parts.push(
     "",
-    "For every candidate, state the missing fair behavioral test, the relevant solution behavior or branch that led " +
-      "you to investigate it, and why the current suite permits the incorrect behavior. The prompt sentence is the " +
-      "required specification: do not report incidental reference-solution details it does not require. Do not propose " +
+    "Fairness: keep only behavior that a user, caller, or existing public contract can observe. Do not require private " +
+      "helpers, internal state, implementation structure, call order, selectors, or incidental strings unless the task " +
+      "explicitly makes them public requirements.",
+  );
+  parts.push(
+    "",
+    "For every candidate, state the missing fair behavioral test, the relevant source behavior or branch that led you " +
+      "to investigate it, and why a plausible incorrect implementation could evade that test. The prompt sentence is " +
+      "the required specification: do not report incidental implementation details it does not require. Do not propose " +
       "the exact test implementation.",
     `After completing EACH TODO sentence, call \`${GAP_FINDER_TOOL_NAME}\` with that exact sentence and its gap array ` +
       "(including an empty array when none exist). You may and must call the tool multiple times: once per sentence. " +
@@ -325,15 +322,15 @@ export function buildNegativeGapFinderPrompt(testRubric: string, fairnessRules: 
 export function buildGapValidatorPrompt(
   statementReports: StatementGapReport[],
   testRubric: string,
-  fairnessRules: string,
+  _fairnessRules: string,
 ): string {
   const parts = [
     "You are a strict, skeptical fairness auditor for a coding-agent benchmark task.",
     "You are working inside a throwaway, read-only copy of a git repository (this is your current directory). " +
-      "You have access to read/grep/find/ls tools only — you cannot execute code, apply patches, or edit files.",
-    "Two specialized research agents reviewed this same task (`agent_prompt.md`, `test.patch`, `solution.patch`, " +
-      "and the repo) sentence by sentence, proposing both positive (missing required-behavior) and negative " +
-      "(missing forbidden/wrong-behavior) gaps. It submitted the following per-sentence candidate report:",
+      "You have access to read/grep/find/ls tools only — you cannot execute code or edit files.",
+    "Two specialized research agents reviewed `agent_prompt.md` and the repository's source/code files sentence by " +
+      "sentence, proposing both positive (missing required-behavior) and negative (missing forbidden/wrong-behavior) " +
+      "gaps. It submitted the following per-sentence candidate report:",
     "",
     JSON.stringify(statementReports, null, 2),
     "",
@@ -343,12 +340,10 @@ export function buildGapValidatorPrompt(
       "clearly visible, existing repo behavior. Drop anything speculative, nice-to-have, or invented beyond what " +
       "the prompt actually asks for.",
     "2. Fair to test — verifying it would not require undiscoverable private internals, an invented/unnamed API, " +
-      "or exact incidental structure that only `solution.patch` happens to use. Judge this precisely against the " +
-      "fairness methodology below.",
-    "3. A real, distinct coverage hole — re-check `test.patch` yourself; drop any candidate an existing test " +
-      "already covers, and drop near-duplicate candidates (keep only the clearest phrasing of each distinct gap). " +
-      "For negative-case candidates, keep them only if `test.patch` does not already assert that the forbidden/" +
-      "wrong outcome does not occur.",
+      "or exact incidental implementation structure. Judge this precisely against the fairness guidance below.",
+    "3. A real, distinct behavioral gap — drop near-duplicate candidates and keep only the clearest phrasing of each " +
+      "distinct gap. Retain a candidate only when the source code and prompt provide concrete grounding for a behavior " +
+      "that deserves an explicit public-outcome check.",
     "4. Behaviorally testable through a public contract — drop candidates that would require an internal helper, " +
       "private state, implementation structure, call order, DOM class/attribute/data hook, selector, or exact " +
       "string literal. The sole exceptions are details explicitly named in `agent_prompt.md` or already established " +
@@ -361,9 +356,12 @@ export function buildGapValidatorPrompt(
     testRubric,
   ];
 
-  if (fairnessRules) {
-    parts.push("", "Fairness methodology:", fairnessRules);
-  }
+  parts.push(
+    "",
+    "Fairness: keep only behavior that a user, caller, or existing public contract can observe. Do not require private " +
+      "helpers, internal state, implementation structure, call order, selectors, or incidental strings unless the task " +
+      "explicitly makes them public requirements.",
+  );
 
   parts.push(
     "",
