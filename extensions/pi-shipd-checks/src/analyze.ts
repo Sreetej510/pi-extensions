@@ -66,9 +66,12 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
       const duration = state.startedAt !== undefined ? formatDuration(endTime - state.startedAt) : "—";
       const details = result.details as { testGaps?: unknown[] } | undefined;
       const gapCount = Array.isArray(details?.testGaps) ? details.testGaps.length : undefined;
-      const gapLabel = gapCount === undefined ? "gaps —" : `${gapCount} gap${gapCount === 1 ? "" : "s"}`;
+      const metaParts = [`${label} ${duration}`];
+      if (gapCount !== undefined) {
+        metaParts.push(`${gapCount} gap${gapCount === 1 ? "" : "s"}`);
+      }
       const header =
-        theme.fg("toolTitle", theme.bold("Gap Finder")) + theme.fg("muted", `  ${label} ${duration}  ·  ${gapLabel}`);
+        theme.fg("toolTitle", theme.bold("Gap Finder")) + theme.fg("muted", `  ${metaParts.join("  ·  ")}`);
       const resultText = (result.content ?? []).map((part) => (part.type === "text" ? part.text : "")).join("\n");
       const output = resultText.trim();
       let displayLines = output ? removeJustifications(output.split("\n")) : ["(no output)"];
