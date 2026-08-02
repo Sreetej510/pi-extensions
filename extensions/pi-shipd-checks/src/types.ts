@@ -26,6 +26,17 @@ export interface ChecksConfig {
   modelId: string;
   thinkingLevel: ThinkingLevel;
   solverGap?: SolverGapConfig;
+  /** Whether the agent-callable `analyze_test_gaps` tool is enabled (default: off, like HPC tools). */
+  enableAnalyzeTool?: boolean;
+  /** Dedicated model/thinking-level for the `analyze_test_gaps` tool's finder + reviewer agents. */
+  analyzeGap?: AnalyzeGapConfig;
+}
+
+/** Model/thinking-level settings for the agent-callable `analyze_test_gaps` tool. */
+export interface AnalyzeGapConfig {
+  provider: string;
+  modelId: string;
+  thinkingLevel: ThinkingLevel;
 }
 
 export interface ReviewReport {

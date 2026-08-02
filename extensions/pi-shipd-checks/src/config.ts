@@ -8,7 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ChecksConfig, SolverGapConfig, ThinkingLevel } from "./types.js";
+import type { AnalyzeGapConfig, ChecksConfig, SolverGapConfig, ThinkingLevel } from "./types.js";
 
 export const CONFIG_PATH = join(getAgentDir(), "checks-config.json");
 export const SETTINGS_PATH = join(getAgentDir(), "settings.json");
@@ -22,6 +22,8 @@ export const SOLVER_GAP_SOLVER_COUNT_MAX = 5;
 export const SOLVER_GAP_DEFAULT_SOLVER_COUNT = 3;
 
 export const SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS = true;
+
+export const ANALYZE_GAP_DEFAULT_ENABLED = false;
 
 /**
  * Mirrors `getSupportedThinkingLevels` from `@earendil-works/pi-ai` (not part of
@@ -72,6 +74,18 @@ export function loadSolverGapConfig(): SolverGapConfig | null {
     saveArtifacts:
       typeof solverGap.saveArtifacts === "boolean" ? solverGap.saveArtifacts : SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
   };
+}
+
+/** Whether the agent-callable `analyze_test_gaps` tool is enabled in the checks config. */
+export function isAnalyzeToolEnabled(): boolean {
+  return loadChecksConfig()?.enableAnalyzeTool ?? ANALYZE_GAP_DEFAULT_ENABLED;
+}
+
+/** The nested `analyzeGap` section (dedicated model for the analyze_test_gaps tool), normalized with sane defaults. */
+export function loadAnalyzeGapConfig(): AnalyzeGapConfig | null {
+  const analyzeGap = loadChecksConfig()?.analyzeGap;
+  if (!analyzeGap?.provider || !analyzeGap.modelId || !analyzeGap.thinkingLevel) return null;
+  return { ...analyzeGap };
 }
 
 export function loadEnabledModelRefs(): string[] {

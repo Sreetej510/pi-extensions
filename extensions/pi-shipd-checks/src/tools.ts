@@ -71,7 +71,12 @@ const gapFinderToolParams = Type.Object({
         description: "Why an incorrect implementation could pass the current tests despite this missing behavior.",
       }),
     }),
-    { description: "All candidate positive and negative gaps for this sentence; use an empty array when none exist." },
+    {
+      description:
+        "All candidate positive and negative gaps for this sentence; there is no maximum or target count, so " +
+        "include every distinct evidence-backed gap and relevant edge case rather than stopping at 10; use an " +
+        "empty array only when exhaustive analysis finds none.",
+    },
   ),
 });
 
