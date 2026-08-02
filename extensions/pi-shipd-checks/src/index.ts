@@ -46,6 +46,13 @@ import { PROGRESS_WIDGET_KEY } from "./progress.js";
 import type { SolverSummaryDetail } from "./report.js";
 import { formatDuration } from "./report.js";
 import { cancelReview, isReviewInProgress } from "./state.js";
+import {
+  isAnalyzeSyncNeeded,
+  isAnalyzeSyncPending,
+  onAnalyzeProjectContext,
+  scheduleDelayedAnalyzeSync,
+  syncAnalyzeTool,
+} from "./tool-sync.js";
 
 const CANCEL_SHORTCUT = Key.ctrlShift("x");
 
@@ -116,5 +123,25 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
     },
   });
 
+  registerAnalyzeGapsSync(pi);
   registerChecksCommand(pi);
+}
+
+/** Keeps the analyze_test_gaps tool visible only while enabled (like HPC tools). */
+function registerAnalyzeGapsSync(pi: ExtensionAPI) {
+  pi.on("session_start", (event, _ctx) => {
+    // New, resume, reload, fork — load the persisted setting for this session.
+    onAnalyzeProjectContext(pi);
+    if (event.reason === "resume" || event.reason === "reload" || event.reason === "startup") {
+      scheduleDelayedAnalyzeSync(pi);
+    }
+  });
+  pi.on("session_tree", () => {
+    // Branch navigation can restore a different active-tool list.
+    onAnalyzeProjectContext(pi);
+  });
+  pi.on("before_agent_start", () => {
+    if (!isAnalyzeSyncPending() && !isAnalyzeSyncNeeded(pi)) return;
+    syncAnalyzeTool(pi);
+  });
 }

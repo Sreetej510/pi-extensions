@@ -44,18 +44,22 @@ const ROLE_FOCUS: Record<ReviewerRoleKey, string> = {
 function gapFinderPreamble(focusLine: string): string[] {
   return [
     focusLine,
-    "You are working inside a throwaway, read-only copy of a git repository (this is your current directory). " +
+    "You are working inside the actual repository (this is your current directory) in read-only mode. " +
       "You have access to read/grep/find/ls tools only — you cannot execute code, apply patches, or edit files.",
     "The repo root contains `agent_prompt.md` (the task description given to a coding agent), `test.patch` (a " +
       "unified diff adding the hidden tests that will grade that agent's solution), and `solution.patch` (a " +
       "unified diff of one golden/reference solution).",
-    "Another specialized agent is searching the complementary direction in parallel — stay in your lane and do not " +
-      "duplicate its work.",
+    "Do not rely only on the patch files: read the actual repository files in the working tree to see the file " +
+      "changes in place and to understand which files and behaviors the patches touch. Use `git`-equivalent " +
+      "reasoning by comparing the patched files against their surrounding code.",
   ];
 }
 
 const GAP_FINDER_AGGRESSION = [
   "Thoroughness — your job is high recall on genuine gaps only:",
+  "- There is no target count or cap: do not stop at 10 (or any other arbitrary number). For each prompt sentence, " +
+    "enumerate as many distinct uncovered required behaviors and edge cases as the files justify, then continue " +
+    "until an additional sweep finds no new genuine gap.",
   "- Find every gap you can justify with concrete evidence. Do not stop after the first obvious ones — keep reading until " +
     "you have systematically covered the prompt, `solution.patch`, and relevant repo context.",
   "- After your first pass, run at least one deliberate second sweep (re-read `agent_prompt.md`, re-scan `solution.patch`, " +
@@ -167,7 +171,9 @@ export function buildSentenceGapFinderPrompt(testRubric: string, fairnessRules: 
       "negative/prohibited outcomes. Then compare those behaviors against `test.patch` and relevant repository context. " +
       "Report every distinct, prompt-required behavioral edge case or prohibition that the solution handles but the " +
       "tests do not catch. A candidate must describe a plausible incorrect implementation that still passes the current " +
-      "suite. Include positive and negative gaps together for that sentence.",
+      "suite. Include positive and negative gaps together for that sentence. There is no maximum number of gaps: " +
+      "keep enumerating distinct missing behaviors for this sentence, including boundary, empty, repeated, " +
+      "interacting, and other relevant edge cases; do not treat 10 as sufficient.",
     "",
     ...GAP_FINDER_AGGRESSION,
     "",

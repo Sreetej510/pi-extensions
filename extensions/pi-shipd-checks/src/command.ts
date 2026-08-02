@@ -40,7 +40,9 @@ import {
   writeSolverSolutionsToDisk,
 } from "./solvergap.js";
 import { endReview, isReviewInProgress, startReview } from "./state.js";
+import { analyzeToolSettingChanged } from "./tool-sync.js";
 import type {
+  AnalyzeGapConfig,
   CommandOption,
   GapStageResult,
   SolverGap,
@@ -135,6 +137,12 @@ const DEFAULT_SOLVER_GAP: SolverGapConfig = {
   saveArtifacts: SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
 };
 
+const DEFAULT_ANALYZE_GAP: AnalyzeGapConfig = {
+  provider: "",
+  modelId: "",
+  thinkingLevel: "off",
+};
+
 type ConfigRowId =
   | "reviewer-model"
   | "reviewer-thinking"
@@ -142,11 +150,14 @@ type ConfigRowId =
   | "solvergap-thinking"
   | "solvergap-timeout"
   | "solvergap-solver-count"
-  | "solvergap-save-artifacts";
+  | "solvergap-save-artifacts"
+  | "analyze-enabled"
+  | "analyze-model"
+  | "analyze-thinking";
 
 interface ConfigRow {
   id: ConfigRowId;
-  section: "Reviewer" | "Solver";
+  section: "Reviewer" | "Solver" | "Analyze Tool";
   label: string;
   value: string;
   /** "model" rows open a picker (closes the menu, then reopens it); "cycle" rows step through `values` in place. */
@@ -159,10 +170,14 @@ function buildConfigRows(
   ctx: ExtensionCommandContext,
   current: ChecksConfigLike | null,
   solverGap: SolverGapConfig,
+  analyzeGap: AnalyzeGapConfig,
 ): ConfigRow[] {
   const reviewerLevels = current ? supportedThinkingLevelsFor(ctx, current.provider, current.modelId) : ["off"];
   const solverGapLevels = solverGap.provider
     ? supportedThinkingLevelsFor(ctx, solverGap.provider, solverGap.modelId)
+    : ["off"];
+  const analyzeGapLevels = analyzeGap.provider
+    ? supportedThinkingLevelsFor(ctx, analyzeGap.provider, analyzeGap.modelId)
     : ["off"];
   return [
     {
@@ -224,6 +239,29 @@ function buildConfigRows(
       kind: "cycle",
       values: ["on", "off"],
     },
+    {
+      id: "analyze-enabled",
+      section: "Analyze Tool",
+      label: "Enabled",
+      value: current?.enableAnalyzeTool ? "on" : "off",
+      kind: "cycle",
+      values: ["on", "off"],
+    },
+    {
+      id: "analyze-model",
+      section: "Analyze Tool",
+      label: "Model",
+      value: analyzeGap.provider ? `${analyzeGap.provider}/${analyzeGap.modelId}` : "not set",
+      kind: "model",
+    },
+    {
+      id: "analyze-thinking",
+      section: "Analyze Tool",
+      label: "Thinking level",
+      value: analyzeGap.thinkingLevel,
+      kind: "cycle",
+      values: analyzeGapLevels,
+    },
   ];
 }
 
@@ -232,6 +270,8 @@ type ChecksConfigLike = {
   modelId: string;
   thinkingLevel: ThinkingLevel;
   solverGap?: SolverGapConfig;
+  enableAnalyzeTool?: boolean;
+  analyzeGap?: AnalyzeGapConfig;
 };
 
 /** Custom row-based menu component: renders section headers inline between "Reviewer" and "Solver" rows. Cycling rows update and persist in place (no overlay teardown); only model rows exit the overlay to run a picker. */
@@ -246,13 +286,23 @@ class ConfigMenuComponent {
     private onActivateModel: (id: ConfigRowId) => void,
     private onExit: () => void,
   ) {
-    this.rows = buildConfigRows(ctx, loadChecksConfig(), loadChecksConfig()?.solverGap ?? DEFAULT_SOLVER_GAP);
+    this.rows = buildConfigRows(
+      ctx,
+      loadChecksConfig(),
+      loadChecksConfig()?.solverGap ?? DEFAULT_SOLVER_GAP,
+      loadChecksConfig()?.analyzeGap ?? DEFAULT_ANALYZE_GAP,
+    );
   }
 
   /** Recompute rows from the latest saved config (used after a model picker returns) without resetting selection. */
   refresh() {
     const current = loadChecksConfig();
-    this.rows = buildConfigRows(this.ctx, current, current?.solverGap ?? DEFAULT_SOLVER_GAP);
+    this.rows = buildConfigRows(
+      this.ctx,
+      current,
+      current?.solverGap ?? DEFAULT_SOLVER_GAP,
+      current?.analyzeGap ?? DEFAULT_ANALYZE_GAP,
+    );
     this.selectedIndex = Math.min(this.selectedIndex, this.rows.length - 1);
   }
 
@@ -310,11 +360,12 @@ class ConfigMenuComponent {
         return;
       }
       const solverGap = current.solverGap ?? DEFAULT_SOLVER_GAP;
+      const analyzeGap = current.analyzeGap ?? DEFAULT_ANALYZE_GAP;
       const currentIndex = row.values.indexOf(row.value);
       const nextValue = row.values[(currentIndex + 1) % row.values.length];
       if (nextValue === undefined) return;
       if (row.id === "reviewer-thinking") {
-        saveChecksConfig({ ...current, thinkingLevel: nextValue as ThinkingLevel, solverGap });
+        saveChecksConfig({ ...current, thinkingLevel: nextValue as ThinkingLevel, solverGap, analyzeGap });
       } else if (row.id === "solvergap-thinking") {
         saveChecksConfig({ ...current, solverGap: { ...solverGap, thinkingLevel: nextValue as ThinkingLevel } });
       } else if (row.id === "solvergap-timeout") {
@@ -323,6 +374,10 @@ class ConfigMenuComponent {
         saveChecksConfig({ ...current, solverGap: { ...solverGap, solverCount: Number.parseInt(nextValue, 10) } });
       } else if (row.id === "solvergap-save-artifacts") {
         saveChecksConfig({ ...current, solverGap: { ...solverGap, saveArtifacts: nextValue === "on" } });
+      } else if (row.id === "analyze-enabled") {
+        saveChecksConfig({ ...current, enableAnalyzeTool: nextValue === "on" });
+      } else if (row.id === "analyze-thinking") {
+        saveChecksConfig({ ...current, analyzeGap: { ...analyzeGap, thinkingLevel: nextValue as ThinkingLevel } });
       }
       this.refresh();
       this.onCycleSaved();
@@ -330,8 +385,8 @@ class ConfigMenuComponent {
   }
 }
 
-/** Interactive `/checks --config` settings menu: a single row-based menu with "Reviewer" / "Solver" section headers; Ctrl+S (or Esc) saves and exits. */
-async function runConfigFlow(ctx: ExtensionCommandContext) {
+/** Interactive `/checks --config` settings menu: a single row-based menu with "Reviewer" / "Solver" / "Analyze Tool" section headers; Ctrl+S (or Esc) saves and exits. */
+async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
   if (ctx.mode !== "tui") {
     ctx.ui.notify("/checks --config requires interactive mode", "error");
     return;
@@ -344,7 +399,10 @@ async function runConfigFlow(ctx: ExtensionCommandContext) {
         ctx,
         getSettingsListTheme(),
         theme,
-        () => tui.requestRender(),
+        () => {
+          analyzeToolSettingChanged(pi);
+          tui.requestRender();
+        },
         (id) => done(id),
         () => done(undefined),
       );
@@ -378,6 +436,7 @@ async function runConfigFlow(ctx: ExtensionCommandContext) {
 
     const current = loadChecksConfig();
     const solverGap = current?.solverGap ?? DEFAULT_SOLVER_GAP;
+    const analyzeGap = current?.analyzeGap ?? DEFAULT_ANALYZE_GAP;
 
     if (activated === "reviewer-model") {
       const picked = await pickModelOnly(ctx, current, "Select reviewer model");
@@ -386,7 +445,13 @@ async function runConfigFlow(ctx: ExtensionCommandContext) {
       const thinkingLevel = levels.includes(current?.thinkingLevel ?? "off")
         ? (current?.thinkingLevel ?? "off")
         : (levels[0] ?? "off");
-      saveChecksConfig({ ...picked, thinkingLevel, solverGap });
+      saveChecksConfig({
+        ...picked,
+        thinkingLevel,
+        solverGap,
+        analyzeGap,
+        enableAnalyzeTool: current?.enableAnalyzeTool,
+      });
       ctx.ui.notify(`Reviewer model saved: ${picked.provider}/${picked.modelId}`, "info");
       continue;
     }
@@ -402,6 +467,20 @@ async function runConfigFlow(ctx: ExtensionCommandContext) {
       const thinkingLevel = levels.includes(solverGap.thinkingLevel) ? solverGap.thinkingLevel : (levels[0] ?? "off");
       saveChecksConfig({ ...current, solverGap: { ...solverGap, ...picked, thinkingLevel } });
       ctx.ui.notify(`Solver model saved: ${picked.provider}/${picked.modelId}`, "info");
+      continue;
+    }
+
+    if (activated === "analyze-model") {
+      if (!current) {
+        ctx.ui.notify("Set the reviewer model first — it's required before analyze-tool settings.", "warning");
+        continue;
+      }
+      const picked = await pickModelOnly(ctx, analyzeGap.provider ? analyzeGap : null, "Select analyze tool model");
+      if (!picked) continue;
+      const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
+      const thinkingLevel = levels.includes(analyzeGap.thinkingLevel) ? analyzeGap.thinkingLevel : (levels[0] ?? "off");
+      saveChecksConfig({ ...current, analyzeGap: { ...analyzeGap, ...picked, thinkingLevel } });
+      ctx.ui.notify(`Analyze tool model saved: ${picked.provider}/${picked.modelId}`, "info");
     }
   }
 }
@@ -431,7 +510,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
       }
       if (tokens.includes("--config")) {
         if (tokens.length > 1) ctx.ui.notify("--config cannot be combined with other options.", "warning");
-        else await runConfigFlow(ctx);
+        else await runConfigFlow(pi, ctx);
         return;
       }
       const runGapFinder = tokens.includes("--gap-finder");
