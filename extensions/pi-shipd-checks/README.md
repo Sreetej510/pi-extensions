@@ -47,6 +47,8 @@ The two finder flags are additive/combinable; `--config` must be used alone.
 | `/checks --gap-finder` | Find gaps sentence-by-sentence, then review them for fairness |
 | `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
 | `/checks --config` | Configure behavioral and solver gap-finder models |
+| `/analyze:on` | Enable the agent-callable Gap Finder tool for the current project |
+| `/analyze:off` | Disable the agent-callable Gap Finder tool for the current project |
 
 **Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run.
 
@@ -58,12 +60,20 @@ The two finder flags are additive/combinable; `--config` must be used alone.
   solver-solution comparison agent.
 - **Solver**: model and thinking level for TDD solver agents, plus their timeout, parallel solver
   count, and artifact-saving setting.
-- **Analyze Tool**: enable/disable the agent-callable `analyze_test_gaps` tool (off by default,
-  like HPC tools) and pick the model + thinking level for its finder/reviewer agents.
+- **Analyze Tool**: pick the model + thinking level for the agent-callable Gap Finder tool.
+
+Use `/analyze:on` and `/analyze:off` to control the tool per project, like HPC. The enabled project
+list is stored alongside the other settings in `~/.pi/agent/checks-config.json`:
+
+```json
+{
+  "enabledProjects": ["/path/to/project"]
+}
+```
 
 Use ↑/↓ to select a row and Enter/Space to change it. The currently selected model is shown first
-in its picker. Settings are saved to `~/.pi/agent/checks-config.json`; solver settings are nested
-under `solverGap` and analyze-tool settings under `analyzeGap`.
+in its picker. Model settings are saved to `~/.pi/agent/checks-config.json`; solver settings are nested
+under `solverGap` and analyze-tool model settings under `analyzeGap`.
 
 ## Install
 

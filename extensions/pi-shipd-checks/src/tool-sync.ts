@@ -2,7 +2,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ANALYZE_TOOL_NAME, registerAnalyzeGapsTool } from "./analyze.js";
-import { isAnalyzeToolEnabled } from "./config.js";
+import { isAnalyzeProjectEnabled, setAnalyzeProjectEnabled } from "./config.js";
 
 let analyzeEnabled = false;
 let toolsRegistered = false;
@@ -67,9 +67,9 @@ export function syncAnalyzeTool(pi: ExtensionAPI): void {
   applyAnalyzeToolVisibility(pi, want);
 }
 
-/** Load the persisted setting for the current session and synchronize immediately. */
-export function onAnalyzeProjectContext(pi: ExtensionAPI): void {
-  analyzeEnabled = isAnalyzeToolEnabled();
+/** Load the persisted per-project setting for the current session and synchronize immediately. */
+export function onAnalyzeProjectContext(pi: ExtensionAPI, cwd: string): void {
+  analyzeEnabled = isAnalyzeProjectEnabled(cwd);
   pendingToolSync = true;
   scheduleAnalyzeSync(pi);
 }
@@ -103,9 +103,17 @@ export function isAnalyzeSyncPending(): boolean {
   return pendingToolSync;
 }
 
-/** Called after /checks --config changes the enable flag. */
-export function analyzeToolSettingChanged(pi: ExtensionAPI): void {
-  analyzeEnabled = isAnalyzeToolEnabled();
+/** Persist and apply the per-project setting, just like /hpc:on and /hpc:off. */
+export function setAnalyzeEnabled(pi: ExtensionAPI, cwd: string, enabled: boolean): void {
+  analyzeEnabled = enabled;
+  setAnalyzeProjectEnabled(cwd, enabled);
+  pendingToolSync = true;
+  syncAnalyzeTool(pi);
+}
+
+/** Called after the settings menu changes the current project's enable flag. */
+export function analyzeToolSettingChanged(pi: ExtensionAPI, cwd: string): void {
+  analyzeEnabled = isAnalyzeProjectEnabled(cwd);
   pendingToolSync = true;
   syncAnalyzeTool(pi);
 }

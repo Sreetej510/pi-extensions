@@ -83,6 +83,20 @@ const GAP_FINDER_GROUND_RULES = [
     "public API behavior that accepts equivalent implementations.",
 ];
 
+const GAP_VALIDATOR_ADDITIONAL_RULES = [
+  "General calibration for validation:",
+  "- Check the required semantic properties and observable outcomes, while allowing valid additional data or equivalent " +
+    "implementations that do not weaken the contract.",
+  "- Assert relationships and effects required by the prompt rather than selecting an arbitrary concrete value when the " +
+    "prompt or an established public contract does not determine one.",
+  "- Compare behavior semantically. Do not reject equivalent representations merely because their syntax, formatting, " +
+    "ordering, or serialization differs unless that representation is part of the stated contract.",
+  "- Require exact wording, formatting, timing, or reporting details only when the prompt or an established public " +
+    "contract makes them observable requirements; otherwise validate the underlying operation or result.",
+  "- Do not invent behavior for cases the prompt leaves open. Treat examples, defaults, neighboring implementation " +
+    "choices, and reference-solution conventions as context, not as additional requirements.",
+];
+
 export function buildReviewerPrompt(role: ReviewerRole, rubric: string, fairnessRules: string): string {
   const parts = [
     "You are a careful, calibrated reviewer for a coding-agent benchmark task.",
@@ -361,6 +375,8 @@ export function buildGapValidatorPrompt(
     "Fairness: keep only behavior that a user, caller, or existing public contract can observe. Do not require private " +
       "helpers, internal state, implementation structure, call order, selectors, or incidental strings unless the task " +
       "explicitly makes them public requirements.",
+    "",
+    ...GAP_VALIDATOR_ADDITIONAL_RULES,
   );
 
   parts.push(

@@ -89,10 +89,8 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
       return component;
     },
     async execute(_toolCallId, _params, signal, onUpdate, ctx) {
-      if (!isAnalyzeToolEnabled()) {
-        throw new Error(
-          "analyze_test_gaps is disabled. Enable it via /checks --config (Analyze Tool section -> Enabled).",
-        );
+      if (!isAnalyzeToolEnabled(ctx.cwd)) {
+        throw new Error("analyze_test_gaps is disabled for this project. Enable it with /analyze:on.");
       }
 
       const promptPath = join(ctx.cwd, "agent_prompt.md");
