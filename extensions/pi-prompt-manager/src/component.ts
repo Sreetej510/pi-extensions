@@ -26,8 +26,8 @@ export class PromptManagerComponent {
       return;
     }
     if (matchesKey(data, "down") || data === "j") {
-      if (this.selectedIndex < n - 1) {
-        this.selectedIndex++;
+      if (n > 0) {
+        this.selectedIndex = this.selectedIndex < n - 1 ? this.selectedIndex + 1 : 0;
         this.invalidate();
       }
       return;
