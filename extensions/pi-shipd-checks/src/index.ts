@@ -1,8 +1,8 @@
 /**
  * Shipd Checks Extension for pi
  *
- * Behavioral test-gap analysis for a task's agent_prompt.md, test.patch, and
- * solution.patch, with an optional solver-based gap finder.
+ * Behavioral test-gap analysis for a task's agent_prompt.md and repository source,
+ * with an optional solver-based gap finder.
  *
  * Flow:
  *   1. Snapshot the current git HEAD (no working-dir mutation) into a temp dir
@@ -16,7 +16,9 @@
  *   4. Post a one-line chat message and merge gap-finder results into
  *      shipd_report.json in the project root.
  *
- * Commands (the two finder flags are additive; --config must be used alone):
+ * Commands:
+ *   /analyze:on           enable the agent-callable Gap Finder for this project
+ *   /analyze:off          disable the agent-callable Gap Finder for this project
  *   /checks               list available options (runs nothing)
  *   /checks --gap-finder  run positive + negative gap finders, then validator
  *   /checks --solver-gap-finder  run several TDD solver agents, then compare their solutions to find gaps
@@ -51,12 +53,29 @@ import {
   isAnalyzeSyncPending,
   onAnalyzeProjectContext,
   scheduleDelayedAnalyzeSync,
+  setAnalyzeEnabled,
   syncAnalyzeTool,
 } from "./tool-sync.js";
 
 const CANCEL_SHORTCUT = Key.ctrlShift("x");
 
 export default function shipdChecksExtension(pi: ExtensionAPI) {
+  pi.registerCommand("analyze:on", {
+    description: "Enable the Gap Finder tool for this project folder",
+    handler: async (_args, ctx) => {
+      setAnalyzeEnabled(pi, ctx.cwd, true);
+      ctx.ui.notify("Gap Finder tool ON in this project", "info");
+    },
+  });
+
+  pi.registerCommand("analyze:off", {
+    description: "Disable the Gap Finder tool for this project folder",
+    handler: async (_args, ctx) => {
+      setAnalyzeEnabled(pi, ctx.cwd, false);
+      ctx.ui.notify("Gap Finder tool OFF in this project", "info");
+    },
+  });
+
   pi.registerMessageRenderer<{
     gapsCount?: number;
     showGaps?: boolean;
@@ -129,16 +148,16 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
 
 /** Keeps the analyze_test_gaps tool visible only while enabled (like HPC tools). */
 function registerAnalyzeGapsSync(pi: ExtensionAPI) {
-  pi.on("session_start", (event, _ctx) => {
+  pi.on("session_start", (event, ctx) => {
     // New, resume, reload, fork — load the persisted setting for this session.
-    onAnalyzeProjectContext(pi);
+    onAnalyzeProjectContext(pi, ctx.cwd);
     if (event.reason === "resume" || event.reason === "reload" || event.reason === "startup") {
       scheduleDelayedAnalyzeSync(pi);
     }
   });
-  pi.on("session_tree", () => {
+  pi.on("session_tree", async (_event, ctx) => {
     // Branch navigation can restore a different active-tool list.
-    onAnalyzeProjectContext(pi);
+    onAnalyzeProjectContext(pi, ctx.cwd);
   });
   pi.on("before_agent_start", () => {
     if (!isAnalyzeSyncPending() && !isAnalyzeSyncNeeded(pi)) return;

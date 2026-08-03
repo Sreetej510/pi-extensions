@@ -26,7 +26,9 @@ export interface ChecksConfig {
   modelId: string;
   thinkingLevel: ThinkingLevel;
   solverGap?: SolverGapConfig;
-  /** Whether the agent-callable `analyze_test_gaps` tool is enabled (default: off, like HPC tools). */
+  /** Project folders where the agent-callable Gap Finder tool is enabled. */
+  enabledProjects?: string[];
+  /** Legacy global setting retained for migration. */
   enableAnalyzeTool?: boolean;
   /** Dedicated model/thinking-level for the `analyze_test_gaps` tool's finder + reviewer agents. */
   analyzeGap?: AnalyzeGapConfig;

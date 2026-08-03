@@ -12,7 +12,6 @@ import type { AnalyzeGapConfig, ChecksConfig, SolverGapConfig, ThinkingLevel } f
 
 export const CONFIG_PATH = join(getAgentDir(), "checks-config.json");
 export const SETTINGS_PATH = join(getAgentDir(), "settings.json");
-
 export const SOLVER_GAP_TIMEOUT_MIN_MINUTES = 10;
 export const SOLVER_GAP_TIMEOUT_MAX_MINUTES = 60;
 export const SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES = 20;
@@ -76,8 +75,55 @@ export function loadSolverGapConfig(): SolverGapConfig | null {
   };
 }
 
-/** Whether the agent-callable `analyze_test_gaps` tool is enabled in the checks config. */
-export function isAnalyzeToolEnabled(): boolean {
+/** Read the existing checks config without requiring model settings to be configured yet. */
+function readRawChecksConfig(): Record<string, unknown> {
+  try {
+    if (!existsSync(CONFIG_PATH)) return {};
+    const parsed: unknown = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Project folders where the agent-callable Gap Finder tool is enabled. */
+export function loadAnalyzeEnabledProjects(): string[] {
+  const projects = readRawChecksConfig().enabledProjects;
+  return Array.isArray(projects) ? projects.filter((project): project is string => typeof project === "string") : [];
+}
+
+export function isAnalyzeProjectEnabled(cwd: string): boolean {
+  const raw = readRawChecksConfig();
+  if (Array.isArray(raw.enabledProjects)) {
+    return raw.enabledProjects.some((project) => project === cwd);
+  }
+  // Backward compatibility for the old global setting until /analyze:on|off is used.
+  return loadChecksConfig()?.enableAnalyzeTool ?? ANALYZE_GAP_DEFAULT_ENABLED;
+}
+
+export function setAnalyzeProjectEnabled(cwd: string, enabled: boolean): void {
+  const projects = new Set(loadAnalyzeEnabledProjects());
+  if (enabled) projects.add(cwd);
+  else projects.delete(cwd);
+  const nextProjects = [...projects];
+  const current = loadChecksConfig();
+  if (current) {
+    saveChecksConfig({ ...current, enabledProjects: nextProjects });
+    return;
+  }
+
+  const dir = dirname(CONFIG_PATH);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    CONFIG_PATH,
+    JSON.stringify({ ...readRawChecksConfig(), enabledProjects: nextProjects }, null, 2),
+    "utf-8",
+  );
+}
+
+/** Whether the agent-callable `analyze_test_gaps` tool is enabled for a project. */
+export function isAnalyzeToolEnabled(cwd?: string): boolean {
+  if (cwd !== undefined) return isAnalyzeProjectEnabled(cwd);
   return loadChecksConfig()?.enableAnalyzeTool ?? ANALYZE_GAP_DEFAULT_ENABLED;
 }
 

@@ -15,6 +15,8 @@ import {
 } from "./agents.js";
 import {
   getSupportedThinkingLevels,
+  isAnalyzeToolEnabled,
+  loadAnalyzeEnabledProjects,
   loadChecksConfig,
   loadEnabledModelRefs,
   loadSolverGapConfig,
@@ -26,6 +28,7 @@ import {
   SOLVER_GAP_TIMEOUT_MAX_MINUTES,
   SOLVER_GAP_TIMEOUT_MIN_MINUTES,
   saveChecksConfig,
+  setAnalyzeProjectEnabled,
   splitProviderModel,
 } from "./config.js";
 import { snapshotGitHead } from "./git.js";
@@ -242,8 +245,8 @@ function buildConfigRows(
     {
       id: "analyze-enabled",
       section: "Analyze Tool",
-      label: "Enabled",
-      value: current?.enableAnalyzeTool ? "on" : "off",
+      label: "Enabled here",
+      value: isAnalyzeToolEnabled(ctx.cwd) ? "on" : "off",
       kind: "cycle",
       values: ["on", "off"],
     },
@@ -270,6 +273,7 @@ type ChecksConfigLike = {
   modelId: string;
   thinkingLevel: ThinkingLevel;
   solverGap?: SolverGapConfig;
+  enabledProjects?: string[];
   enableAnalyzeTool?: boolean;
   analyzeGap?: AnalyzeGapConfig;
 };
@@ -375,7 +379,7 @@ class ConfigMenuComponent {
       } else if (row.id === "solvergap-save-artifacts") {
         saveChecksConfig({ ...current, solverGap: { ...solverGap, saveArtifacts: nextValue === "on" } });
       } else if (row.id === "analyze-enabled") {
-        saveChecksConfig({ ...current, enableAnalyzeTool: nextValue === "on" });
+        setAnalyzeProjectEnabled(this.ctx.cwd, nextValue === "on");
       } else if (row.id === "analyze-thinking") {
         saveChecksConfig({ ...current, analyzeGap: { ...analyzeGap, thinkingLevel: nextValue as ThinkingLevel } });
       }
@@ -400,7 +404,7 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
         getSettingsListTheme(),
         theme,
         () => {
-          analyzeToolSettingChanged(pi);
+          analyzeToolSettingChanged(pi, ctx.cwd);
           tui.requestRender();
         },
         (id) => done(id),
@@ -450,6 +454,7 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
         thinkingLevel,
         solverGap,
         analyzeGap,
+        enabledProjects: current?.enabledProjects ?? loadAnalyzeEnabledProjects(),
         enableAnalyzeTool: current?.enableAnalyzeTool,
       });
       ctx.ui.notify(`Reviewer model saved: ${picked.provider}/${picked.modelId}`, "info");
