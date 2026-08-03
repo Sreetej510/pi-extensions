@@ -38,7 +38,7 @@ async function addPrompt(ui: PromptUi, nameHint?: string): Promise<void> {
     };
   } else {
     const now = Date.now();
-    all.push({
+    all.unshift({
       id: newId(),
       name,
       content: content.trim(),
