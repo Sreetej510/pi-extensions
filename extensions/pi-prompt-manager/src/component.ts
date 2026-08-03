@@ -19,8 +19,8 @@ export class PromptManagerComponent {
     const n = this.prompts.length;
 
     if (matchesKey(data, "up") || data === "k") {
-      if (this.selectedIndex > 0) {
-        this.selectedIndex--;
+      if (n > 0) {
+        this.selectedIndex = this.selectedIndex > 0 ? this.selectedIndex - 1 : n - 1;
         this.invalidate();
       }
       return;
