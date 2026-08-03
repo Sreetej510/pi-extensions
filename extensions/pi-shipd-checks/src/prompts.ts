@@ -67,35 +67,84 @@ const GAP_FINDER_AGGRESSION = [
   "- Include a candidate only when you can cite specific grounding and a concrete false-pass risk — not to meet a quota.",
 ];
 
-const GAP_FINDER_GROUND_RULES = [
-  "Ground rules — do not overreach:",
-  "- Every gap must trace back to a specific requirement or sentence in `agent_prompt.md`, or to behavior that " +
-    "is unambiguous from the existing, visible repo. Do not invent requirements the prompt doesn't support.",
-  "- Do not propose gaps for things `agent_prompt.md` leaves intentionally open, or for implementation " +
-    "details/style the prompt doesn't mandate.",
-  "- Read the relevant source files carefully and distinguish genuinely required behavior from speculation; focus on " +
-    "public outcomes and edge cases that deserve behavioral coverage.",
-  "- Keep findings strictly behavioral and publicly observable: a user, caller, or documented public contract must be " +
-    "able to observe the required outcome. Do not report internal helper calls, private state, implementation structure, " +
-    "call order, file placement, or other incidental mechanics.",
-  "- Do not require DOM classes, DOM/data/test attributes, selectors, or exact string literals unless the prompt explicitly " +
-    "names them or they are an established, already-present public contract in the repository. Prefer a visible outcome or " +
-    "public API behavior that accepts equivalent implementations.",
+const GAP_FAIRNESS_RULES = [
+  "Fairness rules — apply these to every proposed gap and every proposed assertion:",
+  "- Ground every candidate in a specific sentence or requirement in `agent_prompt.md`, or in an existing public " +
+    "contract that is clear and directly relevant in the repository. Record the observable behavior and the plausible " +
+    "incorrect implementation that could pass without this check. Do not create requirements from intuition, taste, " +
+    "general best practice, or a desire for more coverage.",
+  "- Treat `agent_prompt.md` as the task contract. Existing source can clarify how an already-public API behaves and can " +
+    "make an established convention discoverable, but a neighboring helper, default, example, or implementation choice " +
+    "does not automatically become a requirement for a new behavior. If repository evidence is absent, mixed, or " +
+    "contradictory, leave the detail open rather than choosing one interpretation.",
+  "- A fair check must be expressible through a user-visible result, a caller-visible side effect, a named public API, " +
+    "or another documented/public contract. Do not require private state, private helpers, internal classes, file " +
+    "placement, module boundaries, call order, a particular algorithm, or a particular direct platform/API call when " +
+    "another repo-valid route produces the required outcome.",
+  "- A newly invented function, class, property, export, constructor, method name, argument shape, import path, or " +
+    "registry/config key is not a fair requirement merely because it would be a convenient way to test the feature. " +
+    "Require a new API only when `agent_prompt.md` names it, or when the API already exists publicly and the task " +
+    "explicitly relies on it.",
+  "- For UI behavior, assert the user-facing control, label, visible state, accessible action, or resulting effect when " +
+    "that is the contract. Do not require a particular DOM hierarchy, tag, CSS class, selector, test/data attribute, " +
+    "ARIA attribute, hidden-shim text, focus order, keyboard traversal, or control implementation unless the prompt " +
+    "or an established public UI contract explicitly requires it.",
+  "- Test semantics rather than source representation. Do not pin quote style, whitespace, line breaks, token adjacency, " +
+    "identifier spelling, generated-source wording, code length, AST node shape, type-text spelling, serialization " +
+    "style, or a particular equivalent syntax when the resulting behavior is the same. Normalize, parse, compile, or " +
+    "observe the result when that is necessary to compare equivalent forms.",
+  "- For structured results, assert the fields, values, relationships, ordering, and preservation that the contract " +
+    "actually requires. Allow additional valid fields and metadata unless the prompt explicitly forbids them. Do not " +
+    "compare a whole object, list, mapping, or serialized document to a minimal reference-shaped object when only a " +
+    "subset of its contents is contractual.",
+  "- Do not infer a concrete value from relational wording. Terms such as current, latest, selected, next, matching, " +
+    "appropriate, or stable require the stated relationship or effect, not an arbitrary numeric or serialized value. " +
+    "Pin a concrete value only when the prompt or a clear existing public contract determines it.",
+  "- Do not infer an exact ordering, grouping, cardinality, count, or error-counting model from incidental map order, " +
+    "loop order, a convenient fixture, or one implementation. Require ordering or counts only when the contract makes " +
+    "them observable; otherwise assert membership, relationships, preservation, and the required effect without " +
+    "choosing a granularity the prompt leaves open.",
+  "- Do not invent an input-domain policy for unspecified cases. Do not require acceptance or rejection of a particular " +
+    "malformed, nullish, Unicode, unusually large, boolean-like, platform-specific, symlink, missing-parent, or other " +
+    "boundary value unless the prompt or an established public contract settles that case. A sensible API policy is not " +
+    "automatically the specified policy.",
+  "- For failures, assert the failure or user-visible error behavior required by the contract. Do not require a specific " +
+    "exception class, message wording, punctuation, embedded input value, capitalization, basename, validation phase, " +
+    "or eager-versus-deferred timing unless it is explicitly promised or publicly established. If the contract only says " +
+    "an operation fails clearly, accept equivalent clear failures.",
+  "- Respect asynchronous and lazy contracts. If the prompt promises an eventual effect, do not require a callback to " +
+    "return a promise, immediate settlement, a particular debounce interval, construction-time validation, or one exact " +
+    "observation point. Trigger the public operation and observe or wait for the promised result at a fair boundary.",
+  "- Do not select an outcome for an underspecified mode boundary. Dry-run, preview, no-op, conflict, rollback, cache, " +
+    "preflight, and post-context-change behavior may have multiple valid outcomes unless the prompt chooses one. Test " +
+    "the guarantees that are stated, such as non-mutation or reporting, without adding a rejection, write, refresh, or " +
+    "validation policy that was not stated.",
+  "- Do not convert an incidental side effect into a requirement. For a no-op or reuse case, test the required content, " +
+    "state, preservation, or absence of duplicate effects; do not additionally require an empty file, directory, cache " +
+    "entry, history item, or other artifact to exist or not exist unless that artifact is part of the contract.",
+  "- For logs and status messages, check that the required operation or failure is reported when reporting is contractual. " +
+    "Do not demand arbitrary English words, formatting, punctuation, path spelling, message fragments, or exact output " +
+    "layout when the prompt only requires that the operation be communicated.",
+  "- A fair behavioral test must not depend on a hidden harness's mock shape, a source-level monkeypatch landing at one " +
+    "import binding, an incomplete module mock, reassigned exported state, a particular failure-injection primitive, or " +
+    "a synthetic fixture that violates real repository invariants. A reasonable implementation must be able to use the " +
+    "repository's valid public exports and state model without being rejected by the setup.",
+  "- Distinguish the semantic goal from the assertion form. If a candidate contains a fair behavioral core plus an " +
+    "unsupported value, representation, timing, API, or harness assumption, keep or rewrite the fair core and remove " +
+    "only the unsupported co-assertion. Do not discard a real gap merely because the first proposed assertion was too " +
+    "specific.",
+  "- Edge-case coverage is valuable only when the edge case is required or discoverable. Do not report 'more negative " +
+    "tests would be nice' or every conceivable malformed input. Keep a candidate only when it is distinct, publicly " +
+    "testable, concretely grounded, and could let a materially incorrect implementation pass.",
+  "- When uncertain, re-read the exact prompt sentence and the closest public source analogues. If two competent " +
+    "implementations can satisfy the contract while differing on the proposed assertion, the assertion is not fair; " +
+    "return the semantic relationship instead or drop the candidate. An empty result is correct when no candidate " +
+    "survives this standard.",
 ];
 
-const GAP_VALIDATOR_ADDITIONAL_RULES = [
-  "General calibration for validation:",
-  "- Check the required semantic properties and observable outcomes, while allowing valid additional data or equivalent " +
-    "implementations that do not weaken the contract.",
-  "- Assert relationships and effects required by the prompt rather than selecting an arbitrary concrete value when the " +
-    "prompt or an established public contract does not determine one.",
-  "- Compare behavior semantically. Do not reject equivalent representations merely because their syntax, formatting, " +
-    "ordering, or serialization differs unless that representation is part of the stated contract.",
-  "- Require exact wording, formatting, timing, or reporting details only when the prompt or an established public " +
-    "contract makes them observable requirements; otherwise validate the underlying operation or result.",
-  "- Do not invent behavior for cases the prompt leaves open. Treat examples, defaults, neighboring implementation " +
-    "choices, and reference-solution conventions as context, not as additional requirements.",
-];
+// Keep the same detailed rules for finders, validators, and solver-based comparison calibration.
+const GAP_FINDER_GROUND_RULES = GAP_FAIRNESS_RULES;
+const GAP_VALIDATOR_ADDITIONAL_RULES = GAP_FAIRNESS_RULES;
 
 export function buildReviewerPrompt(role: ReviewerRole, rubric: string, fairnessRules: string): string {
   const parts = [
