@@ -25,14 +25,18 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
     name: ANALYZE_TOOL_NAME,
     label: "Gap Finder",
     description:
-      "Run the sentence-by-sentence behavioral test-gap analysis on the current task and its repository source files: " +
-      "a read-only finder agent splits agent_prompt.md into sentences and proposes missing positive/negative " +
-      "behavioral tests per sentence, then a read-only fairness reviewer filters out unfair or " +
-      "internally-observable candidates (skipped when the finder found nothing). " +
-      "Returns the confirmed gaps as the tool result (details.testGaps). Never writes or modifies files.",
-    promptSnippet: "Analyze the task's hidden tests for behavioral coverage gaps",
+      "Only call this when the user explicitly asks for gap analysis or asks you to run Gap Finder. Run a sequential, " +
+      "sentence-by-sentence behavioral test-gap analysis on the current task and its repository source files: a " +
+      "read-only finder agent iterates through every sentence in agent_prompt.md and proposes missing positive/negative " +
+      "behavioral tests per sentence, then a read-only fairness reviewer filters out unfair or internally-observable " +
+      "candidates (skipped when the finder found nothing). Returns the confirmed gaps as the tool result " +
+      "(details.testGaps). Never writes or modifies files. For an explicitly requested iterative workflow, the " +
+      "caller should apply the returned gaps as tests and invoke this tool again sequentially.",
+    promptSnippet: "When asked, analyze the task's hidden tests for behavioral coverage gaps",
     promptGuidelines: [
-      "Use analyze_test_gaps when you need the confirmed list of fair behavioral test gaps for the current task's hidden tests.",
+      "Call analyze_test_gaps only when the user explicitly asks you to find/analyze test gaps or run Gap Finder; do not call it proactively or for unrelated work.",
+      "Run one analysis at a time and wait for it to finish; never issue multiple analyze_test_gaps calls in parallel.",
+      "If the user asks for repeated or iterative gap finding, after each result apply the confirmed gaps as tests, then run analyze_test_gaps again sequentially; repeat until a pass finds no new fair gaps, or the gaps are non-trivial or the user says to stop. The tool is read-only, so the caller performs the test changes.",
     ],
     parameters: Type.Object({}),
     renderCall(_args, _theme, context) {
