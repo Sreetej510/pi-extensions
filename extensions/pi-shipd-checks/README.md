@@ -43,10 +43,10 @@ The two finder flags are additive/combinable; `--config` must be used alone.
 
 | Command | Effect |
 |---|---|
-| `/checks` | List available options (runs nothing) |
-| `/checks --gap-finder` | Find gaps sentence-by-sentence, then review them for fairness |
-| `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
+| `/checks` | Open a menu with config, solver-gap-finder, and gap-finder options |
 | `/checks --config` | Configure behavioral and solver gap-finder models |
+| `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
+| `/checks --gap-finder` | Find gaps sentence-by-sentence, then review them for fairness |
 | `/analyze:on` | Enable the agent-callable Gap Finder tool for the current project |
 | `/analyze:off` | Disable the agent-callable Gap Finder tool for the current project |
 

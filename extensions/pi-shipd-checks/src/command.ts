@@ -72,14 +72,16 @@ function cancelledSolverResult(index: number, durationMs: number): SolverRunResu
 }
 
 const COMMAND_COMPLETIONS: readonly CommandOption[] = [
-  { value: "--gap-finder", label: "--gap-finder", description: "Find and validate behavioral test-coverage gaps" },
+  { value: "--config", label: "--config", description: "Configure gap-finder models" },
   {
     value: "--solver-gap-finder",
     label: "--solver-gap-finder",
     description: "Use TDD solver attempts to find behavioral gaps",
   },
-  { value: "--config", label: "--config", description: "Configure gap-finder models" },
+  { value: "--gap-finder", label: "--gap-finder", description: "Find and validate behavioral test-coverage gaps" },
 ];
+
+const COMMAND_MENU_OPTIONS = ["config", "solver-gap-finder", "gap-finder"] as const;
 
 function getArgumentCompletions(prefix: string) {
   const trimmed = prefix.trimStart();
@@ -506,16 +508,14 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
 
 export function registerChecksCommand(pi: ExtensionAPI) {
   pi.registerCommand("checks", {
-    description: "Find behavioral gaps in test coverage. Requires an option — see /checks.",
+    description: "Find behavioral gaps in test coverage. Choose an option from the menu.",
     getArgumentCompletions,
     handler: async (args, ctx) => {
-      const sub = args.trim();
+      let sub = args.trim();
       if (!sub) {
-        ctx.ui.notify(
-          COMMAND_COMPLETIONS.map((option) => `${option.value}  —  ${option.description}`).join("\n"),
-          "info",
-        );
-        return;
+        const choice = await ctx.ui.select("Choose a checks action", [...COMMAND_MENU_OPTIONS]);
+        if (!choice) return;
+        sub = `--${choice}`;
       }
       const tokens = [...new Set(sub.split(/\s+/).filter(Boolean))];
       const known = new Set(COMMAND_COMPLETIONS.map((option) => option.value));
