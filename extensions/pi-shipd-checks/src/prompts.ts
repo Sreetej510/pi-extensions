@@ -96,14 +96,35 @@ const GAP_FAIRNESS_RULES = [
   "- For structured results, assert the fields, values, relationships, ordering, and preservation that the contract " +
     "actually requires. Allow additional valid fields and metadata unless the prompt explicitly forbids them. Do not " +
     "compare a whole object, list, mapping, or serialized document to a minimal reference-shaped object when only a " +
-    "subset of its contents is contractual.",
+    "subset of its contents is contractual. For unspecified unknown fields, do not assume either permissive or strict " +
+    "validation: acceptance is fair only when extras are expressly allowed or established, and rejection is fair only " +
+    "when unknown fields are expressly forbidden or established at that schema level.",
+  "- Treat configuration schemas as contracts, not guesses. Field type, collection shape, omitted-field defaults, " +
+    "unknown-key policy, extension-based dispatch, coercion, and cross-field constraints are independently specified " +
+    "decisions. Do not require a string-only name, a particular list shape, a filename-driven parser, a boolean-only " +
+    "flag, a valid range relationship, or rejection of an extra key unless the prompt or a public schema settles it.",
+  "- Make aggregation semantics explicit before requiring exact counts. A count may be per input, field, item, target, " +
+    "rule, match, category, finding, log record, or operation; multiple units may overlap or be mutually exclusive. " +
+    "For repair or mutation output, also distinguish findings measured before the change from findings remaining after " +
+    "the change. If the contract does not choose the unit, test presence, effect, or a stated relationship rather than " +
+    "an exact number.",
+  "- Do not resolve interactions between separately described rules by intuition. Optional-path handling versus " +
+    "target-level checks, validation versus evaluation, duplicate detection across collections, cache reuse versus a " +
+    "new input, and consensus among agreeing versus dissenting values each need an explicit precedence or scope. " +
+    "A test must not silently choose skip-all versus continue, majority versus unanimity, per-collection versus global " +
+    "deduplication, or disjoint versus overlapping diagnostic categories.",
   "- Do not infer a concrete value from relational wording. Terms such as current, latest, selected, next, matching, " +
     "appropriate, or stable require the stated relationship or effect, not an arbitrary numeric or serialized value. " +
     "Pin a concrete value only when the prompt or a clear existing public contract determines it.",
   "- Do not infer an exact ordering, grouping, cardinality, count, or error-counting model from incidental map order, " +
     "loop order, a convenient fixture, or one implementation. Require ordering or counts only when the contract makes " +
     "them observable; otherwise assert membership, relationships, preservation, and the required effect without " +
-    "choosing a granularity the prompt leaves open.",
+    "choosing a granularity the prompt leaves open. This includes order of newly added versus loaded values and the " +
+    "number or placement of repeated diagnostic terms.",
+  "- Preserve scope qualifiers. A requirement for aware values, naive values, all-day values, one mode, one target " +
+    "state, or one lifecycle phase does not automatically apply to every representation or phase. Do not transfer a " +
+    "rule from one subtype to another, or require a changed wall time, timezone, normalization, or side effect outside " +
+    "the scope in which the prompt states it.",
   "- Do not invent an input-domain policy for unspecified cases. Do not require acceptance or rejection of a particular " +
     "malformed, nullish, Unicode, unusually large, boolean-like, platform-specific, symlink, missing-parent, or other " +
     "boundary value unless the prompt or an established public contract settles that case. A sensible API policy is not " +
@@ -111,7 +132,13 @@ const GAP_FAIRNESS_RULES = [
   "- For failures, assert the failure or user-visible error behavior required by the contract. Do not require a specific " +
     "exception class, message wording, punctuation, embedded input value, capitalization, basename, validation phase, " +
     "or eager-versus-deferred timing unless it is explicitly promised or publicly established. If the contract only says " +
-    "an operation fails clearly, accept equivalent clear failures.",
+    "an operation fails clearly, accept equivalent clear failures. When the prompt expressly permits more than one " +
+    "failure phase or handling path—such as load-time rejection or evaluation-time violation—accept every permitted " +
+    "path; do not force one merely because it is easier to assert.",
+  "- Do not assume an expression or embedded language has unlisted builtins, operators, container types, mutability, " +
+    "mapping shapes, or context bindings. Test only the language surface and binding representation that the prompt or " +
+    "an existing public evaluator contract names. A useful operation such as length, indexing, mutation, or a helper " +
+    "call is not implicitly available in a restricted environment.",
   "- Respect asynchronous and lazy contracts. If the prompt promises an eventual effect, do not require a callback to " +
     "return a promise, immediate settlement, a particular debounce interval, construction-time validation, or one exact " +
     "observation point. Trigger the public operation and observe or wait for the promised result at a fair boundary.",
@@ -127,12 +154,32 @@ const GAP_FAIRNESS_RULES = [
     "layout when the prompt only requires that the operation be communicated.",
   "- A fair behavioral test must not depend on a hidden harness's mock shape, a source-level monkeypatch landing at one " +
     "import binding, an incomplete module mock, reassigned exported state, a particular failure-injection primitive, or " +
-    "a synthetic fixture that violates real repository invariants. A reasonable implementation must be able to use the " +
-    "repository's valid public exports and state model without being rejected by the setup.",
+    "a synthetic fixture that violates real repository invariants. Patch or fake a dependency at a public lookup boundary " +
+    "that supports the repository's valid import styles, rather than assuming whether code imports a module or a symbol. " +
+    "A reasonable implementation must be able to use the repository's valid public exports and state model without " +
+    "being rejected by the setup.",
+  "- Test doubles must preserve the public interface and lifecycle needed to reach the assertion. A double for a " +
+    "collaborator must implement existing extension points, return valid shapes, and provide newly required public " +
+    "capabilities or isolate them through an explicit seam. Do not make a detached constructor, unmounted widget, " +
+    "partial collection, missing pane service, or fake cache stand in for an active production flow unless that " +
+    "detached behavior is itself contractual.",
+  "- Separate fairness from test strength. A test can be fairly scoped yet too weak if it observes a color anywhere " +
+    "instead of on the required target, checks a generic message without associating it with the operation, or verifies " +
+    "a destination representation without preserving the required identity/instant/relationship. Do not call such a " +
+    "test unfair for being permissive; treat it as insufficient coverage and require a precise public observation.",
   "- Distinguish the semantic goal from the assertion form. If a candidate contains a fair behavioral core plus an " +
     "unsupported value, representation, timing, API, or harness assumption, keep or rewrite the fair core and remove " +
     "only the unsupported co-assertion. Do not discard a real gap merely because the first proposed assertion was too " +
     "specific.",
+  "- Do not turn a harness safety limit into a product requirement. A test-level subprocess timeout, signal alarm, " +
+    "poll interval, viewport size, or platform-specific signal is only fair when the task or public performance contract " +
+    "specifies it. Use a separate generous anti-hang guard for malformed or pathological evaluation, and assert the " +
+    "required bounded/failure outcome without choosing an arbitrary wall-clock budget.",
+  "- A failed setup and a failed behavioral assertion are different evidence. If a shared fixture crashes before the " +
+    "feature is observed, or an observer renders the wrong viewport/widget after locating a valid result, the test is " +
+    "broken rather than proof of an implementation gap. If the fixture reaches the public behavior but rejects a valid " +
+    "alternative representation or integration path, it is a contract/test mismatch. Do not treat either as a fair " +
+    "behavioral requirement.",
   "- Edge-case coverage is valuable only when the edge case is required or discoverable. Do not report 'more negative " +
     "tests would be nice' or every conceivable malformed input. Keep a candidate only when it is distinct, publicly " +
     "testable, concretely grounded, and could let a materially incorrect implementation pass.",
