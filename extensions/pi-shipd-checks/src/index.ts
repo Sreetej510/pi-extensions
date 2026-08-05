@@ -19,10 +19,10 @@
  * Commands:
  *   /analyze:on           enable the agent-callable Gap Finder for this project
  *   /analyze:off          disable the agent-callable Gap Finder for this project
- *   /checks               list available options (runs nothing)
- *   /checks --gap-finder  run positive + negative gap finders, then validator
- *   /checks --solver-gap-finder  run several TDD solver agents, then compare their solutions to find gaps
+ *   /checks               open a menu for config, solver-gap-finder, or gap-finder
  *   /checks --config      set the gap-finder models and thinking levels
+ *   /checks --solver-gap-finder  run several TDD solver agents, then compare their solutions to find gaps
+ *   /checks --gap-finder  run positive + negative gap finders, then validator
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.
  *
  * File layout:
