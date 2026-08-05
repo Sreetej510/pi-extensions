@@ -50,7 +50,7 @@ The two finder flags are additive/combinable; `--config` must be used alone.
 | `/analyze:on` | Enable the agent-callable Gap Finder tool for the current project |
 | `/analyze:off` | Disable the agent-callable Gap Finder tool for the current project |
 
-**Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run.
+**Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run. Cancellation is propagated to active solver sessions and their spawned shell/test process trees; post-cancel verification, comparison, and artifact writing are skipped.
 
 ## Configuration
 

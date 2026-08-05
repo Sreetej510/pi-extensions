@@ -15,14 +15,25 @@ export async function snapshotGitHead(
   pi: ExtensionAPI,
   repoDir: string,
   tempDir: string,
+  cancelSignal?: AbortSignal,
 ): Promise<{ status: "ok" } | { status: "error"; error: string }> {
-  const headCheck = await pi.exec("git", ["rev-parse", "HEAD"], { cwd: repoDir, timeout: 15_000 });
+  if (cancelSignal?.aborted) return { status: "error", error: "cancelled" };
+
+  const headCheck = await pi.exec("git", ["rev-parse", "HEAD"], {
+    cwd: repoDir,
+    timeout: 15_000,
+    signal: cancelSignal,
+  });
   if (headCheck.code !== 0) {
     return { status: "error", error: "Not a git repository, or it has no commits yet." };
   }
 
   const cmd = `git archive HEAD | tar -x -C ${bashQuote(toSlashPath(tempDir))}`;
-  const result = await pi.exec(getShellExecutable(), ["-c", cmd], { cwd: repoDir, timeout: 60_000 });
+  const result = await pi.exec(getShellExecutable(), ["-c", cmd], {
+    cwd: repoDir,
+    timeout: 60_000,
+    signal: cancelSignal,
+  });
   if (result.code !== 0) {
     return { status: "error", error: result.stderr?.trim() || `git archive failed (exit ${result.code})` };
   }

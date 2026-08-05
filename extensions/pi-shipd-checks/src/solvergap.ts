@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createLocalBashOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellExecutable } from "./config.js";
 import { bashQuote, snapshotGitHead, toSlashPath } from "./git.js";
 import type { SolverRunResult } from "./types.js";
@@ -71,15 +71,17 @@ export async function setupSolverWorkspace(opts: {
   solverDir: string;
   testPatchPath: string;
   agentPromptPath: string;
+  cancelSignal?: AbortSignal;
 }): Promise<SetupSolverWorkspaceResult> {
-  const { pi, repoDir, solverDir, testPatchPath, agentPromptPath } = opts;
+  const { pi, repoDir, solverDir, testPatchPath, agentPromptPath, cancelSignal } = opts;
+  if (cancelSignal?.aborted) return { status: "error", solverDir, error: "cancelled" };
 
-  const snapshot = await snapshotGitHead(pi, repoDir, solverDir);
+  const snapshot = await snapshotGitHead(pi, repoDir, solverDir, cancelSignal);
   if (snapshot.status === "error") {
     return { status: "error", solverDir, error: snapshot.error };
   }
 
-  const gitCwd = { cwd: solverDir, timeout: GIT_TIMEOUT_MS };
+  const gitCwd = { cwd: solverDir, timeout: GIT_TIMEOUT_MS, signal: cancelSignal };
   const init = await pi.exec("git", ["init"], gitCwd);
   if (init.code !== 0) {
     return { status: "error", solverDir, error: init.stderr?.trim() || "git init failed" };
@@ -178,12 +180,34 @@ export async function finalizeSolverRun(opts: {
   workspace: SolverWorkspace;
   status: SolverRunResult["status"];
   durationMs: number;
+  cancelSignal: AbortSignal;
 }): Promise<SolverRunResult & { testOutputXmlPath: string }> {
-  const { pi, index, workspace, status, durationMs } = opts;
+  const { pi, index, workspace, status, durationMs, cancelSignal } = opts;
   const { solverDir, testsAppliedCommit, testPatchPaths } = workspace;
-  const gitCwd = { cwd: solverDir, timeout: GIT_TIMEOUT_MS };
+  const testOutputXmlPath = join(solverDir, "test_output.xml");
+  const cancelledResult = (
+    diff = "",
+    testOutputTail = "cancelled",
+  ): SolverRunResult & {
+    testOutputXmlPath: string;
+  } => ({
+    index,
+    status: "cancelled",
+    passed: false,
+    diff,
+    testOutputTail,
+    durationMs,
+    totalTests: null,
+    failedTests: null,
+    testOutputXmlPath,
+  });
 
+  if (cancelSignal.aborted) return cancelledResult();
+
+  const gitCwd = { cwd: solverDir, timeout: GIT_TIMEOUT_MS, signal: cancelSignal };
   await pi.exec("git", ["add", "-A"], gitCwd);
+  if (cancelSignal.aborted) return cancelledResult();
+
   // Exclude hidden test files and the copied-in agent_prompt.md from the solver's captured diff.
   const excludePathspecs = [...testPatchPaths, "agent_prompt.md"].map((p) => `:(exclude)${p}`);
   const diffResult = await pi.exec(
@@ -192,15 +216,24 @@ export async function finalizeSolverRun(opts: {
     gitCwd,
   );
   const diff = diffResult.code === 0 ? diffResult.stdout : "";
+  if (cancelSignal.aborted) return cancelledResult(diff);
 
-  const testOutputXmlPath = join(solverDir, "test_output.xml");
   const testCmd = `bash test.sh --output_path ${bashQuote(toSlashPath(testOutputXmlPath))} new`;
-  const shell = getShellExecutable();
-  const testRun = await pi.exec(shell, ["-c", `cd ${bashQuote(toSlashPath(solverDir))} && ${testCmd}`], {
-    timeout: GIT_TIMEOUT_MS * 10,
+  let testOutput = "";
+  // Use Pi's tree-aware bash backend here rather than ExtensionAPI.exec: the
+  // verification command can spawn the test runner and its children, and all
+  // of them must stop when the /checks cancellation signal fires.
+  const testRun = await createLocalBashOperations({ shellPath: getShellExecutable() }).exec(testCmd, solverDir, {
+    signal: cancelSignal,
+    timeout: (GIT_TIMEOUT_MS * 10) / 1000,
+    onData: (data) => {
+      testOutput += data.toString();
+    },
   });
-  const passed = testRun.code === 0;
-  const testOutputTail = tail(`${testRun.stdout}\n${testRun.stderr}`.trim(), TEST_OUTPUT_TAIL_CHARS);
+  if (cancelSignal.aborted) return cancelledResult(diff, tail(testOutput.trim(), TEST_OUTPUT_TAIL_CHARS));
+
+  const passed = testRun.exitCode === 0;
+  const testOutputTail = tail(testOutput.trim(), TEST_OUTPUT_TAIL_CHARS);
   const { totalTests, failedTests } = readTestCounts(testOutputXmlPath);
 
   return {

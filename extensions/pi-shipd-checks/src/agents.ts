@@ -4,8 +4,12 @@
  * structured result back out of the tool-call capture object.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import {
+  type AgentSession,
+  createAgentSession,
+  type ExtensionAPI,
+  SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import {
   buildGapValidatorPrompt,
   buildSentenceGapFinderPrompt,
@@ -50,30 +54,51 @@ async function raceAgentTurn(
   cancelSignal: AbortSignal,
   timeoutMs: number = REVIEWER_TIMEOUT_MS,
 ): Promise<AgentTurnOutcome> {
-  let outcome: AgentTurnOutcome = cancelSignal.aborted ? "cancelled" : "done";
-  await Promise.race([
-    work().then(() => {
-      if (!cancelSignal.aborted) outcome = "done";
-    }),
-    new Promise<void>((resolve) => {
-      setTimeout(() => {
-        outcome = "timedOut";
-        resolve();
-      }, timeoutMs);
-    }),
-    new Promise<void>((resolve) => {
-      if (cancelSignal.aborted) return resolve();
-      cancelSignal.addEventListener(
-        "abort",
-        () => {
-          outcome = "cancelled";
-          resolve();
-        },
-        { once: true },
-      );
-    }),
-  ]);
-  return outcome;
+  if (cancelSignal.aborted) return "cancelled";
+
+  return new Promise<AgentTurnOutcome>((resolve, reject) => {
+    let settled = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+      cancelSignal.removeEventListener("abort", onAbort);
+    };
+    const settle = (outcome: AgentTurnOutcome) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(outcome);
+    };
+    const onAbort = () => settle("cancelled");
+
+    timeoutHandle = setTimeout(() => settle("timedOut"), timeoutMs);
+    cancelSignal.addEventListener("abort", onAbort, { once: true });
+
+    // Always attach a rejection handler. If the timeout/cancellation wins,
+    // the underlying prompt can still reject later; that rejection must not
+    // become an unhandled background promise.
+    void work().then(
+      () => settle("done"),
+      (error: unknown) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(error);
+        }
+      },
+    );
+  });
+}
+
+async function disposeAgentSession(session: AgentSession | undefined): Promise<void> {
+  if (!session) return;
+  try {
+    if (!session.isIdle) await session.abort();
+  } catch {
+    // The run is already ending; disposal must not mask its result.
+  }
+  session.dispose();
 }
 
 export async function runGapFinder(opts: {
@@ -86,18 +111,20 @@ export async function runGapFinder(opts: {
 }): Promise<GapStageResult<StatementGapReport>> {
   const capture: { statements?: StatementGapReport[] } = {};
   const model = asSessionModel(opts.model);
-  const { session } = await createAgentSession({
-    cwd: opts.tempDir,
-    model,
-    thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
-    tools: [...REVIEWER_TOOLS, GAP_FINDER_TOOL_NAME],
-    customTools: [createGapFinderTool(capture)],
-    sessionManager: SessionManager.inMemory(),
-  });
+  let session: AgentSession | undefined;
 
   try {
+    ({ session } = await createAgentSession({
+      cwd: opts.tempDir,
+      model,
+      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
+      tools: [...REVIEWER_TOOLS, GAP_FINDER_TOOL_NAME],
+      customTools: [createGapFinderTool(capture)],
+      sessionManager: SessionManager.inMemory(),
+    }));
+
     const outcome = await raceAgentTurn(async () => {
-      await session.prompt(buildSentenceGapFinderPrompt(opts.testRubric, opts.fairnessRules));
+      await session?.prompt(buildSentenceGapFinderPrompt(opts.testRubric, opts.fairnessRules));
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
@@ -105,6 +132,8 @@ export async function runGapFinder(opts: {
     }
   } catch {
     return { status: "error", gaps: [] };
+  } finally {
+    await disposeAgentSession(session);
   }
   if (!capture.statements) return { status: "noSubmission", gaps: [] };
   return { status: "ok", gaps: capture.statements };
@@ -122,19 +151,20 @@ export async function runSolverAgent(opts: {
   cancelSignal: AbortSignal;
 }): Promise<{ outcome: AgentTurnOutcome | "error"; trajectory: unknown[] }> {
   const model = asSessionModel(opts.model);
+  const sessionManager = SessionManager.inMemory();
+  let session: AgentSession | undefined;
   try {
-    const sessionManager = SessionManager.inMemory();
-    const { session } = await createAgentSession({
+    ({ session } = await createAgentSession({
       cwd: opts.solverDir,
       model,
       thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
       tools: [...SOLVER_AGENT_TOOLS],
       sessionManager,
-    });
+    }));
 
     const outcome = await raceAgentTurn(
       async () => {
-        await session.prompt(buildSolverPrompt());
+        await session?.prompt(buildSolverPrompt());
       },
       opts.cancelSignal,
       opts.timeoutMinutes * 60 * 1000,
@@ -143,6 +173,8 @@ export async function runSolverAgent(opts: {
     return { outcome, trajectory: sessionManager.getEntries() };
   } catch {
     return { outcome: "error", trajectory: [] };
+  } finally {
+    await disposeAgentSession(session);
   }
 }
 
@@ -158,18 +190,20 @@ export async function runSolverComparisonReviewer(opts: {
 }): Promise<GapStageResult<SolverGap>> {
   const capture: { gaps?: SolverGap[] } = {};
   const model = asSessionModel(opts.model);
-  const { session } = await createAgentSession({
-    cwd: opts.tempDir,
-    model,
-    thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
-    tools: [...REVIEWER_TOOLS, SOLVER_GAP_TOOL_NAME],
-    customTools: [createSolverGapTool(capture)],
-    sessionManager: SessionManager.inMemory(),
-  });
+  let session: AgentSession | undefined;
 
   try {
+    ({ session } = await createAgentSession({
+      cwd: opts.tempDir,
+      model,
+      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
+      tools: [...REVIEWER_TOOLS, SOLVER_GAP_TOOL_NAME],
+      customTools: [createSolverGapTool(capture)],
+      sessionManager: SessionManager.inMemory(),
+    }));
+
     const outcome = await raceAgentTurn(async () => {
-      await session.prompt(buildSolverComparisonPrompt(opts.solverResults, opts.testRubric, opts.fairnessRules));
+      await session?.prompt(buildSolverComparisonPrompt(opts.solverResults, opts.testRubric, opts.fairnessRules));
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
@@ -177,6 +211,8 @@ export async function runSolverComparisonReviewer(opts: {
     }
   } catch {
     return { status: "error", gaps: [] };
+  } finally {
+    await disposeAgentSession(session);
   }
   if (!capture.gaps) return { status: "noSubmission", gaps: [] };
   return { status: "ok", gaps: capture.gaps };
@@ -193,18 +229,20 @@ export async function runGapValidator(opts: {
 }): Promise<GapStageResult<TestGapFinal>> {
   const capture: { gaps?: TestGapFinal[] } = {};
   const model = asSessionModel(opts.model);
-  const { session } = await createAgentSession({
-    cwd: opts.tempDir,
-    model,
-    thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
-    tools: [...REVIEWER_TOOLS, GAP_VALIDATOR_TOOL_NAME],
-    customTools: [createGapValidatorTool(capture)],
-    sessionManager: SessionManager.inMemory(),
-  });
+  let session: AgentSession | undefined;
 
   try {
+    ({ session } = await createAgentSession({
+      cwd: opts.tempDir,
+      model,
+      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
+      tools: [...REVIEWER_TOOLS, GAP_VALIDATOR_TOOL_NAME],
+      customTools: [createGapValidatorTool(capture)],
+      sessionManager: SessionManager.inMemory(),
+    }));
+
     const outcome = await raceAgentTurn(async () => {
-      await session.prompt(buildGapValidatorPrompt(opts.statementReports, opts.testRubric, opts.fairnessRules));
+      await session?.prompt(buildGapValidatorPrompt(opts.statementReports, opts.testRubric, opts.fairnessRules));
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
@@ -212,6 +250,8 @@ export async function runGapValidator(opts: {
     }
   } catch {
     return { status: "error", gaps: [] };
+  } finally {
+    await disposeAgentSession(session);
   }
   if (!capture.gaps) return { status: "noSubmission", gaps: [] };
   return { status: "ok", gaps: capture.gaps };
