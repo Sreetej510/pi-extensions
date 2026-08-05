@@ -57,6 +57,20 @@ import type {
 } from "./types.js";
 
 export const CANCEL_SHORTCUT_LABEL = "Ctrl+Shift+X";
+
+function cancelledSolverResult(index: number, durationMs: number): SolverRunResult {
+  return {
+    index,
+    status: "cancelled",
+    passed: false,
+    diff: "",
+    testOutputTail: "cancelled",
+    durationMs,
+    totalTests: null,
+    failedTests: null,
+  };
+}
+
 const COMMAND_COMPLETIONS: readonly CommandOption[] = [
   { value: "--gap-finder", label: "--gap-finder", description: "Find and validate behavioral test-coverage gaps" },
   {
@@ -568,11 +582,12 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         const dir = join(tmpdir(), `checks-${randomUUID()}`);
         mkdirSync(dir, { recursive: true });
         tempDir = dir;
-        const snapshot = await snapshotGitHead(pi, ctx.cwd, dir);
+        const snapshot = await snapshotGitHead(pi, ctx.cwd, dir, abort.signal);
         if (snapshot.status === "error") {
           ctx.ui.notify(`checks: ${snapshot.error}`, "error");
           return;
         }
+        if (abort.signal.aborted) return;
         for (const file of REQUIRED_FILES) copyFileSync(join(ctx.cwd, file), join(dir, file));
         const testRubric = loadTestGuidelines();
         const fairnessRules = loadFairnessRules();
@@ -608,6 +623,10 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         let solverResults: SolverRunResult[] = [];
         let comparison: GapStageResult<SolverGap> = { status: "ok", gaps: [] };
         if (runSolverGapFinder && solverConfig) {
+          if (abort.signal.aborted) {
+            ctx.ui.notify("checks: cancelled.", "warning");
+            return;
+          }
           const completedSolvers: SolverRunResult[] = [];
           const recordSolverCompletion = (result: SolverRunResult) => {
             completedSolvers.push(result);
@@ -633,6 +652,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
                   solverDir,
                   testPatchPath: join(ctx.cwd, "test.patch"),
                   agentPromptPath: join(ctx.cwd, "agent_prompt.md"),
+                  cancelSignal: abort.signal,
                 }),
               };
             }),
@@ -663,13 +683,28 @@ export function registerChecksCommand(pi: ExtensionAPI) {
                 timeoutMinutes: solverConfig.timeoutMinutes,
                 cancelSignal: abort.signal,
               });
+              if (abort.signal.aborted || outcome === "cancelled") {
+                const result = cancelledSolverResult(index, Date.now() - started);
+                recordSolverCompletion(result);
+                return result;
+              }
+
               const { testOutputXmlPath, ...result } = await finalizeSolverRun({
                 pi,
                 index,
                 workspace: setup,
                 status: outcome === "done" ? "ok" : outcome,
                 durationMs: Date.now() - started,
+                cancelSignal: abort.signal,
               });
+              // finalizeSolverRun is cancellation-aware and kills the whole
+              // verification process tree. Do not write artifacts after the
+              // user has asked the run to stop.
+              if (abort.signal.aborted || result.status === "cancelled") {
+                recordSolverCompletion(result);
+                return result;
+              }
+
               const artifactsDir = solverConfig.saveArtifacts
                 ? saveSolverArtifacts({
                     repoDir: ctx.cwd,
@@ -686,6 +721,10 @@ export function registerChecksCommand(pi: ExtensionAPI) {
               return solverResult;
             }),
           );
+          if (abort.signal.aborted) {
+            ctx.ui.notify("checks: cancelled.", "warning");
+            return;
+          }
           if (solverResults.some((result) => result.status !== "patchFailed" && result.status !== "error")) {
             writeSolverSolutionsToDisk(dir, solverResults);
             comparison = await runSolverComparisonReviewer({
