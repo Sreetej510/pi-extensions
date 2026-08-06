@@ -157,7 +157,7 @@ async function runCommand(
   timeoutMs: number,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return await new Promise((resolve, reject) => {
-    const child = spawn("/bin/bash", ["-lc", command], {
+    const child = spawn("/bin/bash", ["-c", command], {
       cwd,
       env,
       stdio: ["ignore", "pipe", "pipe"],
