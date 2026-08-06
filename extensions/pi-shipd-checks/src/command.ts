@@ -584,20 +584,13 @@ export function registerChecksCommand(pi: ExtensionAPI) {
       let progressLabel = runSolverGapFinder ? "preparing image" : "preparing clean snapshot";
       let progressDone = 0;
       let progressShowBar = !runSolverGapFinder;
-      let progressSolverCounts: { passed: number; failed: number } | undefined;
-      const updateProgress = (
-        label = progressLabel,
-        done = progressDone,
-        showBar = progressShowBar,
-        solverCounts = progressSolverCounts,
-      ) => {
+      const updateProgress = (label = progressLabel, done = progressDone, showBar = progressShowBar) => {
         progressLabel = label;
         progressDone = done;
         progressShowBar = showBar;
-        progressSolverCounts = solverCounts;
         ctx.ui.setWidget(
           PROGRESS_WIDGET_KEY,
-          renderProgressLines(label, done, total, solverCounts, { showBar, startedAt: progressStartedAt }),
+          renderProgressLines(label, done, total, { showBar, startedAt: progressStartedAt }),
         );
       };
       const progressTimer = setInterval(() => updateProgress(), 1000);
@@ -662,10 +655,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             const showBar = remoteStarted && (phase === "running agents" || phase === "finalizing");
             const label = phase === "running agents" ? `${phase} (${solverStatusText()})` : phase;
             const solverResults = [...completedSolvers.values()];
-            updateProgress(label, completed + solverResults.length, showBar, {
-              passed: solverResults.filter((solver) => solver.passed).length,
-              failed: solverResults.filter((solver) => !solver.passed).length,
-            });
+            updateProgress(label, completed + solverResults.length, showBar);
           };
           const recordSolverProgress = (results: SolverRunResult[]) => {
             for (const result of results) completedSolvers.set(result.index, result);
