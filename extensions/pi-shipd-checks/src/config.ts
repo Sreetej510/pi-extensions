@@ -8,7 +8,14 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { AnalyzeGapConfig, ChecksConfig, SolverGapConfig, ThinkingLevel } from "./types.js";
+import type {
+  AnalyzeGapConfig,
+  ChecksConfig,
+  FargateConfig,
+  FargateResourceProfile,
+  SolverGapConfig,
+  ThinkingLevel,
+} from "./types.js";
 
 export const CONFIG_PATH = join(getAgentDir(), "checks-config.json");
 export const SETTINGS_PATH = join(getAgentDir(), "settings.json");
@@ -23,6 +30,14 @@ export const SOLVER_GAP_DEFAULT_SOLVER_COUNT = 3;
 export const SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS = true;
 
 export const ANALYZE_GAP_DEFAULT_ENABLED = false;
+
+export const FARGATE_RESOURCE_PROFILES = {
+  small: { cpu: 1, memoryMiB: 2048 },
+  medium: { cpu: 2, memoryMiB: 4096 },
+  large: { cpu: 4, memoryMiB: 8192 },
+} as const satisfies Record<FargateResourceProfile, { cpu: number; memoryMiB: number }>;
+export const FARGATE_DEFAULT_PROFILE: FargateResourceProfile = "medium";
+export const FARGATE_DEFAULT_MAX_RETRIES = 1;
 
 /**
  * Mirrors `getSupportedThinkingLevels` from `@earendil-works/pi-ai` (not part of
@@ -60,6 +75,32 @@ export function saveChecksConfig(config: ChecksConfig): void {
   const dir = dirname(CONFIG_PATH);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+}
+
+/** Load Fargate settings and normalize values that affect task retries/profile selection. */
+export function loadFargateConfig(): FargateConfig {
+  const raw = readRawChecksConfig().fargate;
+  const fargate = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as FargateConfig) : {};
+  const resourceProfile = Object.hasOwn(FARGATE_RESOURCE_PROFILES, fargate.resourceProfile ?? "")
+    ? fargate.resourceProfile
+    : FARGATE_DEFAULT_PROFILE;
+  const maxRetries = Number.isFinite(fargate.maxRetries)
+    ? Math.min(3, Math.max(0, Math.floor(fargate.maxRetries as number)))
+    : FARGATE_DEFAULT_MAX_RETRIES;
+  return { ...fargate, resourceProfile, maxRetries };
+}
+
+export function resolveFargateResources(
+  cwd: string,
+  config = loadFargateConfig(),
+): {
+  profile: FargateResourceProfile;
+  cpu: number;
+  memoryMiB: number;
+} {
+  const profile = config.projectProfiles?.[cwd] ?? config.resourceProfile ?? FARGATE_DEFAULT_PROFILE;
+  const normalized = Object.hasOwn(FARGATE_RESOURCE_PROFILES, profile) ? profile : FARGATE_DEFAULT_PROFILE;
+  return { profile: normalized, ...FARGATE_RESOURCE_PROFILES[normalized] };
 }
 
 /** The nested `solverGap` section, normalized with sane defaults if partially missing/invalid. */

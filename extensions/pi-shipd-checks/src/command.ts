@@ -7,19 +7,17 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, Spacer, Text } from "@earendil-works/pi-tui";
+import { runGapValidator, runGapFinder as runSentenceGapFinder, runSolverComparisonReviewer } from "./agents.js";
 import {
-  runGapValidator,
-  runGapFinder as runSentenceGapFinder,
-  runSolverAgent,
-  runSolverComparisonReviewer,
-} from "./agents.js";
-import {
+  FARGATE_RESOURCE_PROFILES,
   getSupportedThinkingLevels,
   isAnalyzeToolEnabled,
   loadAnalyzeEnabledProjects,
   loadChecksConfig,
   loadEnabledModelRefs,
+  loadFargateConfig,
   loadSolverGapConfig,
+  resolveFargateResources,
   SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
   SOLVER_GAP_DEFAULT_SOLVER_COUNT,
   SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
@@ -31,22 +29,19 @@ import {
   setAnalyzeProjectEnabled,
   splitProviderModel,
 } from "./config.js";
+import { runFargateSolverGapFinder } from "./fargate-runner.js";
 import { snapshotGitHead } from "./git.js";
 import { PROGRESS_WIDGET_KEY, renderProgressLines } from "./progress.js";
 import { buildRunSummary, formatLocalTimestamp, loadExistingReport, mergeReport, REQUIRED_FILES } from "./report.js";
 import { loadFairnessRules, loadTestGuidelines } from "./rubric.js";
-import {
-  cleanupSolverWorkspace,
-  finalizeSolverRun,
-  saveSolverArtifacts,
-  setupSolverWorkspace,
-  writeSolverSolutionsToDisk,
-} from "./solvergap.js";
+import { writeSolverSolutionsToDisk } from "./solvergap.js";
 import { endReview, isReviewInProgress, startReview } from "./state.js";
 import { analyzeToolSettingChanged } from "./tool-sync.js";
 import type {
   AnalyzeGapConfig,
   CommandOption,
+  FargateConfig,
+  FargateResourceProfile,
   GapStageResult,
   SolverGap,
   SolverGapConfig,
@@ -57,19 +52,6 @@ import type {
 } from "./types.js";
 
 export const CANCEL_SHORTCUT_LABEL = "Ctrl+Shift+X";
-
-function cancelledSolverResult(index: number, durationMs: number): SolverRunResult {
-  return {
-    index,
-    status: "cancelled",
-    passed: false,
-    diff: "",
-    testOutputTail: "cancelled",
-    durationMs,
-    totalTests: null,
-    failedTests: null,
-  };
-}
 
 const COMMAND_COMPLETIONS: readonly CommandOption[] = [
   { value: "--config", label: "--config", description: "Configure gap-finder models" },
@@ -172,11 +154,12 @@ type ConfigRowId =
   | "solvergap-save-artifacts"
   | "analyze-enabled"
   | "analyze-model"
-  | "analyze-thinking";
+  | "analyze-thinking"
+  | "fargate-profile";
 
 interface ConfigRow {
   id: ConfigRowId;
-  section: "Reviewer" | "Solver" | "Analyze Tool";
+  section: "Reviewer" | "Solver" | "Analyze Tool" | "Fargate";
   label: string;
   value: string;
   /** "model" rows open a picker (closes the menu, then reopens it); "cycle" rows step through `values` in place. */
@@ -198,6 +181,8 @@ function buildConfigRows(
   const analyzeGapLevels = analyzeGap.provider
     ? supportedThinkingLevelsFor(ctx, analyzeGap.provider, analyzeGap.modelId)
     : ["off"];
+  const fargate = loadFargateConfig();
+  const fargateProfile = resolveFargateResources(ctx.cwd, fargate).profile;
   return [
     {
       id: "reviewer-model",
@@ -281,6 +266,14 @@ function buildConfigRows(
       kind: "cycle",
       values: analyzeGapLevels,
     },
+    {
+      id: "fargate-profile",
+      section: "Fargate",
+      label: "Resource profile",
+      value: fargateProfile,
+      kind: "cycle",
+      values: Object.keys(FARGATE_RESOURCE_PROFILES),
+    },
   ];
 }
 
@@ -288,6 +281,7 @@ type ChecksConfigLike = {
   provider: string;
   modelId: string;
   thinkingLevel: ThinkingLevel;
+  fargate?: FargateConfig;
   solverGap?: SolverGapConfig;
   enabledProjects?: string[];
   enableAnalyzeTool?: boolean;
@@ -398,6 +392,18 @@ class ConfigMenuComponent {
         setAnalyzeProjectEnabled(this.ctx.cwd, nextValue === "on");
       } else if (row.id === "analyze-thinking") {
         saveChecksConfig({ ...current, analyzeGap: { ...analyzeGap, thinkingLevel: nextValue as ThinkingLevel } });
+      } else if (row.id === "fargate-profile") {
+        const fargate = current.fargate ?? loadFargateConfig();
+        saveChecksConfig({
+          ...current,
+          fargate: {
+            ...fargate,
+            projectProfiles: {
+              ...fargate.projectProfiles,
+              [this.ctx.cwd]: nextValue as FargateResourceProfile,
+            },
+          },
+        });
       }
       this.refresh();
       this.onCycleSaved();
@@ -574,10 +580,30 @@ export function registerChecksCommand(pi: ExtensionAPI) {
       const abort = startReview();
       const solverCount = solverConfig?.solverCount ?? 0;
       const total = (runGapFinder ? 2 : 0) + (runSolverGapFinder ? solverCount + 1 : 0);
-      ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("preparing clean snapshot", 0, total));
+      const progressStartedAt = Date.now();
+      let progressLabel = runSolverGapFinder ? "preparing image" : "preparing clean snapshot";
+      let progressDone = 0;
+      let progressShowBar = !runSolverGapFinder;
+      let progressSolverCounts: { passed: number; failed: number } | undefined;
+      const updateProgress = (
+        label = progressLabel,
+        done = progressDone,
+        showBar = progressShowBar,
+        solverCounts = progressSolverCounts,
+      ) => {
+        progressLabel = label;
+        progressDone = done;
+        progressShowBar = showBar;
+        progressSolverCounts = solverCounts;
+        ctx.ui.setWidget(
+          PROGRESS_WIDGET_KEY,
+          renderProgressLines(label, done, total, solverCounts, { showBar, startedAt: progressStartedAt }),
+        );
+      };
+      const progressTimer = setInterval(() => updateProgress(), 1000);
+      updateProgress();
       ctx.ui.notify(`gap finders (${tokens.join(" ")}) started. Press ${CANCEL_SHORTCUT_LABEL} to cancel.`, "info");
       let tempDir: string | undefined;
-      const solverDirs: string[] = [];
       try {
         const dir = join(tmpdir(), `checks-${randomUUID()}`);
         mkdirSync(dir, { recursive: true });
@@ -603,13 +629,10 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             fairnessRules,
             cancelSignal: abort.signal,
           };
-          ctx.ui.setWidget(
-            PROGRESS_WIDGET_KEY,
-            renderProgressLines("finding sentence-by-sentence test gaps", completed, total),
-          );
+          updateProgress("finding sentence-by-sentence test gaps", completed, !runSolverGapFinder);
           statementReports = await runSentenceGapFinder(base);
           completed += 1;
-          ctx.ui.setWidget(PROGRESS_WIDGET_KEY, renderProgressLines("reviewing test gaps", completed, total));
+          updateProgress("reviewing test gaps", completed, !runSolverGapFinder);
           const candidateCount = statementReports.gaps.reduce((count, report) => count + report.gaps.length, 0);
           // No candidates means there is nothing for the fairness reviewer to review.
           if (candidateCount > 0)
@@ -627,105 +650,51 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             ctx.ui.notify("checks: cancelled.", "warning");
             return;
           }
-          const completedSolvers: SolverRunResult[] = [];
-          const recordSolverCompletion = (result: SolverRunResult) => {
-            completedSolvers.push(result);
-            completed += 1;
-            ctx.ui.setWidget(
-              PROGRESS_WIDGET_KEY,
-              renderProgressLines("solver gap finder: solving", completed, total, {
-                passed: completedSolvers.filter((solver) => solver.passed).length,
-                failed: completedSolvers.filter((solver) => !solver.passed).length,
-              }),
-            );
+          const completedSolvers = new Map<number, SolverRunResult>();
+          let remoteStarted = false;
+          const solverStatusText = () =>
+            Array.from({ length: solverCount }, (_, index) => {
+              const result = completedSolvers.get(index + 1);
+              return result ? `${index + 1}${result.passed ? "✓" : "✗"}` : `${index + 1}…`;
+            }).join(" ");
+          const renderSolverProgress = (phase: string) => {
+            if (phase === "running agents") remoteStarted = true;
+            const showBar = remoteStarted && (phase === "running agents" || phase === "finalizing");
+            const label = phase === "running agents" ? `${phase} (${solverStatusText()})` : phase;
+            const solverResults = [...completedSolvers.values()];
+            updateProgress(label, completed + solverResults.length, showBar, {
+              passed: solverResults.filter((solver) => solver.passed).length,
+              failed: solverResults.filter((solver) => !solver.passed).length,
+            });
           };
-          const setups = await Promise.all(
-            Array.from({ length: solverCount }, async (_, i) => {
-              const solverDir = join(tmpdir(), `checks-solvergap-${randomUUID()}`);
-              mkdirSync(solverDir, { recursive: true });
-              solverDirs.push(solverDir);
-              return {
-                index: i + 1,
-                setup: await setupSolverWorkspace({
-                  pi,
-                  repoDir: ctx.cwd,
-                  solverDir,
-                  testPatchPath: join(ctx.cwd, "test.patch"),
-                  agentPromptPath: join(ctx.cwd, "agent_prompt.md"),
-                  cancelSignal: abort.signal,
-                }),
-              };
-            }),
-          );
+          const recordSolverProgress = (results: SolverRunResult[]) => {
+            for (const result of results) completedSolvers.set(result.index, result);
+            renderSolverProgress("running agents");
+          };
+          const recordSolverCompletion = (result: SolverRunResult) => {
+            completedSolvers.set(result.index, result);
+            renderSolverProgress("finalizing");
+          };
+          renderSolverProgress("preparing image");
           const runId = formatLocalTimestamp().replace(/[:.]/g, "-");
-          solverResults = await Promise.all(
-            setups.map(async ({ index, setup }) => {
-              if (setup.status !== "ok") {
-                const result = {
-                  index,
-                  status: setup.status,
-                  passed: false,
-                  diff: "",
-                  testOutputTail: setup.error,
-                  durationMs: 0,
-                  totalTests: null,
-                  failedTests: null,
-                } satisfies SolverRunResult;
-                recordSolverCompletion(result);
-                return result;
-              }
-              const started = Date.now();
-              const { outcome, trajectory } = await runSolverAgent({
-                pi,
-                solverDir: setup.solverDir,
-                model: solverModel,
-                thinkingLevel: solverConfig.thinkingLevel,
-                timeoutMinutes: solverConfig.timeoutMinutes,
-                cancelSignal: abort.signal,
-              });
-              if (abort.signal.aborted || outcome === "cancelled") {
-                const result = cancelledSolverResult(index, Date.now() - started);
-                recordSolverCompletion(result);
-                return result;
-              }
-
-              const { testOutputXmlPath, ...result } = await finalizeSolverRun({
-                pi,
-                index,
-                workspace: setup,
-                status: outcome === "done" ? "ok" : outcome,
-                durationMs: Date.now() - started,
-                cancelSignal: abort.signal,
-              });
-              // finalizeSolverRun is cancellation-aware and kills the whole
-              // verification process tree. Do not write artifacts after the
-              // user has asked the run to stop.
-              if (abort.signal.aborted || result.status === "cancelled") {
-                recordSolverCompletion(result);
-                return result;
-              }
-
-              const artifactsDir = solverConfig.saveArtifacts
-                ? saveSolverArtifacts({
-                    repoDir: ctx.cwd,
-                    runId,
-                    index,
-                    trajectory,
-                    solutionPatch: result.diff,
-                    testOutputXmlPath,
-                    testOutputTail: result.testOutputTail,
-                  })
-                : undefined;
-              const solverResult = { ...result, artifactsDir };
-              recordSolverCompletion(solverResult);
-              return solverResult;
-            }),
-          );
+          solverResults = await runFargateSolverGapFinder({
+            pi,
+            repoDir: ctx.cwd,
+            snapshotDir: dir,
+            config,
+            solverConfig,
+            cancelSignal: abort.signal,
+            runId,
+            onSolverCompleted: recordSolverCompletion,
+            onSolverProgress: recordSolverProgress,
+            onPhase: renderSolverProgress,
+          });
           if (abort.signal.aborted) {
             ctx.ui.notify("checks: cancelled.", "warning");
             return;
           }
           if (solverResults.some((result) => result.status !== "patchFailed" && result.status !== "error")) {
+            renderSolverProgress("finalizing");
             writeSolverSolutionsToDisk(dir, solverResults);
             comparison = await runSolverComparisonReviewer({
               tempDir: dir,
@@ -738,6 +707,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             });
           }
           completed += 1;
+          renderSolverProgress("finalizing");
           if (abort.signal.aborted) {
             ctx.ui.notify("checks: cancelled.", "warning");
             return;
@@ -775,9 +745,9 @@ export function registerChecksCommand(pi: ExtensionAPI) {
       } catch (error) {
         ctx.ui.notify(`checks failed: ${error instanceof Error ? error.message : String(error)}`, "error");
       } finally {
+        clearInterval(progressTimer);
         ctx.ui.setWidget(PROGRESS_WIDGET_KEY, undefined);
         if (tempDir) rmSync(tempDir, { recursive: true, force: true });
-        for (const dir of solverDirs) cleanupSolverWorkspace(dir);
         endReview();
       }
     },
