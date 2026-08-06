@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Build every non-private extension under extensions/*.
+ * Build every non-private extension under extensions/* using its package build script.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -8,8 +8,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const buildScript = join(root, "scripts", "build-extension.mjs");
 const extensionsDir = join(root, "extensions");
+const buildCommand = process.platform === "win32" ? "cmd.exe" : "npm";
+const buildArgs = process.platform === "win32" ? ["/d", "/s", "/c", "npm run build"] : ["run", "build"];
 
 for (const dirent of readdirSync(extensionsDir, { withFileTypes: true })) {
   if (!dirent.isDirectory()) continue;
@@ -22,7 +23,7 @@ for (const dirent of readdirSync(extensionsDir, { withFileTypes: true })) {
   if (packageJson.private) continue;
 
   console.log(`\n==> ${packageJson.name}`);
-  const result = spawnSync(process.execPath, [buildScript], {
+  const result = spawnSync(buildCommand, buildArgs, {
     cwd: pkgDir,
     stdio: "inherit",
   });

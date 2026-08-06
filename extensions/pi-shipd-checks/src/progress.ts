@@ -24,7 +24,6 @@ export function renderProgressLines(
   label: string,
   done: number,
   total: number,
-  solverCounts?: { passed: number; failed: number },
   options?: ProgressRenderOptions,
 ): string[] {
   const showBar = options?.showBar !== false;
@@ -33,6 +32,5 @@ export function renderProgressLines(
   const bar = "█".repeat(filled) + "░".repeat(Math.max(0, PROGRESS_BAR_WIDTH - filled));
   const progress = showBar ? ` [${bar}] ${done}/${total}` : "";
   const elapsed = options?.startedAt === undefined ? "" : `  elapsed: ${formatElapsed(Date.now() - options.startedAt)}`;
-  const solverSummary = solverCounts ? `  pass:${solverCounts.passed} fail:${solverCounts.failed}` : "";
-  return [`checks: ${label}${progress}${elapsed}${solverSummary}`];
+  return [`checks: ${label}${progress}${elapsed}`];
 }
