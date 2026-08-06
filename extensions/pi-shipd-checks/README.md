@@ -33,7 +33,11 @@ For the flags you pass, `/checks`:
    `trajectory.json` (its raw session entries), `solution.patch`, and `./test.sh new` output
    are also persisted to `.pi/shipd-checks/<run-id>/solver_<n>/` in your project root, for
    later inspection independent of `shipd_report.json`.
-5. Posts a chat summary and merges the gap-finder results into `shipd_report.json` in your
+5. Runs the solver workers in one AWS ECS Fargate Spot task (when the solver finder is enabled),
+   with the source snapshot and partial results in S3. A Spot interruption retries the task and
+   resumes solver indexes whose results were already uploaded; the final comparison still runs
+   locally.
+6. Posts a chat summary and merges the gap-finder results into `shipd_report.json` in your
    project root. Running either finder separately builds up one combined report without any
    PASS/FAIL verdict.
 
@@ -54,13 +58,87 @@ The two finder flags are additive/combinable; `--config` must be used alone.
 
 ## Configuration
 
-`/checks --config` opens the row-based settings menu with three sections:
+`/checks --config` opens the row-based settings menu with four sections:
 
 - **Reviewer**: model and thinking level used by the behavioral gap finders, validator, and
   solver-solution comparison agent.
 - **Solver**: model and thinking level for TDD solver agents, plus their timeout, parallel solver
   count, and artifact-saving setting.
 - **Analyze Tool**: pick the model + thinking level for the agent-callable Gap Finder tool.
+- **Fargate**: choose the shared-task resource profile for the current project: `small` (1 vCPU,
+  2 GB), `medium` (2 vCPU, 4 GB), or `large` (4 vCPU, 8 GB).
+
+AWS credentials stay local. Configure the AWS CLI profile, then set `AWS_PROFILE`/`AWS_REGION` (or add
+`fargate.awsProfile`/`fargate.region` to `checks-config.json`). The runner discovers the default
+VPC, public subnets, security group, ECS cluster, and an account-scoped private S3 bucket unless
+explicit IDs are configured. It uses the `FARGATE_SPOT` capacity provider only; there is no
+On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetries`.
+
+### Fargate setup
+
+1. Create a dedicated, least-privilege IAM user in the AWS Console (do not use root), create an
+   access key under **Security credentials**, and save it locally in
+   `%USERPROFILE%\\.aws\\credentials`—no AWS CLI is required:
+
+   ```ini
+   [shipd-static]
+   aws_access_key_id = YOUR_ACCESS_KEY_ID
+   aws_secret_access_key = YOUR_SECRET_ACCESS_KEY
+   ```
+
+   Use `"awsProfile": "shipd-static"` in the checks config. The AWS SDK reads this file directly.
+   Keep it outside the repository, rotate the key periodically, and never paste it into chat or
+   commit it. The IAM user needs the runtime ECS, S3, EC2-discovery, STS, and `iam:PassRole`
+   permissions for the configured task/execution roles.
+
+   Alternatively, AWS CLI browser login/SSO profiles work and are automatically refreshed by the
+   SDK; CLI setup is optional.
+
+2. Create an ECS task role with this trust policy (`ecs-tasks.amazonaws.com`) and an inline S3
+   policy. Use an explicit bucket name so the policy stays narrow:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Action": ["s3:GetObject", "s3:PutObject"],
+       "Resource": "arn:aws:s3:::BUCKET_NAME/runs/*"
+     }]
+   }
+   ```
+
+   The task role is required for long-running jobs because temporary presigned URLs can expire
+   while dependencies or agents are running.
+
+3. Create an ECS execution role trusted by `ecs-tasks.amazonaws.com`, attach the AWS-managed
+   `service-role/AmazonECSTaskExecutionRolePolicy`, and create the CloudWatch log group. The
+   execution role is used for `awslogs` and image startup; the task role is used for S3 data.
+
+4. Add the role ARNs and bucket to `~/.pi/agent/checks-config.json`:
+
+   ```json
+   {
+     "fargate": {
+       "awsProfile": "shipd-fargate",
+       "region": "us-east-1",
+       "bucket": "BUCKET_NAME",
+       "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/pi-shipd-checks-task",
+       "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/pi-shipd-checks-execution",
+       "logGroup": "/aws/ecs/pi-shipd-checks",
+       "resourceProfile": "medium",
+       "maxRetries": 1
+     }
+   }
+   ```
+
+   `cluster`, `subnetIds`, and `securityGroupId` are optional when a default VPC is available.
+   Set `projectProfiles` to override resources per repository:
+   `{"C:/path/to/repo":"large"}`.
+
+5. Restart pi, use `/checks --config` to select the solver model and project resource profile,
+   then run `/checks --solver-gap-finder`. Projects need `Dockerfile`, `agent_prompt.md`,
+   `solution.patch`, `test.patch`, and `test.sh`.
 
 Use `/analyze:on` and `/analyze:off` to control the tool per project, like HPC. The enabled project
 list is stored alongside the other settings in `~/.pi/agent/checks-config.json`:
@@ -104,7 +182,10 @@ Or, for local development, point at the entry point directly:
 | `src/index.ts` | Extension entry point: message renderer, cancel shortcut, command registration |
 | `src/command.ts` | The `/checks` command: argument parsing, `--config` flow, run orchestration |
 | `src/agents.ts` | Spawns and races the gap-finder/reviewer/solver agent sessions |
-| `src/solvergap.ts` | Solver-gap-finder workspace lifecycle: setup, verification, artifact persistence, cleanup |
+| `src/solvergap.ts` | Local solver result persistence and comparison artifacts |
+| `src/fargate-docker.ts` | Supported Dockerfile parsing for remote solver setup |
+| `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration, retries, and cleanup |
+| `src/fargate-worker.ts` | ESM worker that runs concurrent solver workspaces in the shared task |
 | `src/prompts.ts` | All prompt text sent to those agents |
 | `src/tools.ts` | Custom tools the agents call to submit their structured results |
 | `src/rubric.ts` | Embedded guidelines/fairness rubric text + per-role section loaders |

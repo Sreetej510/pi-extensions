@@ -9,6 +9,35 @@ export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "m
 export type Verdict = "PASS" | "FAIL";
 
 /** Model/thinking-level settings for the solver-gap-finder's solver agents (they write code + run shell, a heavier job than the read-only reviewers), plus their own timeout/parallelism knobs. Kept nested under `solverGap` in the same config file rather than a separate one. */
+export type FargateResourceProfile = "small" | "medium" | "large";
+
+export interface FargateConfig {
+  /** AWS CLI/SDK profile name; environment AWS_PROFILE still takes precedence. */
+  awsProfile?: string;
+  /** AWS region for ECS, S3, and task networking. */
+  region?: string;
+  /** Optional existing ECS cluster ARN or name; auto-discovered when absent. */
+  cluster?: string;
+  /** Optional S3 bucket; an account-scoped bucket is created when absent. */
+  bucket?: string;
+  /** Optional public subnet IDs. Default-VPC public subnets are discovered when absent. */
+  subnetIds?: string[];
+  /** Optional security group ID. The default-VPC default group is discovered when absent. */
+  securityGroupId?: string;
+  /** Resource profile used by the current project when no project override exists. */
+  resourceProfile?: FargateResourceProfile;
+  /** Per-project resource profiles keyed by absolute project path. */
+  projectProfiles?: Record<string, FargateResourceProfile>;
+  /** ECS task role ARN used for long-running direct S3 access from the worker. */
+  taskRoleArn?: string;
+  /** ECS task execution role ARN, needed when CloudWatch logs are enabled. */
+  executionRoleArn?: string;
+  /** CloudWatch log group used when executionRoleArn is configured. */
+  logGroup?: string;
+  /** Number of times to retry an interrupted Spot task. */
+  maxRetries?: number;
+}
+
 export interface SolverGapConfig {
   provider: string;
   modelId: string;
@@ -25,6 +54,7 @@ export interface ChecksConfig {
   provider: string;
   modelId: string;
   thinkingLevel: ThinkingLevel;
+  fargate?: FargateConfig;
   solverGap?: SolverGapConfig;
   /** Project folders where the agent-callable Gap Finder tool is enabled. */
   enabledProjects?: string[];
