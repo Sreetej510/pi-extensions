@@ -4,6 +4,7 @@ import type { FargateResourceProfile, FargateResourceUsage } from "./types.js";
 
 const SAMPLE_INTERVAL_MS = 5_000;
 const CPU_THRESHOLD_PERCENT = 90;
+const CPU_HIGH_THRESHOLD_PERCENT = 95;
 
 type CpuReading = { usageMicros: number; vcpus: number };
 
@@ -53,6 +54,7 @@ export class TaskResourceUsageSampler {
   private sampleCount = 0;
   private observedMs = 0;
   private cpuOver90Ms = 0;
+  private cpuOver95Ms = 0;
   private maxCpuPercent: number | null = null;
   private stopped: FargateResourceUsage | undefined;
 
@@ -80,7 +82,8 @@ export class TaskResourceUsageSampler {
       durationMs: Date.now() - this.startedAt,
       sampleCount: this.sampleCount,
       maxCpuPercent: this.maxCpuPercent,
-      cpuOver90Fraction: this.observedMs > 0 ? this.cpuOver90Ms / this.observedMs : null,
+      cpuOver90DurationMs: this.observedMs > 0 ? this.cpuOver90Ms : null,
+      cpuOver95DurationMs: this.observedMs > 0 ? this.cpuOver95Ms : null,
       observedAt: new Date().toISOString(),
     };
   }
@@ -95,7 +98,9 @@ export class TaskResourceUsageSampler {
       const usageDeltaMicros = Math.max(0, cpu.usageMicros - this.lastCpu.usageMicros);
       const cpuPercent = Math.max(0, Math.min(100, (usageDeltaMicros / (elapsedMs * 1000 * cpu.vcpus)) * 100));
       this.observedMs += Math.max(0, elapsedMs);
-      if (cpuPercent >= CPU_THRESHOLD_PERCENT) this.cpuOver90Ms += Math.max(0, elapsedMs);
+      const intervalMs = Math.max(0, elapsedMs);
+      if (cpuPercent >= CPU_THRESHOLD_PERCENT) this.cpuOver90Ms += intervalMs;
+      if (cpuPercent >= CPU_HIGH_THRESHOLD_PERCENT) this.cpuOver95Ms += intervalMs;
       this.maxCpuPercent = this.maxCpuPercent === null ? cpuPercent : Math.max(this.maxCpuPercent, cpuPercent);
     }
     if (cpu) this.lastCpu = cpu;
