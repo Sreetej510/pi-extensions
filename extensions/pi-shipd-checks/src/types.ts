@@ -43,8 +43,6 @@ export interface FargateConfig {
   adaptiveResourceProfile?: boolean;
   /** Per-project resource profiles keyed by absolute project path; these override adaptive sizing. */
   projectProfiles?: Record<string, FargateResourceProfile>;
-  /** Per-project task telemetry history used by adaptive sizing. */
-  resourceUsageHistory?: Record<string, FargateResourceUsage[]>;
   /** ECS task role ARN used for long-running direct S3 access from the worker. */
   taskRoleArn?: string;
   /** ECS task execution role ARN, needed when CloudWatch logs are enabled. */

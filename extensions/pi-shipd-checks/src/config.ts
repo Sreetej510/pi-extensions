@@ -113,20 +113,7 @@ export function resolveFargateResources(
 }
 
 export function selectAdaptiveResourceProfile(cwd: string, config: FargateConfig): FargateResourceProfile {
-  const baseline = config.resourceProfile ?? FARGATE_DEFAULT_PROFILE;
-  if (!config.adaptiveResourceProfile || config.projectProfiles?.[cwd]) return baseline;
-  const history = config.resourceUsageHistory?.[cwd];
-  const last = history?.at(-1);
-  if (!last || !Object.hasOwn(FARGATE_RESOURCE_PROFILES, last.profile)) return baseline;
-
-  const profiles = Object.keys(FARGATE_RESOURCE_PROFILES) as FargateResourceProfile[];
-  const currentIndex = profiles.indexOf(last.profile);
-  const cpuOverloaded = (last.cpuOver90DurationMs ?? 0) > FARGATE_CPU_UPGRADE_DURATION_MS;
-  const safeToDowngrade =
-    typeof last.cpuOver95DurationMs === "number" && last.cpuOver95DurationMs < FARGATE_CPU_DOWNGRADE_DURATION_MS;
-  if (cpuOverloaded && currentIndex < profiles.length - 1) return profiles[currentIndex + 1] as FargateResourceProfile;
-  if (safeToDowngrade && currentIndex > 0) return profiles[currentIndex - 1] as FargateResourceProfile;
-  return last.profile;
+  return config.projectProfiles?.[cwd] ?? config.resourceProfile ?? FARGATE_DEFAULT_PROFILE;
 }
 
 export function recordFargateResourceUsage(
@@ -135,9 +122,18 @@ export function recordFargateResourceUsage(
   usage: FargateResourceUsage,
 ): ChecksConfig {
   const fargate = config.fargate ?? {};
-  const history = { ...(fargate.resourceUsageHistory ?? {}) };
-  history[cwd] = [...(history[cwd] ?? []), usage].slice(-5);
-  return { ...config, fargate: { ...fargate, resourceUsageHistory: history } };
+  if (fargate.adaptiveResourceProfile !== true) return config;
+  const profiles = Object.keys(FARGATE_RESOURCE_PROFILES) as FargateResourceProfile[];
+  const currentIndex = profiles.indexOf(usage.profile);
+  const cpuOverloaded = (usage.cpuOver90DurationMs ?? 0) > FARGATE_CPU_UPGRADE_DURATION_MS;
+  const safeToDowngrade =
+    typeof usage.cpuOver95DurationMs === "number" && usage.cpuOver95DurationMs < FARGATE_CPU_DOWNGRADE_DURATION_MS;
+  let nextProfile = usage.profile;
+  if (cpuOverloaded && currentIndex < profiles.length - 1)
+    nextProfile = profiles[currentIndex + 1] as FargateResourceProfile;
+  else if (safeToDowngrade && currentIndex > 0) nextProfile = profiles[currentIndex - 1] as FargateResourceProfile;
+  const projectProfiles = { ...(fargate.projectProfiles ?? {}), [cwd]: nextProfile };
+  return { ...config, fargate: { ...fargate, projectProfiles } };
 }
 
 /** The nested `solverGap` section, normalized with sane defaults if partially missing/invalid. */
