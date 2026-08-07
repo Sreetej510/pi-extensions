@@ -39,8 +39,8 @@ export const FARGATE_RESOURCE_PROFILES = {
 } as const satisfies Record<FargateResourceProfile, { cpu: number; memoryMiB: number }>;
 export const FARGATE_DEFAULT_PROFILE: FargateResourceProfile = "medium";
 export const FARGATE_DEFAULT_MAX_RETRIES = 1;
-const FARGATE_CPU_UPGRADE_FRACTION = 0.4;
-const FARGATE_CPU_DOWNGRADE_FRACTION = 0.1;
+const FARGATE_CPU_UPGRADE_DURATION_MS = 3 * 60 * 1000;
+const FARGATE_CPU_DOWNGRADE_DURATION_MS = 60 * 1000;
 
 /**
  * Mirrors `getSupportedThinkingLevels` from `@earendil-works/pi-ai` (not part of
@@ -121,8 +121,9 @@ export function selectAdaptiveResourceProfile(cwd: string, config: FargateConfig
 
   const profiles = Object.keys(FARGATE_RESOURCE_PROFILES) as FargateResourceProfile[];
   const currentIndex = profiles.indexOf(last.profile);
-  const cpuOverloaded = (last.cpuOver90Fraction ?? 0) >= FARGATE_CPU_UPGRADE_FRACTION;
-  const safeToDowngrade = (last.cpuOver90Fraction ?? 1) < FARGATE_CPU_DOWNGRADE_FRACTION;
+  const cpuOverloaded = (last.cpuOver90DurationMs ?? 0) > FARGATE_CPU_UPGRADE_DURATION_MS;
+  const safeToDowngrade =
+    typeof last.cpuOver95DurationMs === "number" && last.cpuOver95DurationMs < FARGATE_CPU_DOWNGRADE_DURATION_MS;
   if (cpuOverloaded && currentIndex < profiles.length - 1) return profiles[currentIndex + 1] as FargateResourceProfile;
   if (safeToDowngrade && currentIndex > 0) return profiles[currentIndex - 1] as FargateResourceProfile;
   return last.profile;

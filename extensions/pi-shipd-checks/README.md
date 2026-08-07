@@ -136,8 +136,8 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
 
    `cluster`, `subnetIds`, and `securityGroupId` are optional when a default VPC is available.
    With `adaptiveResourceProfile: true`, the first run uses `resourceProfile`; later runs upgrade
-   when normalized CPU is at least 90% for 40% or more of the runtime, downgrade when that is
-   below 10%, and otherwise retain the profile. Set
+   when normalized CPU is at least 90% for more than three minutes, downgrade when CPU is at
+   least 95% for under one minute, and otherwise retain the profile. Set
    `projectProfiles` to override resources per repository:
    `{"C:/path/to/repo":"large"}`.
 
@@ -191,7 +191,7 @@ Or, for local development, point at the entry point directly:
 | `src/fargate-docker.ts` | Supported Dockerfile parsing for remote solver setup |
 | `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration, retries, cleanup, and task telemetry |
 | `src/fargate-worker.ts` | ESM worker that runs concurrent solver workspaces in the shared task |
-| `src/resource-usage.ts` | Container CPU/memory sampling for adaptive profile selection |
+| `src/resource-usage.ts` | Container CPU sampling for adaptive profile selection |
 | `src/prompts.ts` | All prompt text sent to those agents |
 | `src/tools.ts` | Custom tools the agents call to submit their structured results |
 | `src/rubric.ts` | Embedded guidelines/fairness rubric text + per-role section loaders |
