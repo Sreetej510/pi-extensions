@@ -17,6 +17,7 @@ import {
   loadEnabledModelRefs,
   loadFargateConfig,
   loadSolverGapConfig,
+  recordFargateResourceUsage,
   resolveFargateResources,
   SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
   SOLVER_GAP_DEFAULT_SOLVER_COUNT,
@@ -42,6 +43,7 @@ import type {
   CommandOption,
   FargateConfig,
   FargateResourceProfile,
+  FargateResourceUsage,
   GapStageResult,
   SolverGap,
   SolverGapConfig,
@@ -637,6 +639,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           }
         }
         let solverResults: SolverRunResult[] = [];
+        let fargateResourceUsage: FargateResourceUsage | undefined;
         let comparison: GapStageResult<SolverGap> = { status: "ok", gaps: [] };
         if (runSolverGapFinder && solverConfig) {
           if (abort.signal.aborted) {
@@ -677,6 +680,9 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             runId,
             onSolverCompleted: recordSolverCompletion,
             onSolverProgress: recordSolverProgress,
+            onResourceUsage: (usage) => {
+              fargateResourceUsage = usage;
+            },
             onPhase: renderSolverProgress,
           });
           if (abort.signal.aborted) {
@@ -698,6 +704,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           }
           completed += 1;
           renderSolverProgress("finalizing");
+          if (fargateResourceUsage) saveChecksConfig(recordFargateResourceUsage(config, ctx.cwd, fargateResourceUsage));
           if (abort.signal.aborted) {
             ctx.ui.notify("checks: cancelled.", "warning");
             return;
@@ -716,6 +723,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           gapFilterStatus: filtered.status,
           runSolverGapFinder,
           solverResults,
+          fargateResourceUsage,
           solverGaps: comparison.gaps,
           solverGapAnalysisIncomplete:
             runSolverGapFinder &&

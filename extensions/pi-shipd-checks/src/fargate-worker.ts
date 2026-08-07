@@ -6,7 +6,8 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { buildSolverPrompt } from "./prompts.js";
-import type { SolverRunResult, ThinkingLevel } from "./types.js";
+import { TaskResourceUsageSampler } from "./resource-usage.js";
+import type { FargateResourceProfile, FargateResourceUsage, SolverRunResult, ThinkingLevel } from "./types.js";
 
 type DockerPlan = {
   baseImage: string;
@@ -20,8 +21,11 @@ type WorkerSolverResult = SolverRunResult & { trajectory?: unknown[] };
 type WorkerPayload = {
   complete: boolean;
   results: WorkerSolverResult[];
+  resourceUsage?: FargateResourceUsage;
   error?: string;
 };
+
+let activeResourceUsage: TaskResourceUsageSampler | undefined;
 
 const AGENT_DIR = "/opt/shipd-agent";
 const SOLVERS_DIR = "/work/solvers";
@@ -42,12 +46,13 @@ function loadBootstrap(): void {
   const directS3 = ["bucket", "region", "sourceKey", "authKey", "resultKey"].every(
     (key) => typeof bootstrap[key] === "string" && bootstrap[key],
   );
-  const stringValues = ["planB64", "provider", "modelId", "thinkingLevel"];
+  const stringValues = ["planB64", "provider", "modelId", "thinkingLevel", "resourceProfile"];
   const envNames: Record<string, string> = {
     planB64: "SHIPD_PLAN_B64",
     provider: "SHIPD_PROVIDER",
     modelId: "SHIPD_MODEL_ID",
     thinkingLevel: "SHIPD_THINKING_LEVEL",
+    resourceProfile: "SHIPD_RESOURCE_PROFILE",
   };
   if (directS3) {
     for (const [key, envName] of [
@@ -433,6 +438,9 @@ async function run(): Promise<void> {
   loadBootstrap();
   const resultUrl = process.env.SHIPD_RESULT_PUT_URL ?? "";
   const resultGetUrl = process.env.SHIPD_RESULT_GET_URL ?? "";
+  const resourceProfile = requiredEnv("SHIPD_RESOURCE_PROFILE") as FargateResourceProfile;
+  activeResourceUsage = new TaskResourceUsageSampler(resourceProfile);
+  activeResourceUsage.start();
   const existing = await readExistingResult(resultGetUrl);
   const completed = new Map((existing?.results ?? []).map((result) => [result.index, result]));
   const plan = planFromEnv();
@@ -467,7 +475,13 @@ async function run(): Promise<void> {
   const record = (result: WorkerSolverResult): Promise<void> => {
     completed.set(result.index, result);
     const snapshot = [...completed.values()].sort((a, b) => a.index - b.index);
-    uploadChain = uploadChain.then(() => upload(resultUrl, { complete: false, results: snapshot }));
+    uploadChain = uploadChain.then(() =>
+      upload(resultUrl, {
+        complete: false,
+        results: snapshot,
+        resourceUsage: activeResourceUsage?.snapshot(),
+      }),
+    );
     return uploadChain;
   };
   await Promise.all(
@@ -480,7 +494,8 @@ async function run(): Promise<void> {
   );
   await uploadChain;
   const results = [...completed.values()].sort((a, b) => a.index - b.index);
-  await upload(resultUrl, { complete: true, results });
+  const resourceUsage = activeResourceUsage?.stop();
+  await upload(resultUrl, { complete: true, results, resourceUsage });
 }
 
 async function readExistingResult(url: string): Promise<WorkerPayload | undefined> {
@@ -505,12 +520,13 @@ async function readExistingResult(url: string): Promise<WorkerPayload | undefine
 
 run().catch(async (error) => {
   const message = error instanceof Error ? error.message : String(error);
+  const resourceUsage = activeResourceUsage?.stop();
   try {
     const url = process.env.SHIPD_RESULT_PUT_URL ?? "";
     const getUrl = process.env.SHIPD_RESULT_GET_URL ?? "";
     const existing = getUrl || directS3Enabled() ? await readExistingResult(getUrl) : undefined;
     if (url || directS3Enabled())
-      await upload(url, { complete: true, results: existing?.results ?? [], error: message });
+      await upload(url, { complete: true, results: existing?.results ?? [], resourceUsage, error: message });
   } catch {
     // The task exit status still exposes the failure when result upload fails.
   }

@@ -13,6 +13,7 @@ import type {
   ChecksConfig,
   FargateConfig,
   FargateResourceProfile,
+  FargateResourceUsage,
   SolverGapConfig,
   ThinkingLevel,
 } from "./types.js";
@@ -38,6 +39,8 @@ export const FARGATE_RESOURCE_PROFILES = {
 } as const satisfies Record<FargateResourceProfile, { cpu: number; memoryMiB: number }>;
 export const FARGATE_DEFAULT_PROFILE: FargateResourceProfile = "medium";
 export const FARGATE_DEFAULT_MAX_RETRIES = 1;
+const FARGATE_CPU_UPGRADE_FRACTION = 0.4;
+const FARGATE_CPU_DOWNGRADE_FRACTION = 0.1;
 
 /**
  * Mirrors `getSupportedThinkingLevels` from `@earendil-works/pi-ai` (not part of
@@ -87,7 +90,12 @@ export function loadFargateConfig(): FargateConfig {
   const maxRetries = Number.isFinite(fargate.maxRetries)
     ? Math.min(3, Math.max(0, Math.floor(fargate.maxRetries as number)))
     : FARGATE_DEFAULT_MAX_RETRIES;
-  return { ...fargate, resourceProfile, maxRetries };
+  return {
+    ...fargate,
+    resourceProfile,
+    adaptiveResourceProfile: fargate.adaptiveResourceProfile === true,
+    maxRetries,
+  };
 }
 
 export function resolveFargateResources(
@@ -98,9 +106,37 @@ export function resolveFargateResources(
   cpu: number;
   memoryMiB: number;
 } {
-  const profile = config.projectProfiles?.[cwd] ?? config.resourceProfile ?? FARGATE_DEFAULT_PROFILE;
+  const explicitProfile = config.projectProfiles?.[cwd];
+  const profile = explicitProfile ?? selectAdaptiveResourceProfile(cwd, config);
   const normalized = Object.hasOwn(FARGATE_RESOURCE_PROFILES, profile) ? profile : FARGATE_DEFAULT_PROFILE;
   return { profile: normalized, ...FARGATE_RESOURCE_PROFILES[normalized] };
+}
+
+export function selectAdaptiveResourceProfile(cwd: string, config: FargateConfig): FargateResourceProfile {
+  const baseline = config.resourceProfile ?? FARGATE_DEFAULT_PROFILE;
+  if (!config.adaptiveResourceProfile || config.projectProfiles?.[cwd]) return baseline;
+  const history = config.resourceUsageHistory?.[cwd];
+  const last = history?.at(-1);
+  if (!last || !Object.hasOwn(FARGATE_RESOURCE_PROFILES, last.profile)) return baseline;
+
+  const profiles = Object.keys(FARGATE_RESOURCE_PROFILES) as FargateResourceProfile[];
+  const currentIndex = profiles.indexOf(last.profile);
+  const cpuOverloaded = (last.cpuOver90Fraction ?? 0) >= FARGATE_CPU_UPGRADE_FRACTION;
+  const safeToDowngrade = (last.cpuOver90Fraction ?? 1) < FARGATE_CPU_DOWNGRADE_FRACTION;
+  if (cpuOverloaded && currentIndex < profiles.length - 1) return profiles[currentIndex + 1] as FargateResourceProfile;
+  if (safeToDowngrade && currentIndex > 0) return profiles[currentIndex - 1] as FargateResourceProfile;
+  return last.profile;
+}
+
+export function recordFargateResourceUsage(
+  config: ChecksConfig,
+  cwd: string,
+  usage: FargateResourceUsage,
+): ChecksConfig {
+  const fargate = config.fargate ?? {};
+  const history = { ...(fargate.resourceUsageHistory ?? {}) };
+  history[cwd] = [...(history[cwd] ?? []), usage].slice(-5);
+  return { ...config, fargate: { ...fargate, resourceUsageHistory: history } };
 }
 
 /** The nested `solverGap` section, normalized with sane defaults if partially missing/invalid. */

@@ -1,7 +1,7 @@
 /** Persistence and chat-summary helpers for the gap-finder runs. */
 
 import { existsSync, readFileSync } from "node:fs";
-import type { ChecksConfig, SolverGap, SolverRunResult, TestGapFinal } from "./types.js";
+import type { ChecksConfig, FargateResourceUsage, SolverGap, SolverRunResult, TestGapFinal } from "./types.js";
 
 export const REQUIRED_FILES = ["agent_prompt.md", "solution.patch", "test.patch"] as const;
 
@@ -33,6 +33,7 @@ export interface MergeReportInput {
   gapFilterStatus: string;
   runSolverGapFinder: boolean;
   solverResults: SolverRunResult[];
+  fargateResourceUsage?: FargateResourceUsage;
   solverGaps: SolverGap[];
   solverGapAnalysisIncomplete: boolean;
   solverComparisonStatus: string;
@@ -66,6 +67,8 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
       artifactsDir: r.artifactsDir,
     }));
     merged.solverGaps = input.solverGaps;
+    if (input.fargateResourceUsage) merged.fargateResourceUsage = input.fargateResourceUsage;
+    else delete merged.fargateResourceUsage;
     if (input.solverGapAnalysisIncomplete) {
       merged.solverGapAnalysisNote = `Solver-gap analysis did not fully complete (comparison reviewer: ${input.solverComparisonStatus}); solverGaps may be incomplete.`;
     } else delete merged.solverGapAnalysisNote;
