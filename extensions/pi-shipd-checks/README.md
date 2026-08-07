@@ -66,7 +66,8 @@ The two finder flags are additive/combinable; `--config` must be used alone.
   count, and artifact-saving setting.
 - **Analyze Tool**: pick the model + thinking level for the agent-callable Gap Finder tool.
 - **Fargate**: choose the shared-task resource profile for the current project: `small` (1 vCPU,
-  2 GB), `medium` (2 vCPU, 4 GB), or `large` (4 vCPU, 8 GB).
+  2 GB), `medium` (2 vCPU, 4 GB), or `large` (4 vCPU, 8 GB). Adaptive sizing can select the
+  next profile from task telemetry after each run.
 
 AWS credentials stay local. Configure the AWS CLI profile, then set `AWS_PROFILE`/`AWS_REGION` (or add
 `fargate.awsProfile`/`fargate.region` to `checks-config.json`). The runner discovers the default
@@ -120,20 +121,24 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
    ```json
    {
      "fargate": {
-       "awsProfile": "shipd-fargate",
+       "awsProfile": "shipd-static",
        "region": "us-east-1",
        "bucket": "BUCKET_NAME",
        "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/pi-shipd-checks-task",
        "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/pi-shipd-checks-execution",
        "logGroup": "/aws/ecs/pi-shipd-checks",
        "resourceProfile": "medium",
+       "adaptiveResourceProfile": true,
        "maxRetries": 1
      }
    }
    ```
 
    `cluster`, `subnetIds`, and `securityGroupId` are optional when a default VPC is available.
-   Set `projectProfiles` to override resources per repository:
+   With `adaptiveResourceProfile: true`, the first run uses `resourceProfile`; later runs upgrade
+   when normalized CPU is at least 90% for 40% or more of the runtime, downgrade when that is
+   below 10%, and otherwise retain the profile. Set
+   `projectProfiles` to override resources per repository:
    `{"C:/path/to/repo":"large"}`.
 
 5. Restart pi, use `/checks --config` to select the solver model and project resource profile,
@@ -184,8 +189,9 @@ Or, for local development, point at the entry point directly:
 | `src/agents.ts` | Spawns and races the gap-finder/reviewer/solver agent sessions |
 | `src/solvergap.ts` | Local solver result persistence and comparison artifacts |
 | `src/fargate-docker.ts` | Supported Dockerfile parsing for remote solver setup |
-| `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration, retries, and cleanup |
+| `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration, retries, cleanup, and task telemetry |
 | `src/fargate-worker.ts` | ESM worker that runs concurrent solver workspaces in the shared task |
+| `src/resource-usage.ts` | Container CPU/memory sampling for adaptive profile selection |
 | `src/prompts.ts` | All prompt text sent to those agents |
 | `src/tools.ts` | Custom tools the agents call to submit their structured results |
 | `src/rubric.ts` | Embedded guidelines/fairness rubric text + per-role section loaders |

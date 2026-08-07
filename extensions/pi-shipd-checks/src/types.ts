@@ -11,6 +11,17 @@ export type Verdict = "PASS" | "FAIL";
 /** Model/thinking-level settings for the solver-gap-finder's solver agents (they write code + run shell, a heavier job than the read-only reviewers), plus their own timeout/parallelism knobs. Kept nested under `solverGap` in the same config file rather than a separate one. */
 export type FargateResourceProfile = "small" | "medium" | "large";
 
+/** Task-level resource telemetry captured inside the worker and persisted locally after a run. */
+export interface FargateResourceUsage {
+  profile: FargateResourceProfile;
+  durationMs: number;
+  sampleCount: number;
+  maxCpuPercent: number | null;
+  /** Fraction of observed runtime whose normalized CPU utilization was at least 90%. */
+  cpuOver90Fraction: number | null;
+  observedAt: string;
+}
+
 export interface FargateConfig {
   /** AWS CLI/SDK profile name; environment AWS_PROFILE still takes precedence. */
   awsProfile?: string;
@@ -26,8 +37,12 @@ export interface FargateConfig {
   securityGroupId?: string;
   /** Resource profile used by the current project when no project override exists. */
   resourceProfile?: FargateResourceProfile;
-  /** Per-project resource profiles keyed by absolute project path. */
+  /** Automatically select the next profile from per-project resource telemetry. */
+  adaptiveResourceProfile?: boolean;
+  /** Per-project resource profiles keyed by absolute project path; these override adaptive sizing. */
   projectProfiles?: Record<string, FargateResourceProfile>;
+  /** Per-project task telemetry history used by adaptive sizing. */
+  resourceUsageHistory?: Record<string, FargateResourceUsage[]>;
   /** ECS task role ARN used for long-running direct S3 access from the worker. */
   taskRoleArn?: string;
   /** ECS task execution role ARN, needed when CloudWatch logs are enabled. */

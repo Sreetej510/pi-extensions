@@ -36,7 +36,7 @@ import { CONFIG_PATH, resolveFargateResources } from "./config.js";
 import { type FargateDockerPlan, parseFargateDockerfile } from "./fargate-docker.js";
 import { bashQuote, toSlashPath } from "./git.js";
 import { SOLVER_ARTIFACTS_DIRNAME } from "./solvergap.js";
-import type { ChecksConfig, FargateConfig, SolverGapConfig, SolverRunResult } from "./types.js";
+import type { ChecksConfig, FargateConfig, FargateResourceUsage, SolverGapConfig, SolverRunResult } from "./types.js";
 
 const TASK_CONTAINER_NAME = "shipd-worker";
 const WORKER_S3_NAME = "fargate-worker.mjs";
@@ -50,6 +50,7 @@ interface WorkerSolverResult extends SolverRunResult {
 interface WorkerPayload {
   complete: boolean;
   results: WorkerSolverResult[];
+  resourceUsage?: FargateResourceUsage;
   error?: string;
 }
 
@@ -86,6 +87,7 @@ export async function runFargateSolverGapFinder(opts: {
   runId: string;
   onSolverCompleted?: (result: SolverRunResult) => void;
   onSolverProgress?: (results: SolverRunResult[]) => void;
+  onResourceUsage?: (usage: FargateResourceUsage) => void;
   onPhase?: (phase: string) => void;
 }): Promise<SolverRunResult[]> {
   if (opts.cancelSignal.aborted) throw new Error("Cancelled by user.");
@@ -205,6 +207,7 @@ export async function runFargateSolverGapFinder(opts: {
           thinkingLevel: opts.solverConfig.thinkingLevel,
           timeoutMinutes: opts.solverConfig.timeoutMinutes,
           solverCount,
+          resourceProfile: resources.profile,
         })}\n`,
         "utf-8",
       );
@@ -250,7 +253,10 @@ export async function runFargateSolverGapFinder(opts: {
         () => readResultObject(clients.s3, context.bucket, keys.result),
         opts.solverConfig.timeoutMinutes,
         opts.cancelSignal,
-        (results) => opts.onSolverProgress?.(results),
+        (results, resourceUsage) => {
+          opts.onSolverProgress?.(results);
+          if (resourceUsage) opts.onResourceUsage?.(resourceUsage);
+        },
         () => opts.onPhase?.("running agents"),
         () => {
           stoppedByUs = true;
@@ -259,6 +265,7 @@ export async function runFargateSolverGapFinder(opts: {
       taskArn = undefined;
       recoveredResults = mergeSolverResults(recoveredResults, payload?.results ?? []);
       opts.onSolverProgress?.(recoveredResults);
+      if (payload?.resourceUsage) opts.onResourceUsage?.(payload.resourceUsage);
       if (payload?.complete && !payload.error && recoveredResults.length >= solverCount) {
         opts.onPhase?.("finalizing");
         const results = await persistResults(opts, recoveredResults, opts.solverConfig.saveArtifacts);
@@ -481,7 +488,7 @@ async function waitForTask(
   getResult: () => Promise<WorkerPayload | undefined>,
   timeoutMinutes: number,
   cancelSignal: AbortSignal,
-  onPayload: (results: SolverRunResult[]) => void,
+  onPayload: (results: SolverRunResult[], resourceUsage?: FargateResourceUsage) => void,
   onRunning: () => void,
   markStopped: () => void,
 ): Promise<WorkerPayload | undefined> {
@@ -499,7 +506,7 @@ async function waitForTask(
     const payload = await getResult();
     if (payload) {
       lastPayload = payload;
-      onPayload(payload.results);
+      onPayload(payload.results, payload.resourceUsage);
       if (payload.complete) return payload;
     }
     const described = await ecs.send(new DescribeTasksCommand({ cluster, tasks: [taskArn] }));
@@ -511,7 +518,7 @@ async function waitForTask(
     if (task?.lastStatus === "STOPPED") {
       const final = await getResult();
       if (final) {
-        onPayload(final.results);
+        onPayload(final.results, final.resourceUsage);
         return final;
       }
       const reason = task.stoppedReason ?? task.containers?.[0]?.reason ?? "Fargate task stopped without a result.";
