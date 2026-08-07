@@ -94,7 +94,12 @@ export function registerPromptCommand(pi: ExtensionAPI): void {
 
         if (r.action === "paste") {
           const p = all[r.index];
-          if (p) ui.pasteToEditor(p.content);
+          if (p) {
+            ui.pasteToEditor(p.content);
+            // Closing the custom UI can render before pasteToEditor runs. Clearing a
+            // status requests another render without adding anything to the footer.
+            ui.setStatus("prompt-manager-refresh", undefined);
+          }
           break;
         }
 
