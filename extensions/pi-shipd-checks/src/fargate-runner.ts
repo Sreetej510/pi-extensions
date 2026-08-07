@@ -284,10 +284,15 @@ export async function runFargateSolverGapFinder(opts: {
     return results;
   } finally {
     opts.cancelSignal.removeEventListener("abort", onAbort);
-    if (taskArn && !stoppedByUs) {
-      await clients.ecs
-        .send(new StopTaskCommand({ cluster: taskCluster, task: taskArn, reason: "shipd checks cleanup" }))
-        .catch(() => undefined);
+    if (taskArn) {
+      if (!stoppedByUs) {
+        await clients.ecs
+          .send(new StopTaskCommand({ cluster: taskCluster, task: taskArn, reason: "shipd checks cleanup" }))
+          .catch(() => undefined);
+      }
+      // Do not delete bootstrap/worker objects while a pending task could still
+      // be starting and attempting to download them.
+      await waitUntilTaskStopped(clients.ecs, taskCluster, taskArn);
     }
     await deleteObjects(clients.s3, cleanupBucket, keys).catch(() => undefined);
     clients.ecs.destroy();
@@ -479,6 +484,20 @@ async function registerTaskDefinition(
   );
   if (!response.taskDefinition?.taskDefinitionArn) throw new Error("ECS did not return a task definition ARN.");
   return response.taskDefinition.taskDefinitionArn;
+}
+
+async function waitUntilTaskStopped(ecs: ECSClient, cluster: string | undefined, taskArn: string): Promise<void> {
+  if (!cluster) return;
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    try {
+      const described = await ecs.send(new DescribeTasksCommand({ cluster, tasks: [taskArn] }));
+      if (described.tasks?.[0]?.lastStatus === "STOPPED") return;
+    } catch {
+      return;
+    }
+    await sleep(2_000);
+  }
 }
 
 async function waitForTask(
