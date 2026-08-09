@@ -1,58 +1,47 @@
 # @sreetej510/pi-shipd-checks
 
-A [pi](https://github.com/earendil-works/pi) coding agent extension that finds behavioral
-coverage gaps in a benchmark task's hidden tests.
+A [pi](https://github.com/earendil-works/pi) coding agent extension that analyzes benchmark
+tests for behavioral coverage gaps, fairness, and test strength.
 
 ## What it does
 
-For the flags you pass, `/checks`:
+For `/checks`:
 
 1. Snapshots the current git `HEAD` into a throwaway temp directory (via
    `git archive HEAD | tar -x`) — it never touches your working directory, staged, or
    uncommitted changes.
 2. Copies `agent_prompt.md`, `solution.patch`, and `test.patch` from your project root into
    that temp dir.
-3. Optionally runs a two-agent behavioral test-gap analysis: one finder works through every
-   meaningful prompt sentence, submitting positive and negative candidates for each; a strict
-   reviewer then filters the combined list for fair, public behavioral assertions.
-4. Optionally runs the solver gap finder: several (configurable, default 3) TDD-style solver
+3. Optionally runs the solver gap finder: several (configurable, default 3) TDD-style solver
    agents, each in its own throwaway git repo with `test.patch` and `agent_prompt.md` applied
    (never `solution.patch`), given write/edit/bash access to iterate until `./test.sh new`
-   passes or they give up. The extension independently re-verifies each
-   solver's result and captures its diff (excluding any files `test.patch` touched, and
-   including any new, previously-uncommitted files the solver created), writes each
-   solver's diff + test output to `solver_gap_solutions/solver_<n>/` inside the shared
-   snapshot dir (plus a `manifest.json` summary) — rather than embedding them directly in
-   a prompt — so a read-only comparison reviewer can read only what it needs via its
-   normal read/grep/find/ls tools, keeping its context usage independent of solver count
-   and diff size. That reviewer compares the solvers' diffs against the real
-   `agent_prompt.md`/`solution.patch` to surface behavioral gaps — cases where a passing
-   solver's approach diverges from the intended behavior, indicating a test that's
-   under-specified. This is empirical (grounded in real agent attempts) rather than
-   analytical, so it's reported separately from the `--gap-finder` results. Each solver's full
-   `trajectory.json` (its raw session entries), `solution.patch`, and `./test.sh new` output
-   are also persisted to `.pi/shipd-checks/<run-id>/solver_<n>/` in your project root, for
-   later inspection independent of `shipd_report.json`.
-5. Runs the solver workers in one AWS ECS Fargate Spot task (when the solver finder is enabled),
-   with the source snapshot and partial results in S3. A Spot interruption retries the task and
-   resumes solver indexes whose results were already uploaded; the final comparison still runs
-   locally.
-6. Posts a chat summary and merges the gap-finder results into `shipd_report.json` in your
-   project root. Running either finder separately builds up one combined report without any
-   PASS/FAIL verdict.
+   passes or they give up. The extension independently re-verifies each solver's result and
+   compares passing solver diffs with the reference to surface behavioral gaps.
+4. Runs solver workers in one AWS ECS Fargate Spot task when enabled, with the source snapshot
+   and partial results in S3. A Spot interruption retries the task and resumes completed
+   solver indexes.
+5. Posts a chat summary and merges solver results into `shipd_report.json` in your project root.
+
+The agent-callable `analyze_task_tests` tool provides the separate test-analysis workflow:
+
+- `mode: "gaps"` (default) finds and validates sentence-by-sentence behavioral coverage gaps.
+- `mode: "audit"` runs an auditor followed by an independent validator over implemented tests,
+  filtering unfair assertions, prompt ambiguity, weak assertions, and broken fixtures.
+
+Both modes are read-only. Invoke the tool only when the user asks, never in parallel, and run
+repeated requests sequentially after applying each result.
 
 ## Commands
 
-The two finder flags are additive/combinable; `--config` must be used alone.
+`--config` must be used alone; solver-gap-finder is the only `/checks` run mode.
 
 | Command | Effect |
 |---|---|
-| `/checks` | Open a menu with config, solver-gap-finder, and gap-finder options |
-| `/checks --config` | Configure behavioral and solver gap-finder models |
+| `/checks` | Open a menu with config and solver-gap-finder options |
+| `/checks --config` | Configure reviewer, solver, gap-finder, and test-audit models |
 | `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
-| `/checks --gap-finder` | Find gaps sentence-by-sentence, then review them for fairness |
-| `/analyze:on` | Enable the agent-callable Gap Finder tool for the current project |
-| `/analyze:off` | Disable the agent-callable Gap Finder tool for the current project |
+| `/analyze:on` | Enable the agent-callable test-analysis tool for the current project |
+| `/analyze:off` | Disable the agent-callable test-analysis tool for the current project |
 
 **Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run. Cancellation is propagated to active solver sessions and their spawned shell/test process trees; post-cancel verification, comparison, and artifact writing are skipped.
 
@@ -64,7 +53,7 @@ The two finder flags are additive/combinable; `--config` must be used alone.
   solver-solution comparison agent.
 - **Solver**: model and thinking level for TDD solver agents, plus their timeout, parallel solver
   count, and artifact-saving setting.
-- **Analyze Tool**: pick the model + thinking level for the agent-callable Gap Finder tool.
+- **Analyze Tool**: pick separate models + thinking levels for the agent-callable gap-analysis and Test Audit modes. The audit model defaults to the gap-analysis model until explicitly changed. These are stored under `analyzeGap.testAuditProvider`, `analyzeGap.testAuditModelId`, and `analyzeGap.testAuditThinkingLevel`.
 - **Fargate**: choose the shared-task resource profile for the current project: `small` (1 vCPU,
   2 GB), `medium` (2 vCPU, 4 GB), or `large` (4 vCPU, 8 GB). Adaptive sizing can select the
   next profile from task telemetry after each run.
@@ -147,7 +136,12 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
    `solution.patch`, `test.patch`, and `test.sh`.
 
 Use `/analyze:on` and `/analyze:off` to control the tool per project, like HPC. The enabled project
-list is stored alongside the other settings in `~/.pi/agent/checks-config.json`:
+list is stored alongside the other settings in `~/.pi/agent/checks-config.json`.
+
+The agent-callable tool accepts `mode: "gaps"` (default) or `mode: "audit"`. Invoke it only when the
+user asks, never in parallel, and run repeated requests sequentially after applying each result.
+The audit is read-only and returns repair recommendations; the caller changes the tests or prompt.
+
 
 ```json
 {

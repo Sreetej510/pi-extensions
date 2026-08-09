@@ -6,11 +6,13 @@
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ReviewReport, SolverGap, StatementGapReport, TestGapFinal } from "./types.js";
+import type { ReviewReport, SolverGap, StatementGapReport, TestAuditFinding, TestGapFinal } from "./types.js";
 
 export const REPORT_TOOL_NAME = "submit_review_report";
 export const GAP_FINDER_TOOL_NAME = "submit_test_gap_candidates";
 export const GAP_VALIDATOR_TOOL_NAME = "submit_filtered_test_gaps";
+export const TEST_AUDIT_TOOL_NAME = "submit_test_audit_findings";
+export const TEST_AUDIT_VALIDATOR_TOOL_NAME = "submit_filtered_test_audit_findings";
 export const SOLVER_GAP_TOOL_NAME = "submit_solver_gaps";
 
 // ── Reviewer report tool ─────────────────────────────────────────────
@@ -140,6 +142,87 @@ export function createGapValidatorTool(capture: {
       capture.gaps = gaps;
       return {
         content: [{ type: "text", text: `Confirmed ${gaps.length} gap(s) after filtering` }],
+        details: undefined,
+      };
+    },
+  };
+}
+
+const testAuditFindingParams = Type.Object({
+  category: Type.Union(
+    [
+      Type.Literal("unfair-assertion"),
+      Type.Literal("prompt-ambiguity"),
+      Type.Literal("weak-assertion"),
+      Type.Literal("broken-fixture"),
+    ],
+    {
+      description: "The kind of actionable problem found in the current test or its setup.",
+    },
+  ),
+  testName: Type.String({
+    description: "The test name or short identifier that lets the caller find the affected assertion.",
+  }),
+  problem: Type.String({
+    description: "What is wrong with the test and why it is blocking or actionable.",
+  }),
+  evidence: Type.String({
+    description: "The prompt, public repository contract, test, or fixture evidence supporting the finding.",
+  }),
+  requiredBehavior: Type.String({
+    description: "The semantic behavior or gap that must remain covered after the test is repaired.",
+  }),
+  recommendation: Type.String({
+    description: "A fair repair, or a prompt clarification when the contract is genuinely ambiguous.",
+  }),
+});
+
+const testAuditFindingsParams = Type.Object({
+  findings: Type.Array(testAuditFindingParams, {
+    description:
+      "Only confirmed, actionable fairness, ambiguity, test-strength, or fixture findings. Use an empty array " +
+      "when the current tests are fair, strong, and grounded.",
+  }),
+});
+
+export function createTestAuditTool(capture: {
+  findings?: TestAuditFinding[];
+}): ToolDefinition<typeof testAuditFindingsParams> {
+  return {
+    name: TEST_AUDIT_TOOL_NAME,
+    label: "Submit Test Audit Candidates",
+    description:
+      "Submit candidate findings from the first post-implementation test audit phase. This is the ONLY way to " +
+      "report your result — call it exactly once, as your last action. Use an empty list when no actionable issue " +
+      "is found.",
+    parameters: testAuditFindingsParams,
+    async execute(_toolCallId, params) {
+      const findings = params.findings ?? [];
+      capture.findings = findings;
+      return {
+        content: [{ type: "text", text: `Recorded ${findings.length} test-audit candidate(s)` }],
+        details: undefined,
+      };
+    },
+  };
+}
+
+export function createTestAuditValidatorTool(capture: {
+  findings?: TestAuditFinding[];
+}): ToolDefinition<typeof testAuditFindingsParams> {
+  return {
+    name: TEST_AUDIT_VALIDATOR_TOOL_NAME,
+    label: "Submit Validated Test Audit Findings",
+    description:
+      "Submit the final, independently validated findings from the post-implementation test audit. This is the " +
+      "ONLY way to report your result — call it exactly once, as your last action. Use an empty list when no " +
+      "candidate survives strict review.",
+    parameters: testAuditFindingsParams,
+    async execute(_toolCallId, params) {
+      const findings = params.findings ?? [];
+      capture.findings = findings;
+      return {
+        content: [{ type: "text", text: `Recorded ${findings.length} validated test-audit finding(s)` }],
         details: undefined,
       };
     },

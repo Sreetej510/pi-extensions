@@ -1,28 +1,27 @@
 /**
  * Shipd Checks Extension for pi
  *
- * Behavioral test-gap analysis for a task's agent_prompt.md and repository source,
- * with an optional solver-based gap finder.
+ * Behavioral test-gap analysis and post-implementation test auditing for a task's
+ * agent_prompt.md, tests, and repository source, with an optional solver-based gap finder.
  *
  * Flow:
  *   1. Snapshot the current git HEAD (no working-dir mutation) into a temp dir
  *      via `git archive HEAD | tar -x` (see git.ts).
  *   2. Copy agent_prompt.md, solution.patch, test.patch from the project root
  *      into that temp dir.
- *   3. (--gap-finder) Run a 3-agent behavioral test-gap analysis: two
- *      specialized finders run in parallel — one for positive (missing required-
- *      behavior) gaps, one for negative (missing forbidden-behavior) gaps — then a
- *      strict validator filters the combined candidate list.
- *   4. Post a one-line chat message and merge gap-finder results into
+ *   3. (/checks --solver-gap-finder) Run TDD solver agents and compare their
+ *      passing implementations to the reference behavior.
+ *   4. (analyze_task_tests) Run the requested read-only gap or test audit mode;
+ *      audit mode uses an auditor plus an independent validator; the caller applies repairs.
+ *   5. Post a one-line chat message and merge solver results into
  *      shipd_report.json in the project root.
  *
  * Commands:
- *   /analyze:on           enable the agent-callable Gap Finder for this project
- *   /analyze:off          disable the agent-callable Gap Finder for this project
- *   /checks               open a menu for config, solver-gap-finder, or gap-finder
- *   /checks --config      set the gap-finder models and thinking levels
+ *   /analyze:on           enable the agent-callable test-analysis tool for this project
+ *   /analyze:off          disable the agent-callable test-analysis tool for this project
+ *   /checks               open a menu for config or solver-gap-finder
+ *   /checks --config      set reviewer, gap-analysis, and test-audit models
  *   /checks --solver-gap-finder  run several TDD solver agents, then compare their solutions to find gaps
- *   /checks --gap-finder  run positive + negative gap finders, then validator
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.
  *
  * File layout:
@@ -61,18 +60,18 @@ const CANCEL_SHORTCUT = Key.ctrlShift("x");
 
 export default function shipdChecksExtension(pi: ExtensionAPI) {
   pi.registerCommand("analyze:on", {
-    description: "Enable the Gap Finder tool for this project folder",
+    description: "Enable the test-analysis tool for this project folder",
     handler: async (_args, ctx) => {
       setAnalyzeEnabled(pi, ctx.cwd, true);
-      ctx.ui.notify("Gap Finder tool ON in this project", "info");
+      ctx.ui.notify("Test-analysis tool ON in this project", "info");
     },
   });
 
   pi.registerCommand("analyze:off", {
-    description: "Disable the Gap Finder tool for this project folder",
+    description: "Disable the test-analysis tool for this project folder",
     handler: async (_args, ctx) => {
       setAnalyzeEnabled(pi, ctx.cwd, false);
-      ctx.ui.notify("Gap Finder tool OFF in this project", "info");
+      ctx.ui.notify("Test-analysis tool OFF in this project", "info");
     },
   });
 
@@ -146,7 +145,7 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
   registerChecksCommand(pi);
 }
 
-/** Keeps the analyze_test_gaps tool visible only while enabled (like HPC tools). */
+/** Keeps the analyze_task_tests tool visible only while enabled (like HPC tools). */
 function registerAnalyzeGapsSync(pi: ExtensionAPI) {
   pi.on("session_start", (event, ctx) => {
     // New, resume, reload, fork — load the persisted setting for this session.

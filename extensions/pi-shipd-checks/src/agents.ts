@@ -15,20 +15,28 @@ import {
   buildSentenceGapFinderPrompt,
   buildSolverComparisonPrompt,
   buildSolverPrompt,
+  buildTestAuditPrompt,
+  buildTestAuditValidatorPrompt,
 } from "./prompts.js";
 import {
   createGapFinderTool,
   createGapValidatorTool,
   createSolverGapTool,
+  createTestAuditTool,
+  createTestAuditValidatorTool,
   GAP_FINDER_TOOL_NAME,
   GAP_VALIDATOR_TOOL_NAME,
   SOLVER_GAP_TOOL_NAME,
+  TEST_AUDIT_TOOL_NAME,
+  TEST_AUDIT_VALIDATOR_TOOL_NAME,
 } from "./tools.js";
 import type {
   GapStageResult,
   SolverGap,
   SolverRunResult,
   StatementGapReport,
+  TestAuditFinding,
+  TestAuditStageResult,
   TestGapFinal,
   ThinkingLevel,
 } from "./types.js";
@@ -255,4 +263,83 @@ export async function runGapValidator(opts: {
   }
   if (!capture.gaps) return { status: "noSubmission", gaps: [] };
   return { status: "ok", gaps: capture.gaps };
+}
+
+/** Runs one read-only audit over the tests currently present in the repository. */
+export async function runTestAudit(opts: {
+  tempDir: string;
+  model: unknown;
+  thinkingLevel: ThinkingLevel;
+  testRubric: string;
+  fairnessRules: string;
+  cancelSignal: AbortSignal;
+}): Promise<TestAuditStageResult> {
+  const capture: { findings?: TestAuditFinding[] } = {};
+  const model = asSessionModel(opts.model);
+  let session: AgentSession | undefined;
+
+  try {
+    ({ session } = await createAgentSession({
+      cwd: opts.tempDir,
+      model,
+      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
+      tools: [...REVIEWER_TOOLS, TEST_AUDIT_TOOL_NAME],
+      customTools: [createTestAuditTool(capture)],
+      sessionManager: SessionManager.inMemory(),
+    }));
+
+    const outcome = await raceAgentTurn(async () => {
+      await session?.prompt(buildTestAuditPrompt(opts.testRubric, opts.fairnessRules));
+    }, opts.cancelSignal);
+    if (outcome !== "done") {
+      await session.abort();
+      return { status: outcome, findings: [] };
+    }
+  } catch {
+    return { status: "error", findings: [] };
+  } finally {
+    await disposeAgentSession(session);
+  }
+  if (!capture.findings) return { status: "noSubmission", findings: [] };
+  return { status: "ok", findings: capture.findings };
+}
+
+/** Independently validates the first audit agent's candidates before they reach the caller. */
+export async function runTestAuditValidator(opts: {
+  tempDir: string;
+  model: unknown;
+  thinkingLevel: ThinkingLevel;
+  testRubric: string;
+  fairnessRules: string;
+  findings: TestAuditFinding[];
+  cancelSignal: AbortSignal;
+}): Promise<TestAuditStageResult> {
+  const capture: { findings?: TestAuditFinding[] } = {};
+  const model = asSessionModel(opts.model);
+  let session: AgentSession | undefined;
+
+  try {
+    ({ session } = await createAgentSession({
+      cwd: opts.tempDir,
+      model,
+      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
+      tools: [...REVIEWER_TOOLS, TEST_AUDIT_VALIDATOR_TOOL_NAME],
+      customTools: [createTestAuditValidatorTool(capture)],
+      sessionManager: SessionManager.inMemory(),
+    }));
+
+    const outcome = await raceAgentTurn(async () => {
+      await session?.prompt(buildTestAuditValidatorPrompt(opts.findings, opts.testRubric, opts.fairnessRules));
+    }, opts.cancelSignal);
+    if (outcome !== "done") {
+      await session.abort();
+      return { status: outcome, findings: [] };
+    }
+  } catch {
+    return { status: "error", findings: [] };
+  } finally {
+    await disposeAgentSession(session);
+  }
+  if (!capture.findings) return { status: "noSubmission", findings: [] };
+  return { status: "ok", findings: capture.findings };
 }

@@ -71,19 +71,27 @@ export interface ChecksConfig {
   thinkingLevel: ThinkingLevel;
   fargate?: FargateConfig;
   solverGap?: SolverGapConfig;
-  /** Project folders where the agent-callable Gap Finder tool is enabled. */
+  /** Project folders where the agent-callable test-analysis tool is enabled. */
   enabledProjects?: string[];
   /** Legacy global setting retained for migration. */
   enableAnalyzeTool?: boolean;
-  /** Dedicated model/thinking-level for the `analyze_test_gaps` tool's finder + reviewer agents. */
+  /** Dedicated model/thinking-level for the `analyze_task_tests` tool's gap finder + audit agents. */
   analyzeGap?: AnalyzeGapConfig;
 }
 
-/** Model/thinking-level settings for the agent-callable `analyze_test_gaps` tool. */
-export interface AnalyzeGapConfig {
+/** Model/thinking-level settings for one mode of the agent-callable analysis tool. */
+export interface AnalyzeAgentConfig {
   provider: string;
   modelId: string;
   thinkingLevel: ThinkingLevel;
+}
+
+/** Model settings for the gap-finder mode plus an optional dedicated test-audit model. */
+export interface AnalyzeGapConfig extends AnalyzeAgentConfig {
+  /** Dedicated model for test-audit mode; omitted means reuse the gap-finder model. */
+  testAuditProvider?: string;
+  testAuditModelId?: string;
+  testAuditThinkingLevel?: ThinkingLevel;
 }
 
 export interface ReviewReport {
@@ -111,6 +119,33 @@ export interface StatementGapReport {
 export interface TestGapFinal {
   description: string;
   justification: string;
+}
+
+/** Modes supported by the agent-callable behavioral analysis tool. */
+export type AnalyzeMode = "gaps" | "audit";
+
+/** Kind of actionable problem found by the post-implementation test audit. */
+export type TestAuditCategory = "unfair-assertion" | "prompt-ambiguity" | "weak-assertion" | "broken-fixture";
+
+/** A concrete fairness, ambiguity, strength, or fixture problem in the current tests. */
+export interface TestAuditFinding {
+  category: TestAuditCategory;
+  /** Test name or short identifier that lets the caller find the affected assertion. */
+  testName: string;
+  /** What is wrong with the test and why it is actionable. */
+  problem: string;
+  /** Prompt/repository/test evidence supporting the finding. */
+  evidence: string;
+  /** The behavioral gap or contract that must remain covered after the repair. */
+  requiredBehavior: string;
+  /** A fair repair, or a prompt clarification when the contract is genuinely ambiguous. */
+  recommendation: string;
+}
+
+/** Result of one read-only post-implementation test audit. */
+export interface TestAuditStageResult {
+  status: "ok" | "timedOut" | "cancelled" | "error" | "noSubmission";
+  findings: TestAuditFinding[];
 }
 
 export type ReviewerRoleKey = "description" | "tests" | "solution";

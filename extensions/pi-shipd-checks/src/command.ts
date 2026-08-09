@@ -1,4 +1,4 @@
-/** The `/checks` command: behavioral and solver-based gap finders only. */
+/** The `/checks` command: configuration and solver-based gap finding. */
 
 import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, Spacer, Text } from "@earendil-works/pi-tui";
-import { runGapValidator, runGapFinder as runSentenceGapFinder, runSolverComparisonReviewer } from "./agents.js";
+import { runSolverComparisonReviewer } from "./agents.js";
 import {
   FARGATE_RESOURCE_PROFILES,
   getSupportedThinkingLevels,
@@ -48,24 +48,21 @@ import type {
   SolverGap,
   SolverGapConfig,
   SolverRunResult,
-  StatementGapReport,
-  TestGapFinal,
   ThinkingLevel,
 } from "./types.js";
 
 export const CANCEL_SHORTCUT_LABEL = "Ctrl+Shift+X";
 
 const COMMAND_COMPLETIONS: readonly CommandOption[] = [
-  { value: "--config", label: "--config", description: "Configure gap-finder models" },
+  { value: "--config", label: "--config", description: "Configure reviewer, gap-finder, and test-audit models" },
   {
     value: "--solver-gap-finder",
     label: "--solver-gap-finder",
     description: "Use TDD solver attempts to find behavioral gaps",
   },
-  { value: "--gap-finder", label: "--gap-finder", description: "Find and validate behavioral test-coverage gaps" },
 ];
 
-const COMMAND_MENU_OPTIONS = ["config", "solver-gap-finder", "gap-finder"] as const;
+const COMMAND_MENU_OPTIONS = ["config", "solver-gap-finder"] as const;
 
 function getArgumentCompletions(prefix: string) {
   const trimmed = prefix.trimStart();
@@ -155,8 +152,10 @@ type ConfigRowId =
   | "solvergap-solver-count"
   | "solvergap-save-artifacts"
   | "analyze-enabled"
-  | "analyze-model"
-  | "analyze-thinking"
+  | "analyze-gap-model"
+  | "analyze-gap-thinking"
+  | "analyze-audit-model"
+  | "analyze-audit-thinking"
   | "fargate-profile";
 
 interface ConfigRow {
@@ -182,6 +181,11 @@ function buildConfigRows(
     : ["off"];
   const analyzeGapLevels = analyzeGap.provider
     ? supportedThinkingLevelsFor(ctx, analyzeGap.provider, analyzeGap.modelId)
+    : ["off"];
+  const testAuditProvider = analyzeGap.testAuditProvider ?? analyzeGap.provider;
+  const testAuditModelId = analyzeGap.testAuditModelId ?? analyzeGap.modelId;
+  const testAuditLevels = testAuditProvider
+    ? supportedThinkingLevelsFor(ctx, testAuditProvider, testAuditModelId)
     : ["off"];
   const fargate = loadFargateConfig();
   const fargateProfile = resolveFargateResources(ctx.cwd, fargate).profile;
@@ -254,19 +258,38 @@ function buildConfigRows(
       values: ["on", "off"],
     },
     {
-      id: "analyze-model",
+      id: "analyze-gap-model",
       section: "Analyze Tool",
-      label: "Model",
+      label: "Gap finder model",
       value: analyzeGap.provider ? `${analyzeGap.provider}/${analyzeGap.modelId}` : "not set",
       kind: "model",
     },
     {
-      id: "analyze-thinking",
+      id: "analyze-gap-thinking",
       section: "Analyze Tool",
-      label: "Thinking level",
+      label: "Gap finder thinking",
       value: analyzeGap.thinkingLevel,
       kind: "cycle",
       values: analyzeGapLevels,
+    },
+    {
+      id: "analyze-audit-model",
+      section: "Analyze Tool",
+      label: "Test-audit model",
+      value: testAuditProvider
+        ? analyzeGap.testAuditProvider
+          ? `${testAuditProvider}/${testAuditModelId}`
+          : "same as gap finder"
+        : "not set",
+      kind: "model",
+    },
+    {
+      id: "analyze-audit-thinking",
+      section: "Analyze Tool",
+      label: "Test-audit thinking",
+      value: analyzeGap.testAuditThinkingLevel ?? analyzeGap.thinkingLevel,
+      kind: "cycle",
+      values: testAuditLevels,
     },
     {
       id: "fargate-profile",
@@ -392,8 +415,13 @@ class ConfigMenuComponent {
         saveChecksConfig({ ...current, solverGap: { ...solverGap, saveArtifacts: nextValue === "on" } });
       } else if (row.id === "analyze-enabled") {
         setAnalyzeProjectEnabled(this.ctx.cwd, nextValue === "on");
-      } else if (row.id === "analyze-thinking") {
+      } else if (row.id === "analyze-gap-thinking") {
         saveChecksConfig({ ...current, analyzeGap: { ...analyzeGap, thinkingLevel: nextValue as ThinkingLevel } });
+      } else if (row.id === "analyze-audit-thinking") {
+        saveChecksConfig({
+          ...current,
+          analyzeGap: { ...analyzeGap, testAuditThinkingLevel: nextValue as ThinkingLevel },
+        });
       } else if (row.id === "fargate-profile") {
         const fargate = current.fargate ?? loadFargateConfig();
         saveChecksConfig({
@@ -499,24 +527,55 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
       continue;
     }
 
-    if (activated === "analyze-model") {
+    if (activated === "analyze-gap-model") {
       if (!current) {
         ctx.ui.notify("Set the reviewer model first — it's required before analyze-tool settings.", "warning");
         continue;
       }
-      const picked = await pickModelOnly(ctx, analyzeGap.provider ? analyzeGap : null, "Select analyze tool model");
+      const picked = await pickModelOnly(ctx, analyzeGap.provider ? analyzeGap : null, "Select gap-finder model");
       if (!picked) continue;
       const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
       const thinkingLevel = levels.includes(analyzeGap.thinkingLevel) ? analyzeGap.thinkingLevel : (levels[0] ?? "off");
       saveChecksConfig({ ...current, analyzeGap: { ...analyzeGap, ...picked, thinkingLevel } });
-      ctx.ui.notify(`Analyze tool model saved: ${picked.provider}/${picked.modelId}`, "info");
+      ctx.ui.notify(`Gap-finder model saved: ${picked.provider}/${picked.modelId}`, "info");
+      continue;
+    }
+
+    if (activated === "analyze-audit-model") {
+      if (!current) {
+        ctx.ui.notify("Set the reviewer model first — it's required before analyze-tool settings.", "warning");
+        continue;
+      }
+      const currentAudit = analyzeGap.testAuditProvider
+        ? {
+            provider: analyzeGap.testAuditProvider,
+            modelId: analyzeGap.testAuditModelId ?? analyzeGap.modelId,
+          }
+        : analyzeGap.provider
+          ? { provider: analyzeGap.provider, modelId: analyzeGap.modelId }
+          : null;
+      const picked = await pickModelOnly(ctx, currentAudit, "Select test-audit model");
+      if (!picked) continue;
+      const currentThinking = analyzeGap.testAuditThinkingLevel ?? analyzeGap.thinkingLevel;
+      const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
+      const thinkingLevel = levels.includes(currentThinking) ? currentThinking : (levels[0] ?? "off");
+      saveChecksConfig({
+        ...current,
+        analyzeGap: {
+          ...analyzeGap,
+          testAuditProvider: picked.provider,
+          testAuditModelId: picked.modelId,
+          testAuditThinkingLevel: thinkingLevel,
+        },
+      });
+      ctx.ui.notify(`Test-audit model saved: ${picked.provider}/${picked.modelId}`, "info");
     }
   }
 }
 
 export function registerChecksCommand(pi: ExtensionAPI) {
   pi.registerCommand("checks", {
-    description: "Find behavioral gaps in test coverage. Choose an option from the menu.",
+    description: "Configure checks or run the solver-based behavioral gap finder.",
     getArgumentCompletions,
     handler: async (args, ctx) => {
       let sub = args.trim();
@@ -540,9 +599,8 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         else await runConfigFlow(pi, ctx);
         return;
       }
-      const runGapFinder = tokens.includes("--gap-finder");
       const runSolverGapFinder = tokens.includes("--solver-gap-finder");
-      if (!runGapFinder && !runSolverGapFinder) return;
+      if (!runSolverGapFinder) return;
       if (isReviewInProgress()) {
         ctx.ui.notify("A checks run is already in progress.", "warning");
         return;
@@ -581,7 +639,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
       }
       const abort = startReview();
       const solverCount = solverConfig?.solverCount ?? 0;
-      const total = (runGapFinder ? 2 : 0) + (runSolverGapFinder ? solverCount + 1 : 0);
+      const total = solverCount + 1;
       const progressStartedAt = Date.now();
       let progressLabel = runSolverGapFinder ? "preparing image" : "preparing clean snapshot";
       let progressDone = 0;
@@ -597,7 +655,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
       };
       const progressTimer = setInterval(() => updateProgress(), 1000);
       updateProgress();
-      ctx.ui.notify(`gap finders (${tokens.join(" ")}) started. Press ${CANCEL_SHORTCUT_LABEL} to cancel.`, "info");
+      ctx.ui.notify(`checks (${tokens.join(" ")}) started. Press ${CANCEL_SHORTCUT_LABEL} to cancel.`, "info");
       let tempDir: string | undefined;
       try {
         const dir = join(tmpdir(), `checks-${randomUUID()}`);
@@ -613,31 +671,6 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         const testRubric = loadTestGuidelines();
         const fairnessRules = loadFairnessRules();
         let completed = 0;
-        let statementReports: GapStageResult<StatementGapReport> = { status: "ok", gaps: [] };
-        let filtered: GapStageResult<TestGapFinal> = { status: "ok", gaps: [] };
-        if (runGapFinder) {
-          const base = {
-            tempDir: dir,
-            model,
-            thinkingLevel: config.thinkingLevel,
-            testRubric,
-            fairnessRules,
-            cancelSignal: abort.signal,
-          };
-          updateProgress("finding sentence-by-sentence test gaps", completed, !runSolverGapFinder);
-          statementReports = await runSentenceGapFinder(base);
-          completed += 1;
-          updateProgress("reviewing test gaps", completed, !runSolverGapFinder);
-          const candidateCount = statementReports.gaps.reduce((count, report) => count + report.gaps.length, 0);
-          // No candidates means there is nothing for the fairness reviewer to review.
-          if (candidateCount > 0)
-            filtered = await runGapValidator({ ...base, statementReports: statementReports.gaps });
-          completed += 1;
-          if (abort.signal.aborted) {
-            ctx.ui.notify("checks: cancelled.", "warning");
-            return;
-          }
-        }
         let solverResults: SolverRunResult[] = [];
         let fargateResourceUsage: FargateResourceUsage | undefined;
         let comparison: GapStageResult<SolverGap> = { status: "ok", gaps: [] };
@@ -710,17 +743,14 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             return;
           }
         }
-        const incomplete =
-          runGapFinder &&
-          (statementReports.status !== "ok" || (statementReports.gaps.length > 0 && filtered.status !== "ok"));
         const merged = mergeReport({
           existingReport: loadExistingReport(join(ctx.cwd, "shipd_report.json")),
           config,
-          runGapFinder,
-          testGaps: filtered.gaps,
-          gapAnalysisIncomplete: incomplete,
-          gapFinderStatus: statementReports.status,
-          gapFilterStatus: filtered.status,
+          runGapFinder: false,
+          testGaps: [],
+          gapAnalysisIncomplete: false,
+          gapFinderStatus: "ok",
+          gapFilterStatus: "ok",
           runSolverGapFinder,
           solverResults,
           fargateResourceUsage,
@@ -730,7 +760,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             (solverResults.some((result) => result.status === "error") || comparison.status !== "ok"),
           solverComparisonStatus: comparison.status,
         });
-        const summary = buildRunSummary({ merged, runGapFinder, runSolverGapFinder });
+        const summary = buildRunSummary({ merged, runGapFinder: false, runSolverGapFinder });
         pi.sendMessage({
           customType: "shipd_checks_report",
           content: summary.content,
