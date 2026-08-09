@@ -506,6 +506,22 @@ export function buildTestAuditPrompt(testRubric: string, fairnessRules: string):
     "",
     "Your goal is to find actionable problems in the tests that were written or changed during the current gap-finding " +
       "iteration, while preserving the behavioral gap they were intended to close.",
+    "Do not assume an assertion is valid because it is precise, passes the reference solution, or appears related to the " +
+      "prompt. The audit must explicitly check the validity of every assertion; finding no issue is acceptable only after " +
+      "a complete assertion-by-assertion review.",
+    "",
+    "Mandatory audit procedure:",
+    "1. Read `test.patch` and enumerate every added or changed test, test helper, fixture, mock, and assertion/expectation. " +
+      "Create an internal checklist and do not submit until every item has been reviewed.",
+    "2. For EACH assertion, inspect the exact prompt requirement, the public repository contract, the fixture state, and " +
+      "the observation target. Do not review only the test name or the main happy-path assertion.",
+    "3. Classify every assertion internally as VALID, UNFAIR, AMBIGUOUS, WEAK, or BROKEN. For every non-VALID item, " +
+      "explain the concrete evidence and produce a finding. For every VALID item, actively verify why two reasonable " +
+      "implementations would both be accepted.",
+    "4. Check compound assertions separately. If one co-assertion is unsupported, retain the fair behavioral core and " +
+      "report the unsupported part instead of treating the whole test as valid.",
+    "5. Perform a final sweep of the checklist before submitting. Do not return an empty list merely because the tests " +
+      "are small, the intended behavior seems obvious, or the reference implementation satisfies them.",
     "",
     "For each assertion and relevant fixture, independently ask:",
     "1. What exact prompt sentence or established public contract supports this check?",
