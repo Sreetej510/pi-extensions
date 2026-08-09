@@ -9,16 +9,13 @@ import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, Spacer, Text } from "@earendil-works/pi-tui";
 import { runSolverComparisonReviewer } from "./agents.js";
 import {
-  FARGATE_RESOURCE_PROFILES,
   getSupportedThinkingLevels,
   isAnalyzeToolEnabled,
   loadAnalyzeEnabledProjects,
   loadChecksConfig,
   loadEnabledModelRefs,
-  loadFargateConfig,
   loadSolverGapConfig,
   recordFargateResourceUsage,
-  resolveFargateResources,
   SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
   SOLVER_GAP_DEFAULT_SOLVER_COUNT,
   SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
@@ -41,8 +38,6 @@ import { analyzeToolSettingChanged } from "./tool-sync.js";
 import type {
   AnalyzeGapConfig,
   CommandOption,
-  FargateConfig,
-  FargateResourceProfile,
   FargateResourceUsage,
   GapStageResult,
   SolverGap,
@@ -155,12 +150,11 @@ type ConfigRowId =
   | "analyze-gap-model"
   | "analyze-gap-thinking"
   | "analyze-audit-model"
-  | "analyze-audit-thinking"
-  | "fargate-profile";
+  | "analyze-audit-thinking";
 
 interface ConfigRow {
   id: ConfigRowId;
-  section: "Reviewer" | "Solver" | "Analyze Tool" | "Fargate";
+  section: "Solver" | "Analyze Tool";
   label: string;
   value: string;
   /** "model" rows open a picker (closes the menu, then reopens it); "cycle" rows step through `values` in place. */
@@ -187,20 +181,18 @@ function buildConfigRows(
   const testAuditLevels = testAuditProvider
     ? supportedThinkingLevelsFor(ctx, testAuditProvider, testAuditModelId)
     : ["off"];
-  const fargate = loadFargateConfig();
-  const fargateProfile = resolveFargateResources(ctx.cwd, fargate).profile;
   return [
     {
       id: "reviewer-model",
-      section: "Reviewer",
-      label: "Model",
+      section: "Solver",
+      label: "Comparison model",
       value: current ? `${current.provider}/${current.modelId}` : "not set",
       kind: "model",
     },
     {
       id: "reviewer-thinking",
-      section: "Reviewer",
-      label: "Thinking level",
+      section: "Solver",
+      label: "Comparison thinking",
       value: current?.thinkingLevel ?? "off",
       kind: "cycle",
       values: reviewerLevels,
@@ -276,11 +268,7 @@ function buildConfigRows(
       id: "analyze-audit-model",
       section: "Analyze Tool",
       label: "Test-audit model",
-      value: testAuditProvider
-        ? analyzeGap.testAuditProvider
-          ? `${testAuditProvider}/${testAuditModelId}`
-          : "same as gap finder"
-        : "not set",
+      value: testAuditProvider ? `${testAuditProvider}/${testAuditModelId}` : "not set",
       kind: "model",
     },
     {
@@ -291,14 +279,6 @@ function buildConfigRows(
       kind: "cycle",
       values: testAuditLevels,
     },
-    {
-      id: "fargate-profile",
-      section: "Fargate",
-      label: "Resource profile",
-      value: fargateProfile,
-      kind: "cycle",
-      values: Object.keys(FARGATE_RESOURCE_PROFILES),
-    },
   ];
 }
 
@@ -306,14 +286,13 @@ type ChecksConfigLike = {
   provider: string;
   modelId: string;
   thinkingLevel: ThinkingLevel;
-  fargate?: FargateConfig;
   solverGap?: SolverGapConfig;
   enabledProjects?: string[];
   enableAnalyzeTool?: boolean;
   analyzeGap?: AnalyzeGapConfig;
 };
 
-/** Custom row-based menu component: renders section headers inline between "Reviewer" and "Solver" rows. Cycling rows update and persist in place (no overlay teardown); only model rows exit the overlay to run a picker. */
+/** Custom row-based menu component: renders Solver and Analyze Tool rows. Cycling rows update and persist in place; only model rows exit the overlay to run a picker. */
 class ConfigMenuComponent {
   selectedIndex = 0;
   private rows: ConfigRow[];
@@ -392,10 +371,7 @@ class ConfigMenuComponent {
       if (!row.values || row.values.length === 0) return;
       const current = loadChecksConfig();
       if (!current) {
-        this.ctx.ui.notify(
-          "Set the reviewer model first — it's required before solver-gap-finder settings.",
-          "warning",
-        );
+        this.ctx.ui.notify("Set the comparison model first — it's required before solver settings", "warning");
         return;
       }
       const solverGap = current.solverGap ?? DEFAULT_SOLVER_GAP;
@@ -422,18 +398,6 @@ class ConfigMenuComponent {
           ...current,
           analyzeGap: { ...analyzeGap, testAuditThinkingLevel: nextValue as ThinkingLevel },
         });
-      } else if (row.id === "fargate-profile") {
-        const fargate = current.fargate ?? loadFargateConfig();
-        saveChecksConfig({
-          ...current,
-          fargate: {
-            ...fargate,
-            projectProfiles: {
-              ...fargate.projectProfiles,
-              [this.ctx.cwd]: nextValue as FargateResourceProfile,
-            },
-          },
-        });
       }
       this.refresh();
       this.onCycleSaved();
@@ -441,7 +405,7 @@ class ConfigMenuComponent {
   }
 }
 
-/** Interactive `/checks --config` settings menu: a single row-based menu with "Reviewer" / "Solver" / "Analyze Tool" section headers; Ctrl+S (or Esc) saves and exits. */
+/** Interactive `/checks --config` settings menu with Solver and Analyze Tool sections; Ctrl+S (or Esc) saves and exits. */
 async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
   if (ctx.mode !== "tui") {
     ctx.ui.notify("/checks --config requires interactive mode", "error");
@@ -495,7 +459,7 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
     const analyzeGap = current?.analyzeGap ?? DEFAULT_ANALYZE_GAP;
 
     if (activated === "reviewer-model") {
-      const picked = await pickModelOnly(ctx, current, "Select reviewer model");
+      const picked = await pickModelOnly(ctx, current, "Select comparison model");
       if (!picked) continue;
       const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
       const thinkingLevel = levels.includes(current?.thinkingLevel ?? "off")
@@ -509,13 +473,13 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
         enabledProjects: current?.enabledProjects ?? loadAnalyzeEnabledProjects(),
         enableAnalyzeTool: current?.enableAnalyzeTool,
       });
-      ctx.ui.notify(`Reviewer model saved: ${picked.provider}/${picked.modelId}`, "info");
+      ctx.ui.notify(`Comparison model saved: ${picked.provider}/${picked.modelId}`, "info");
       continue;
     }
 
     if (activated === "solvergap-model") {
       if (!current) {
-        ctx.ui.notify("Set the reviewer model first — it's required before solver-gap-finder settings.", "warning");
+        ctx.ui.notify("Set the comparison model first — it's required before solver settings.", "warning");
         continue;
       }
       const picked = await pickModelOnly(ctx, solverGap.provider ? solverGap : null, "Select solver model");
@@ -529,7 +493,7 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
 
     if (activated === "analyze-gap-model") {
       if (!current) {
-        ctx.ui.notify("Set the reviewer model first — it's required before analyze-tool settings.", "warning");
+        ctx.ui.notify("Set the comparison model first — it's required before analyze-tool settings.", "warning");
         continue;
       }
       const picked = await pickModelOnly(ctx, analyzeGap.provider ? analyzeGap : null, "Select gap-finder model");
@@ -543,7 +507,7 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
 
     if (activated === "analyze-audit-model") {
       if (!current) {
-        ctx.ui.notify("Set the reviewer model first — it's required before analyze-tool settings.", "warning");
+        ctx.ui.notify("Set the comparison model first — it's required before analyze-tool settings.", "warning");
         continue;
       }
       const currentAudit = analyzeGap.testAuditProvider
