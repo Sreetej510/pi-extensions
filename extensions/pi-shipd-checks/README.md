@@ -47,16 +47,15 @@ repeated requests sequentially after applying each result.
 
 ## Configuration
 
-`/checks --config` opens the row-based settings menu with four sections:
+`/checks --config` opens the row-based settings menu with two sections:
 
-- **Reviewer**: model and thinking level used by the behavioral gap finders, validator, and
-  solver-solution comparison agent.
-- **Solver**: model and thinking level for TDD solver agents, plus their timeout, parallel solver
-  count, and artifact-saving setting.
-- **Analyze Tool**: pick separate models + thinking levels for the agent-callable gap-analysis and Test Audit modes. The audit model defaults to the gap-analysis model until explicitly changed. These are stored under `analyzeGap.testAuditProvider`, `analyzeGap.testAuditModelId`, and `analyzeGap.testAuditThinkingLevel`.
-- **Fargate**: choose the shared-task resource profile for the current project: `small` (1 vCPU,
-  2 GB), `medium` (2 vCPU, 4 GB), or `large` (4 vCPU, 8 GB). Adaptive sizing can select the
-  next profile from task telemetry after each run.
+- **Solver**: comparison model and thinking level for the final solver-result reviewer, plus the
+  TDD solver model, thinking level, timeout, parallel solver count, and artifact-saving setting.
+- **Analyze Tool**: separate models + thinking levels for the agent-callable gap-analysis and Test
+  Audit modes. The audit model defaults to the gap-analysis model until explicitly changed. These
+  are stored under `analyzeGap.testAuditProvider`, `analyzeGap.testAuditModelId`, and
+  `analyzeGap.testAuditThinkingLevel`. Fargate resources are selected automatically and are not
+  configured in this menu.
 
 AWS credentials stay local. Configure the AWS CLI profile, then set `AWS_PROFILE`/`AWS_REGION` (or add
 `fargate.awsProfile`/`fargate.region` to `checks-config.json`). The runner discovers the default
@@ -131,8 +130,8 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
    no telemetry history is retained. Set `projectProfiles` to override resources per repository:
    `{"C:/path/to/repo":"large"}`.
 
-5. Restart pi, use `/checks --config` to select the solver model and project resource profile,
-   then run `/checks --solver-gap-finder`. Projects need `Dockerfile`, `agent_prompt.md`,
+5. Restart pi, use `/checks --config` to select the solver and comparison models, then run
+   `/checks --solver-gap-finder`. Projects need `Dockerfile`, `agent_prompt.md`,
    `solution.patch`, `test.patch`, and `test.sh`.
 
 Use `/analyze:on` and `/analyze:off` to control the tool per project, like HPC. The enabled project
