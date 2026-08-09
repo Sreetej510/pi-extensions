@@ -49,8 +49,8 @@ repeated requests sequentially after applying each result.
 
 `/checks --config` opens the row-based settings menu with two sections:
 
-- **Solver**: comparison model and thinking level for the final solver-result reviewer, plus the
-  TDD solver model, thinking level, timeout, parallel solver count, and artifact-saving setting.
+- **Solver**: reviewer model and thinking level for the final solver-result reviewer, plus the
+  solver model, thinking level, timeout, parallel solver count, and artifact-saving setting.
 - **Analyze Tool**: separate models + thinking levels for the agent-callable gap-analysis and Test
   Audit modes. The audit model defaults to the gap-analysis model until explicitly changed. These
   are stored under `analyzeGap.testAuditProvider`, `analyzeGap.testAuditModelId`, and
@@ -130,7 +130,7 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
    no telemetry history is retained. Set `projectProfiles` to override resources per repository:
    `{"C:/path/to/repo":"large"}`.
 
-5. Restart pi, use `/checks --config` to select the solver and comparison models, then run
+5. Restart pi, use `/checks --config` to select the solver and reviewer models, then run
    `/checks --solver-gap-finder`. Projects need `Dockerfile`, `agent_prompt.md`,
    `solution.patch`, `test.patch`, and `test.sh`.
 

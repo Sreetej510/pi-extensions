@@ -141,8 +141,8 @@ const DEFAULT_ANALYZE_GAP: AnalyzeGapConfig = {
 type ConfigRowId =
   | "reviewer-model"
   | "reviewer-thinking"
-  | "solvergap-model"
-  | "solvergap-thinking"
+  | "solver-model"
+  | "solver-thinking"
   | "solvergap-timeout"
   | "solvergap-solver-count"
   | "solvergap-save-artifacts"
@@ -183,31 +183,16 @@ function buildConfigRows(
     : ["off"];
   return [
     {
-      id: "reviewer-model",
+      id: "solver-model",
       section: "Solver",
-      label: "Comparison model",
-      value: current ? `${current.provider}/${current.modelId}` : "not set",
-      kind: "model",
-    },
-    {
-      id: "reviewer-thinking",
-      section: "Solver",
-      label: "Comparison thinking",
-      value: current?.thinkingLevel ?? "off",
-      kind: "cycle",
-      values: reviewerLevels,
-    },
-    {
-      id: "solvergap-model",
-      section: "Solver",
-      label: "Model",
+      label: "Solver model",
       value: solverGap.provider ? `${solverGap.provider}/${solverGap.modelId}` : "not set",
       kind: "model",
     },
     {
-      id: "solvergap-thinking",
+      id: "solver-thinking",
       section: "Solver",
-      label: "Thinking level",
+      label: "Solver thinking",
       value: solverGap.thinkingLevel,
       kind: "cycle",
       values: solverGapLevels,
@@ -240,6 +225,21 @@ function buildConfigRows(
       value: solverGap.saveArtifacts ? "on" : "off",
       kind: "cycle",
       values: ["on", "off"],
+    },
+    {
+      id: "reviewer-model",
+      section: "Solver",
+      label: "Reviewer model",
+      value: current ? `${current.provider}/${current.modelId}` : "not set",
+      kind: "model",
+    },
+    {
+      id: "reviewer-thinking",
+      section: "Solver",
+      label: "Reviewer thinking",
+      value: current?.thinkingLevel ?? "off",
+      kind: "cycle",
+      values: reviewerLevels,
     },
     {
       id: "analyze-enabled",
@@ -371,7 +371,7 @@ class ConfigMenuComponent {
       if (!row.values || row.values.length === 0) return;
       const current = loadChecksConfig();
       if (!current) {
-        this.ctx.ui.notify("Set the comparison model first — it's required before solver settings", "warning");
+        this.ctx.ui.notify("Set the reviewer model first — it's required before solver settings", "warning");
         return;
       }
       const solverGap = current.solverGap ?? DEFAULT_SOLVER_GAP;
@@ -381,7 +381,7 @@ class ConfigMenuComponent {
       if (nextValue === undefined) return;
       if (row.id === "reviewer-thinking") {
         saveChecksConfig({ ...current, thinkingLevel: nextValue as ThinkingLevel, solverGap, analyzeGap });
-      } else if (row.id === "solvergap-thinking") {
+      } else if (row.id === "solver-thinking") {
         saveChecksConfig({ ...current, solverGap: { ...solverGap, thinkingLevel: nextValue as ThinkingLevel } });
       } else if (row.id === "solvergap-timeout") {
         saveChecksConfig({ ...current, solverGap: { ...solverGap, timeoutMinutes: Number.parseInt(nextValue, 10) } });
@@ -459,7 +459,7 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
     const analyzeGap = current?.analyzeGap ?? DEFAULT_ANALYZE_GAP;
 
     if (activated === "reviewer-model") {
-      const picked = await pickModelOnly(ctx, current, "Select comparison model");
+      const picked = await pickModelOnly(ctx, current, "Select reviewer model");
       if (!picked) continue;
       const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
       const thinkingLevel = levels.includes(current?.thinkingLevel ?? "off")
@@ -473,13 +473,13 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
         enabledProjects: current?.enabledProjects ?? loadAnalyzeEnabledProjects(),
         enableAnalyzeTool: current?.enableAnalyzeTool,
       });
-      ctx.ui.notify(`Comparison model saved: ${picked.provider}/${picked.modelId}`, "info");
+      ctx.ui.notify(`Reviewer model saved: ${picked.provider}/${picked.modelId}`, "info");
       continue;
     }
 
-    if (activated === "solvergap-model") {
+    if (activated === "solver-model") {
       if (!current) {
-        ctx.ui.notify("Set the comparison model first — it's required before solver settings.", "warning");
+        ctx.ui.notify("Set the reviewer model first — it's required before solver settings.", "warning");
         continue;
       }
       const picked = await pickModelOnly(ctx, solverGap.provider ? solverGap : null, "Select solver model");
@@ -493,7 +493,7 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
 
     if (activated === "analyze-gap-model") {
       if (!current) {
-        ctx.ui.notify("Set the comparison model first — it's required before analyze-tool settings.", "warning");
+        ctx.ui.notify("Set the reviewer model first — it's required before analyze-tool settings.", "warning");
         continue;
       }
       const picked = await pickModelOnly(ctx, analyzeGap.provider ? analyzeGap : null, "Select gap-finder model");
@@ -507,7 +507,7 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
 
     if (activated === "analyze-audit-model") {
       if (!current) {
-        ctx.ui.notify("Set the comparison model first — it's required before analyze-tool settings.", "warning");
+        ctx.ui.notify("Set the reviewer model first — it's required before analyze-tool settings.", "warning");
         continue;
       }
       const currentAudit = analyzeGap.testAuditProvider
