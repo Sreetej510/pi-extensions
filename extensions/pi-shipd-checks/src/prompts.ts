@@ -1,8 +1,15 @@
 /** All prompt text sent to the reviewer / gap-finder / gap-validator / solver-gap-finder agents. */
 
 import { SOLVER_GAP_SOLUTIONS_DIRNAME } from "./solvergap.js";
-import { GAP_FINDER_TOOL_NAME, GAP_VALIDATOR_TOOL_NAME, REPORT_TOOL_NAME, SOLVER_GAP_TOOL_NAME } from "./tools.js";
-import type { ReviewerRole, ReviewerRoleKey, SolverRunResult, StatementGapReport } from "./types.js";
+import {
+  GAP_FINDER_TOOL_NAME,
+  GAP_VALIDATOR_TOOL_NAME,
+  REPORT_TOOL_NAME,
+  SOLVER_GAP_TOOL_NAME,
+  TEST_AUDIT_TOOL_NAME,
+  TEST_AUDIT_VALIDATOR_TOOL_NAME,
+} from "./tools.js";
+import type { ReviewerRole, ReviewerRoleKey, SolverRunResult, StatementGapReport, TestAuditFinding } from "./types.js";
 
 const ROLE_FOCUS: Record<ReviewerRoleKey, string> = {
   description:
@@ -483,6 +490,102 @@ export function buildGapValidatorPrompt(
       "(which may be empty). That tool call is your only way to report a result.",
   );
 
+  return parts.join("\n");
+}
+
+export function buildTestAuditPrompt(testRubric: string, fairnessRules: string): string {
+  const parts = [
+    "You are a strict, skeptical post-implementation test-quality and fairness auditor for a coding-agent benchmark task.",
+    "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
+      "you cannot execute code, edit files, or apply patches.",
+    "The task's `agent_prompt.md` is the contract. The current tests may be represented by `test.patch` and/or by " +
+      "test files and fixtures in the repository. Read the unified diff carefully, then inspect every added or changed " +
+      "test, fixture, mock, helper, and the public source behavior it exercises. Do not audit hypothetical tests.",
+    "Read `solution.patch` only as evidence for scenarios worth inspecting. The reference implementation is not the " +
+      "specification, and its private structure, names, defaults, and call paths must not be required by your audit.",
+    "",
+    "Your goal is to find actionable problems in the tests that were written or changed during the current gap-finding " +
+      "iteration, while preserving the behavioral gap they were intended to close.",
+    "",
+    "For each assertion and relevant fixture, independently ask:",
+    "1. What exact prompt sentence or established public contract supports this check?",
+    "2. What can a user, caller, or public API observe?",
+    "3. Could two competent implementations satisfy the contract while differing on this assertion?",
+    "4. Does the fixture preserve repository-valid state, module shape, exports, references, and lifecycle?",
+    "5. Would the assertion catch a materially incorrect implementation rather than merely a different implementation?",
+    "",
+    "Report only concrete, actionable findings in these categories:",
+    "- unfair-assertion: a valid implementation could fail because the test requires an undocumented API, exact " +
+      "representation, value, timing, structure, call path, message, ordering, count, or harness behavior.",
+    "- prompt-ambiguity: the prompt does not select one of multiple reasonable behaviors, but the test forces one. " +
+      "Recommend clarifying the prompt or relaxing the test; never choose an interpretation merely from solution.patch.",
+    "- weak-assertion: the check is fair in scope but observes the wrong target or is too permissive to enforce the " +
+      "intended gap. Strengthen the public semantic observation, not the implementation coupling.",
+    "- broken-fixture: setup, mocks, or observers remove a valid repository path or fail before the public behavior is " +
+      "reached. Repair the fixture rather than imposing its limitation on implementations.",
+    "",
+    "A test can contain a fair behavioral core and an unfair co-assertion. Preserve the fair core and recommend " +
+      "removing or relaxing only the unsupported part. Do not discard a genuine gap because the first assertion was " +
+      "too narrow. Conversely, do not call a permissive assertion unfair; classify it as weak and explain how to observe " +
+      "the required public target or relationship precisely.",
+    "Do not report style preferences, optional coverage, speculative edge cases, or requirements invented from intuition. " +
+      "When the prompt is genuinely vague, do not silently turn the reference solution into a requirement.",
+    "",
+    "Fair and unfair test guidance (from `rules.md`):",
+    fairnessRules,
+    "",
+    "Tests checklist for calibration:",
+    testRubric,
+    "",
+    "For every finding, provide its category, the test name or short identifier, the problem, concrete evidence, the " +
+      "required behavior that must remain covered, and a fair repair recommendation. If the tests are fair and sufficiently " +
+      "strong, submit an empty list.",
+    `When you are done, call the \`${TEST_AUDIT_TOOL_NAME}\` tool exactly once with the complete final list. ` +
+      "That tool call is your only way to report a result.",
+  ];
+  return parts.join("\n");
+}
+
+export function buildTestAuditValidatorPrompt(
+  findings: TestAuditFinding[],
+  testRubric: string,
+  fairnessRules: string,
+): string {
+  const parts = [
+    "You are an independent, strict validator for a post-implementation test-quality and fairness audit.",
+    "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
+      "you cannot execute code, edit files, or apply patches.",
+    "The first audit agent submitted the following candidate findings:",
+    "",
+    JSON.stringify(findings, null, 2),
+    "",
+    "Independently read `agent_prompt.md`, `test.patch`, the affected test files and fixtures, and the relevant public " +
+      "source. Do not trust the candidate wording, and do not treat `solution.patch` as the specification.",
+    "Keep a finding only when it is all of the following:",
+    "1. Grounded in an explicit prompt requirement or an unambiguous existing public repository contract.",
+    "2. A real issue in the current test or fixture, not a hypothetical improvement or a disagreement with style.",
+    "3. Fairly classified as an unfair assertion, prompt ambiguity, weak assertion, or broken fixture.",
+    "4. Actionable through a public semantic repair, while preserving the required behavior or gap.",
+    "5. Distinct from the other retained findings and supported by concrete evidence.",
+    "",
+    "Drop findings that merely ask for more coverage, rely on private/reference-solution structure, or infer an " +
+      "unstated value, representation, timing, count, ordering, API, error form, or harness shape. If a finding has a " +
+      "fair behavioral core plus one unsupported co-assertion, retain it with a recommendation to remove only that " +
+      "co-assertion. If a prompt is genuinely ambiguous, recommend clarifying the prompt or relaxing the test rather " +
+      "than choosing an interpretation from the reference solution.",
+    "",
+    "Fair and unfair test guidance (from `rules.md`):",
+    fairnessRules,
+    "",
+    "Tests checklist for calibration:",
+    testRubric,
+    "",
+    "Return only the validated, deduplicated findings. Preserve the test name and required behavior, and reword any " +
+      "finding so its recommendation is precise without adding an implementation requirement. An empty list is correct " +
+      "when no candidate survives independent review.",
+    `When you are done, call the \`${TEST_AUDIT_VALIDATOR_TOOL_NAME}\` tool exactly once with the final list. ` +
+      "That tool call is your only way to report a result.",
+  ];
   return parts.join("\n");
 }
 

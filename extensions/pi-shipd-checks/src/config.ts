@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
+  AnalyzeAgentConfig,
   AnalyzeGapConfig,
   ChecksConfig,
   FargateConfig,
@@ -160,7 +161,7 @@ function readRawChecksConfig(): Record<string, unknown> {
   }
 }
 
-/** Project folders where the agent-callable Gap Finder tool is enabled. */
+/** Project folders where the agent-callable test-analysis tool is enabled. */
 export function loadAnalyzeEnabledProjects(): string[] {
   const projects = readRawChecksConfig().enabledProjects;
   return Array.isArray(projects) ? projects.filter((project): project is string => typeof project === "string") : [];
@@ -195,17 +196,31 @@ export function setAnalyzeProjectEnabled(cwd: string, enabled: boolean): void {
   );
 }
 
-/** Whether the agent-callable `analyze_test_gaps` tool is enabled for a project. */
+/** Whether the agent-callable `analyze_task_tests` tool is enabled for a project. */
 export function isAnalyzeToolEnabled(cwd?: string): boolean {
   if (cwd !== undefined) return isAnalyzeProjectEnabled(cwd);
   return loadChecksConfig()?.enableAnalyzeTool ?? ANALYZE_GAP_DEFAULT_ENABLED;
 }
 
-/** The nested `analyzeGap` section (dedicated model for the analyze_test_gaps tool), normalized with sane defaults. */
+/** The gap-finder model settings for the agent-callable analysis tool. */
 export function loadAnalyzeGapConfig(): AnalyzeGapConfig | null {
   const analyzeGap = loadChecksConfig()?.analyzeGap;
   if (!analyzeGap?.provider || !analyzeGap.modelId || !analyzeGap.thinkingLevel) return null;
   return { ...analyzeGap };
+}
+
+/**
+ * The test-audit model settings. Older configs had only one analyze-tool model;
+ * in that case the audit intentionally reuses the configured gap-finder model.
+ */
+export function loadTestAuditConfig(): AnalyzeAgentConfig | null {
+  const analyzeGap = loadAnalyzeGapConfig();
+  if (!analyzeGap) return null;
+  return {
+    provider: analyzeGap.testAuditProvider ?? analyzeGap.provider,
+    modelId: analyzeGap.testAuditModelId ?? analyzeGap.modelId,
+    thinkingLevel: analyzeGap.testAuditThinkingLevel ?? analyzeGap.thinkingLevel,
+  };
 }
 
 export function loadEnabledModelRefs(): string[] {

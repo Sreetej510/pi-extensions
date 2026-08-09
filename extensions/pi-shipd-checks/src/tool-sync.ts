@@ -1,8 +1,10 @@
-/** Keeps the `analyze_test_gaps` tool's active/inactive state in sync with /checks config. */
+/** Keeps the `analyze_task_tests` tool's active/inactive state in sync with /checks config. */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ANALYZE_TOOL_NAME, registerAnalyzeGapsTool } from "./analyze.js";
 import { isAnalyzeProjectEnabled, setAnalyzeProjectEnabled } from "./config.js";
+
+const LEGACY_ANALYZE_TOOL_NAME = "analyze_test_gaps";
 
 let analyzeEnabled = false;
 let toolsRegistered = false;
@@ -19,12 +21,9 @@ function wantAnalyzeEnabled(): boolean {
   return analyzeEnabled;
 }
 
-function hasAnalyzeToolInActiveSet(pi: ExtensionAPI): boolean {
-  return getActiveToolNames(pi).includes(ANALYZE_TOOL_NAME);
-}
-
 export function isAnalyzeSyncNeeded(pi: ExtensionAPI): boolean {
-  return wantAnalyzeEnabled() !== hasAnalyzeToolInActiveSet(pi);
+  const active = getActiveToolNames(pi);
+  return active.includes(LEGACY_ANALYZE_TOOL_NAME) || wantAnalyzeEnabled() !== active.includes(ANALYZE_TOOL_NAME);
 }
 
 function ensureAnalyzeToolRegistered(pi: ExtensionAPI): void {
@@ -34,28 +33,23 @@ function ensureAnalyzeToolRegistered(pi: ExtensionAPI): void {
 }
 
 /**
- * Toggle only analyze_test_gaps on the current active set.
+ * Toggle only analyze_task_tests on the current active set.
  * ON adds it to the existing tools; OFF removes it without changing anything else.
  */
 function applyAnalyzeToolVisibility(pi: ExtensionAPI, enabled: boolean): void {
   const current = getActiveToolNames(pi);
 
-  if (enabled) {
-    if (current.length === 0) {
-      pendingToolSync = true;
-      return;
-    }
-    const next = new Set(current);
-    next.add(ANALYZE_TOOL_NAME);
-    if (next.size !== current.length) {
-      pi.setActiveTools([...next]);
-    }
-  } else {
-    const withoutAnalyze = current.filter((name) => name !== ANALYZE_TOOL_NAME);
-    if (withoutAnalyze.length !== current.length) {
-      pi.setActiveTools(withoutAnalyze);
-    }
+  if (enabled && current.length === 0) {
+    pendingToolSync = true;
+    return;
   }
+
+  const withoutLegacy = current.filter((name) => name !== LEGACY_ANALYZE_TOOL_NAME);
+  const next = enabled
+    ? [...new Set([...withoutLegacy, ANALYZE_TOOL_NAME])]
+    : withoutLegacy.filter((name) => name !== ANALYZE_TOOL_NAME);
+  const changed = next.length !== current.length || next.some((name, index) => name !== current[index]);
+  if (changed) pi.setActiveTools(next);
 
   pendingToolSync = isAnalyzeSyncNeeded(pi);
 }
