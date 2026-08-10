@@ -124,8 +124,8 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
 
    `cluster`, `subnetIds`, and `securityGroupId` are optional when a default VPC is available.
    With `adaptiveResourceProfile: true`, the first run uses `resourceProfile`; later runs upgrade
-   when normalized CPU is at least 90% for more than three minutes, downgrade when CPU is at
-   least 95% for under one minute, and otherwise retain the profile. Only the selected next
+   when normalized CPU is at least 95% for more than seven minutes, downgrade when CPU is at
+   least 95% for under two minutes, and otherwise retain the profile. Only the selected next
    profile is written to `projectProfiles`; CPU telemetry is included in `shipd_report.json` but
    no telemetry history is retained. Set `projectProfiles` to override resources per repository:
    `{"C:/path/to/repo":"large"}`.
