@@ -115,6 +115,7 @@ export async function runGapFinder(opts: {
   thinkingLevel: ThinkingLevel;
   testRubric: string;
   fairnessRules: string;
+  codeFiles: string[];
   cancelSignal: AbortSignal;
 }): Promise<GapStageResult<StatementGapReport>> {
   const capture: { statements?: StatementGapReport[] } = {};
@@ -132,7 +133,7 @@ export async function runGapFinder(opts: {
     }));
 
     const outcome = await raceAgentTurn(async () => {
-      await session?.prompt(buildSentenceGapFinderPrompt(opts.testRubric, opts.fairnessRules));
+      await session?.prompt(buildSentenceGapFinderPrompt(opts.testRubric, opts.fairnessRules, opts.codeFiles));
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
@@ -233,6 +234,7 @@ export async function runGapValidator(opts: {
   testRubric: string;
   fairnessRules: string;
   statementReports: StatementGapReport[];
+  codeFiles: string[];
   cancelSignal: AbortSignal;
 }): Promise<GapStageResult<TestGapFinal>> {
   const capture: { gaps?: TestGapFinal[] } = {};
@@ -250,7 +252,9 @@ export async function runGapValidator(opts: {
     }));
 
     const outcome = await raceAgentTurn(async () => {
-      await session?.prompt(buildGapValidatorPrompt(opts.statementReports, opts.testRubric, opts.fairnessRules));
+      await session?.prompt(
+        buildGapValidatorPrompt(opts.statementReports, opts.testRubric, opts.fairnessRules, opts.codeFiles),
+      );
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
@@ -272,6 +276,7 @@ export async function runTestAudit(opts: {
   thinkingLevel: ThinkingLevel;
   testRubric: string;
   fairnessRules: string;
+  codeFiles: string[];
   cancelSignal: AbortSignal;
 }): Promise<TestAuditStageResult> {
   const capture: { findings?: TestAuditFinding[] } = {};
@@ -289,7 +294,7 @@ export async function runTestAudit(opts: {
     }));
 
     const outcome = await raceAgentTurn(async () => {
-      await session?.prompt(buildTestAuditPrompt(opts.testRubric, opts.fairnessRules));
+      await session?.prompt(buildTestAuditPrompt(opts.testRubric, opts.fairnessRules, opts.codeFiles));
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
@@ -311,6 +316,7 @@ export async function runTestAuditValidator(opts: {
   thinkingLevel: ThinkingLevel;
   testRubric: string;
   fairnessRules: string;
+  codeFiles: string[];
   findings: TestAuditFinding[];
   cancelSignal: AbortSignal;
 }): Promise<TestAuditStageResult> {
@@ -329,7 +335,9 @@ export async function runTestAuditValidator(opts: {
     }));
 
     const outcome = await raceAgentTurn(async () => {
-      await session?.prompt(buildTestAuditValidatorPrompt(opts.findings, opts.testRubric, opts.fairnessRules));
+      await session?.prompt(
+        buildTestAuditValidatorPrompt(opts.findings, opts.testRubric, opts.fairnessRules, opts.codeFiles),
+      );
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();

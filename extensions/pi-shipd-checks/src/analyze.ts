@@ -12,6 +12,7 @@ import { Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { runGapFinder, runGapValidator, runTestAudit, runTestAuditValidator } from "./agents.js";
 import { isAnalyzeToolEnabled, loadAnalyzeGapConfig, loadChecksConfig, loadTestAuditConfig } from "./config.js";
+import { listChangedCodeFiles } from "./git.js";
 import { loadFairnessRules, loadTestGuidelines } from "./rubric.js";
 import type { AnalyzeMode, TestAuditFinding, TestGapFinal } from "./types.js";
 
@@ -141,12 +142,16 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
         else signal.addEventListener("abort", () => abort.abort(), { once: true });
       }
 
+      const codeFiles = await listChangedCodeFiles(pi, ctx.cwd, abort.signal);
+      if (abort.signal.aborted) throw new Error("Cancelled by user.");
+
       const base = {
         tempDir: ctx.cwd,
         model,
         thinkingLevel,
         testRubric: loadTestGuidelines(),
         fairnessRules: loadFairnessRules(),
+        codeFiles,
         cancelSignal: abort.signal,
       };
 
