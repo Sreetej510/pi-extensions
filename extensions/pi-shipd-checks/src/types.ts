@@ -19,8 +19,6 @@ export interface FargateResourceUsage {
   durationMs: number;
   sampleCount: number;
   maxCpuPercent: number | null;
-  /** Observed milliseconds whose normalized CPU utilization was at least 90%. */
-  cpuOver90DurationMs: number | null;
   /** Observed milliseconds whose normalized CPU utilization was at least 95%. */
   cpuOver95DurationMs: number | null;
   observedAt: string;
