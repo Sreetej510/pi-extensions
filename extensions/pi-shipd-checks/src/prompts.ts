@@ -48,13 +48,27 @@ const ROLE_FOCUS: Record<ReviewerRoleKey, string> = {
     "own, even if the rest of the solution is otherwise excellent.",
 };
 
-function gapFinderPreamble(focusLine: string): string[] {
+function codeFileGuidance(codeFiles: string[]): string {
+  const files =
+    codeFiles.length > 0
+      ? codeFiles.map((file) => `- \`${file}\``).join("\n")
+      : "- No changed code files were identified.";
+  return [
+    "The problem prompt is at `agent_prompt.md`.",
+    "Before this run, the orchestrator identified these code files as the files needed for this problem:",
+    files,
+    "Read these files first with read/grep/find/ls. They are starting points, not a limit: inspect additional " +
+      "actual source, test, fixture, and public analogue files when needed. Base conclusions on the code files and " +
+      "the prompt, not on generated representations.",
+  ].join("\n");
+}
+
+function gapFinderPreamble(focusLine: string, codeFiles: string[]): string[] {
   return [
     focusLine,
     "You are working inside the actual repository (this is your current directory) in read-only mode. " +
       "You have access to read/grep/find/ls tools only — you cannot execute code or edit files.",
-    "Read `agent_prompt.md` for the task requirements and inspect the repository's existing source/code files " +
-      "with read/grep/find/ls. Base the analysis on the prompt and the observable behavior supported by those code files.",
+    codeFileGuidance(codeFiles),
   ];
 }
 
@@ -265,11 +279,16 @@ export function buildReviewerPrompt(role: ReviewerRole, rubric: string, fairness
   return parts.join("\n");
 }
 
-export function buildSentenceGapFinderPrompt(testRubric: string, _fairnessRules: string): string {
+export function buildSentenceGapFinderPrompt(
+  testRubric: string,
+  _fairnessRules: string,
+  codeFiles: string[] = [],
+): string {
   const parts = [
     ...gapFinderPreamble(
       "You are an exhaustive behavioral test-gap finder. Review the task prompt sentence by sentence, finding both " +
         "missing required-behavior (positive) and missing forbidden/wrong-behavior (negative) tests.",
+      codeFiles,
     ),
     "",
     "First split `agent_prompt.md` into its meaningful sentences using periods (`.`) as the sentence boundary. " +
@@ -310,30 +329,35 @@ export function buildSentenceGapFinderPrompt(testRubric: string, _fairnessRules:
   return parts.join("\n");
 }
 
-export function buildPositiveGapFinderPrompt(testRubric: string, fairnessRules: string): string {
+export function buildPositiveGapFinderPrompt(
+  testRubric: string,
+  fairnessRules: string,
+  codeFiles: string[] = [],
+): string {
   const parts = [
     ...gapFinderPreamble(
       "You are an exhaustive, research-minded POSITIVE test-coverage analyst for a coding-agent benchmark task. " +
         "Your sole mandate is to surface EVERY genuine POSITIVE behavioral test gap — required behavior that " +
-        "`test.patch` never asserts but `agent_prompt.md` requires. Do NOT search for forbidden/wrong-behavior " +
+        "the current tests never assert but `agent_prompt.md` requires. Do NOT search for forbidden/wrong-behavior " +
         "gaps; a separate negative-case agent handles those in parallel. Stay in your lane and search exhaustively " +
         "before concluding there are none.",
+      codeFiles,
     ),
     "",
     "Your job: find real POSITIVE TEST GAPS. A positive gap is required or clearly-implied behavior from " +
-      "`agent_prompt.md` (and, where relevant, obvious existing repo conventions) that `test.patch` does NOT " +
+      "`agent_prompt.md` (and, where relevant, obvious existing repo conventions) that the current tests do NOT " +
       "actually verify — such that a plausible implementation could skip or misimplement that required behavior " +
-      "and STILL pass every test in `test.patch` as written.",
+      "and STILL pass every current test as written.",
     "",
     "Focus on required outcomes: happy paths, side effects, state changes, outputs, transitions, edge inputs " +
-      "where the prompt still expects correct handling, combined/interacting behaviors, and branches in " +
-      "`solution.patch` whose correct outcome is never forced by a test.",
+      "where the prompt still expects correct handling, combined/interacting behaviors, and branches in the " +
+      "relevant application source whose correct outcome is never forced by a test.",
     "",
     "Be systematic and exhaustive — work through ALL of the following passes:",
     "1. Go through `agent_prompt.md` sentence by sentence. For every distinct required behavior, constraint, or " +
-      "implied rule, check which test(s) in `test.patch` exercise it and how thoroughly.",
-    "2. Go through `solution.patch` branch by branch — every conditional, loop, early return, error path, and " +
-      "state transition. For each one, ask whether `test.patch` forces the correct outcome to be checked.",
+      "implied rule, check which current test(s) exercise it and how thoroughly.",
+    "2. Go through the relevant application source branch by branch — every conditional, loop, early return, error path, " +
+      "and state transition. For each one, ask whether the current tests force the correct outcome to be checked.",
     "3. Consider standard positive edge-case categories: boundary/limit values, empty/missing/null/zero inputs " +
       "that should still produce the required correct behavior, duplicate or repeated inputs handled correctly, " +
       "ordering and interleaving, concurrent or repeated invocations, error/failure/rollback paths that should " +
@@ -370,28 +394,33 @@ export function buildPositiveGapFinderPrompt(testRubric: string, fairnessRules: 
   return parts.join("\n");
 }
 
-export function buildNegativeGapFinderPrompt(testRubric: string, fairnessRules: string): string {
+export function buildNegativeGapFinderPrompt(
+  testRubric: string,
+  fairnessRules: string,
+  codeFiles: string[] = [],
+): string {
   const parts = [
     ...gapFinderPreamble(
       "You are an exhaustive, research-minded NEGATIVE test-coverage analyst for a coding-agent benchmark task. " +
         "Your sole mandate is to surface EVERY genuine NEGATIVE behavioral test gap — forbidden behavior, invalid " +
-        "states, or wrong outcomes that `test.patch` never asserts against but `agent_prompt.md` prohibits or " +
+        "states, or wrong outcomes that the current tests never assert against but `agent_prompt.md` prohibits or " +
         "implies must not happen. Do NOT search for missing required-behavior gaps; a separate positive-case agent " +
         "handles those in parallel. Stay in your lane and search exhaustively before concluding there are none.",
+      codeFiles,
     ),
     "",
     "Your job: find real NEGATIVE TEST GAPS. A negative gap is a prohibition, guard, or 'must not' constraint from " +
-      "`agent_prompt.md` (or unambiguous repo convention) that `test.patch` does NOT verify — such that an agent " +
+      "`agent_prompt.md` (or unambiguous repo convention) that the current tests do NOT verify — such that an agent " +
       "could violate `agent_prompt.md` by doing the forbidden thing, leaving the wrong state enabled, applying an " +
       "effect to the wrong target, skipping a guard, or accepting invalid input, and STILL pass every test because " +
       "the suite only checks that correct actions work, not that incorrect ones are rejected.",
     "",
     "Be systematic and exhaustive — work through ALL of the following passes:",
     "1. Re-read `agent_prompt.md` specifically for prohibitions, conditions, guards, and 'only when' / 'must not' / " +
-      "'never' / 'disabled when' / 'should not' language. For each, ask: does `test.patch` assert the WRONG thing " +
+      "'never' / 'disabled when' / 'should not' language. For each, ask: do the current tests assert the WRONG thing " +
       "does NOT happen?",
-    "2. Go through `solution.patch` for every guard, early return, disabled branch, isolation check, and rejection " +
-      "path. Ask whether a sloppy implementation that bypassed that guard would still pass.",
+    "2. Go through the relevant application source for every guard, early return, disabled branch, isolation check, " +
+      "and rejection path. Ask whether a sloppy implementation that bypassed that guard would still pass.",
     "3. Hunt these negative patterns explicitly:",
     "   - Controls that must be disabled/unavailable in a given state, but no test drives that state and asserts disabled.",
     "   - Operations that must NOT affect a separate scope/target (isolation), but tests never prove the wrong scope is untouched.",
@@ -403,7 +432,7 @@ export function buildNegativeGapFinderPrompt(testRubric: string, fairnessRules: 
       "applying the requirement in the wrong context?' If not, it is a gap.",
     "5. Adversarial pass: imagine a lazy or slightly-wrong implementation that satisfies the obvious tests — list every " +
       "way it could still violate the prompt (wrong scope, wrong timing, wrong guard, spurious side effect, missing " +
-      "rejection) and check whether `test.patch` would catch each one.",
+      "rejection) and check whether the current tests would catch each one.",
     ...GAP_FINDER_AGGRESSION,
     "Do not filter yourself or self-censor for volume. A separate validator will strictly filter afterward — " +
       "your job is recall on NEGATIVE gaps only.",
@@ -439,12 +468,14 @@ export function buildNegativeGapFinderPrompt(testRubric: string, fairnessRules: 
 export function buildGapValidatorPrompt(
   statementReports: StatementGapReport[],
   testRubric: string,
-  _fairnessRules: string,
+  fairnessRules: string,
+  codeFiles: string[] = [],
 ): string {
   const parts = [
     "You are a strict, skeptical fairness auditor for a coding-agent benchmark task.",
-    "You are working inside a throwaway, read-only copy of a git repository (this is your current directory). " +
-      "You have access to read/grep/find/ls tools only — you cannot execute code or edit files.",
+    "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
+      "you cannot execute code or edit files.",
+    codeFileGuidance(codeFiles),
     "Two specialized research agents reviewed `agent_prompt.md` and the repository's source/code files sentence by " +
       "sentence, proposing both positive (missing required-behavior) and negative (missing forbidden/wrong-behavior) " +
       "gaps. It submitted the following per-sentence candidate report:",
@@ -480,6 +511,9 @@ export function buildGapValidatorPrompt(
       "explicitly makes them public requirements.",
     "",
     ...GAP_VALIDATOR_ADDITIONAL_RULES,
+    "",
+    "Fairness methodology (use this to verify the candidates):",
+    fairnessRules,
   );
 
   parts.push(
@@ -493,16 +527,17 @@ export function buildGapValidatorPrompt(
   return parts.join("\n");
 }
 
-export function buildTestAuditPrompt(testRubric: string, fairnessRules: string): string {
+export function buildTestAuditPrompt(testRubric: string, fairnessRules: string, codeFiles: string[] = []): string {
   const parts = [
     "You are a strict, skeptical post-implementation test-quality and fairness auditor for a coding-agent benchmark task.",
     "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
-      "you cannot execute code, edit files, or apply patches.",
-    "The task's `agent_prompt.md` is the contract. The current tests may be represented by `test.patch` and/or by " +
-      "test files and fixtures in the repository. Read the unified diff carefully, then inspect every added or changed " +
-      "test, fixture, mock, helper, and the public source behavior it exercises. Do not audit hypothetical tests.",
-    "Read `solution.patch` only as evidence for scenarios worth inspecting. The reference implementation is not the " +
-      "specification, and its private structure, names, defaults, and call paths must not be required by your audit.",
+      "you cannot execute code, edit files, or modify the repository.",
+    "The task's `agent_prompt.md` is the contract, and the actual repository source/public APIs are the primary evidence " +
+      "for what an agent can discover and what a fair test can observe. Inspect the current test files, fixtures, mocks, " +
+      "and application source directly from the repository. Do not use generated representations or a reference " +
+      "implementation as the specification, and do not audit a textual diff instead of tracing assertions " +
+      "through the actual public code and fixture behavior.",
+    codeFileGuidance(codeFiles),
     "",
     "Your goal is to find actionable problems in the tests that were written or changed during the current gap-finding " +
       "iteration, while preserving the behavioral gap they were intended to close.",
@@ -511,10 +546,12 @@ export function buildTestAuditPrompt(testRubric: string, fairnessRules: string):
       "a complete assertion-by-assertion review.",
     "",
     "Mandatory audit procedure:",
-    "1. Read `test.patch` and enumerate every added or changed test, test helper, fixture, mock, and assertion/expectation. " +
-      "Create an internal checklist and do not submit until every item has been reviewed.",
-    "2. For EACH assertion, inspect the exact prompt requirement, the public repository contract, the fixture state, and " +
-      "the observation target. Do not review only the test name or the main happy-path assertion.",
+    "1. Start from the actual repository: locate and read the relevant application source, public APIs, current test " +
+      "files, fixtures, mocks, and helpers. Use the provided code-file list as your first-pass checklist. Create an " +
+      "internal checklist and do not submit until every test and assertion/expectation in the current files has been reviewed.",
+    "2. For EACH assertion, inspect the exact prompt requirement, the actual public repository contract, the fixture " +
+      "state, and the observation target. Do not review only the test name or main happy-path assertion; trace it through " +
+      "the actual code and verify whether the assertion accepts every prompt-compliant implementation.",
     "3. Classify every assertion internally as VALID, UNFAIR, AMBIGUOUS, WEAK, or BROKEN. For every non-VALID item, " +
       "explain the concrete evidence and produce a finding. For every VALID item, actively verify why two reasonable " +
       "implementations would both be accepted.",
@@ -534,7 +571,7 @@ export function buildTestAuditPrompt(testRubric: string, fairnessRules: string):
     "- unfair-assertion: a valid implementation could fail because the test requires an undocumented API, exact " +
       "representation, value, timing, structure, call path, message, ordering, count, or harness behavior.",
     "- prompt-ambiguity: the prompt does not select one of multiple reasonable behaviors, but the test forces one. " +
-      "Recommend clarifying the prompt or relaxing the test; never choose an interpretation merely from solution.patch.",
+      "Recommend clarifying the prompt or relaxing the test; never choose an interpretation from a reference implementation.",
     "- weak-assertion: the check is fair in scope but observes the wrong target or is too permissive to enforce the " +
       "intended gap. Strengthen the public semantic observation, not the implementation coupling.",
     "- broken-fixture: setup, mocks, or observers remove a valid repository path or fail before the public behavior is " +
@@ -566,17 +603,20 @@ export function buildTestAuditValidatorPrompt(
   findings: TestAuditFinding[],
   testRubric: string,
   fairnessRules: string,
+  codeFiles: string[] = [],
 ): string {
   const parts = [
     "You are an independent, strict validator for a post-implementation test-quality and fairness audit.",
     "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
-      "you cannot execute code, edit files, or apply patches.",
+      "you cannot execute code, edit files, or modify the repository.",
     "The first audit agent submitted the following candidate findings:",
     "",
     JSON.stringify(findings, null, 2),
     "",
-    "Independently read `agent_prompt.md`, `test.patch`, the affected test files and fixtures, and the relevant public " +
-      "source. Do not trust the candidate wording, and do not treat `solution.patch` as the specification.",
+    "Independently start with the actual repository source, public APIs, current test files, fixtures, and mocks. Use " +
+      "the provided code-file list as your first-pass checklist and trace every candidate through the actual code. Do not " +
+      "trust candidate wording, generated representations, or a reference implementation as the specification.",
+    codeFileGuidance(codeFiles),
     "Keep a finding only when it is all of the following:",
     "1. Grounded in an explicit prompt requirement or an unambiguous existing public repository contract.",
     "2. A real issue in the current test or fixture, not a hypothetical improvement or a disagreement with style.",
@@ -584,11 +624,11 @@ export function buildTestAuditValidatorPrompt(
     "4. Actionable through a public semantic repair, while preserving the required behavior or gap.",
     "5. Distinct from the other retained findings and supported by concrete evidence.",
     "",
-    "Drop findings that merely ask for more coverage, rely on private/reference-solution structure, or infer an " +
+    "Drop findings that merely ask for more coverage, rely on private/reference-implementation structure, or infer an " +
       "unstated value, representation, timing, count, ordering, API, error form, or harness shape. If a finding has a " +
       "fair behavioral core plus one unsupported co-assertion, retain it with a recommendation to remove only that " +
       "co-assertion. If a prompt is genuinely ambiguous, recommend clarifying the prompt or relaxing the test rather " +
-      "than choosing an interpretation from the reference solution.",
+      "than choosing an interpretation from a reference implementation.",
     "",
     "Fair and unfair test guidance (from `rules.md`):",
     fairnessRules,
