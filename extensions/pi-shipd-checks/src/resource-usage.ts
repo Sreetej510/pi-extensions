@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { cpus } from "node:os";
 import type { FargateResourceProfile, FargateResourceUsage } from "./types.js";
 
 const SAMPLE_INTERVAL_MS = 5_000;
@@ -17,37 +16,27 @@ function readNumber(path: string): number | undefined {
   }
 }
 
-function readCpuVcpus(): number {
-  try {
-    const [quota, period] = readFileSync("/sys/fs/cgroup/cpu.max", "utf-8").trim().split(/\s+/);
-    const quotaValue = Number.parseFloat(quota ?? "");
-    const periodValue = Number.parseFloat(period ?? "");
-    if (quota !== "max" && quotaValue > 0 && periodValue > 0) return quotaValue / periodValue;
-  } catch {
-    // Try cgroup v1 below.
-  }
-  const quota = readNumber("/sys/fs/cgroup/cpu/cpu.cfs_quota_us");
-  const period = readNumber("/sys/fs/cgroup/cpu/cpu.cfs_period_us");
-  if (quota !== undefined && period !== undefined && quota > 0 && period > 0) return quota / period;
-  return Math.max(1, cpus().length);
+function profileVcpus(profile: FargateResourceProfile): number {
+  return profile === "small" ? 1 : profile === "medium" ? 2 : 4;
 }
 
-function readCpu(): CpuReading | undefined {
+function readCpu(vcpus: number): CpuReading | undefined {
   try {
     const stats = readFileSync("/sys/fs/cgroup/cpu.stat", "utf-8");
     const usageUsec = Number.parseInt(stats.match(/^usage_usec\s+(\d+)/m)?.[1] ?? "", 10);
-    if (Number.isFinite(usageUsec)) return { usageMicros: usageUsec, vcpus: readCpuVcpus() };
+    if (Number.isFinite(usageUsec)) return { usageMicros: usageUsec, vcpus };
   } catch {
     // Try cgroup v1 below.
   }
   const usageNsec = readNumber("/sys/fs/cgroup/cpuacct/cpuacct.usage");
-  if (usageNsec !== undefined) return { usageMicros: usageNsec / 1000, vcpus: readCpuVcpus() };
+  if (usageNsec !== undefined) return { usageMicros: usageNsec / 1000, vcpus };
   return undefined;
 }
 
 export class TaskResourceUsageSampler {
   private readonly startedAt = Date.now();
   private readonly profile: FargateResourceProfile;
+  private readonly vcpus: number;
   private timer: ReturnType<typeof setInterval> | undefined;
   private lastCpu: CpuReading | undefined;
   private lastSampleAt: number | undefined;
@@ -60,6 +49,7 @@ export class TaskResourceUsageSampler {
 
   constructor(profile: FargateResourceProfile) {
     this.profile = profile;
+    this.vcpus = profileVcpus(profile);
   }
 
   start(): void {
@@ -79,6 +69,7 @@ export class TaskResourceUsageSampler {
   snapshot(): FargateResourceUsage {
     return {
       profile: this.profile,
+      allocatedVcpus: this.vcpus,
       durationMs: Date.now() - this.startedAt,
       sampleCount: this.sampleCount,
       maxCpuPercent: this.maxCpuPercent,
@@ -91,7 +82,7 @@ export class TaskResourceUsageSampler {
   private sample(): void {
     if (this.stopped) return;
     const now = Date.now();
-    const cpu = readCpu();
+    const cpu = readCpu(this.vcpus);
     this.sampleCount += 1;
     if (cpu && this.lastCpu && this.lastSampleAt !== undefined) {
       const elapsedMs = now - this.lastSampleAt;

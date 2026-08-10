@@ -14,6 +14,8 @@ export type FargateResourceProfile = "small" | "medium" | "large";
 /** Task-level resource telemetry captured inside the worker and persisted locally after a run. */
 export interface FargateResourceUsage {
   profile: FargateResourceProfile;
+  /** CPU capacity used to normalize the task-level CPU percentage. */
+  allocatedVcpus: number;
   durationMs: number;
   sampleCount: number;
   maxCpuPercent: number | null;
