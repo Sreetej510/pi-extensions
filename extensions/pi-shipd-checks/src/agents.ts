@@ -295,6 +295,7 @@ export async function runTestAudit(opts: {
   testRubric: string;
   fairnessRules: string;
   codeFiles: string[];
+  changedCodeDiff: string;
   timeoutMinutes: number;
   cancelSignal: AbortSignal;
 }): Promise<TestAuditStageResult> {
@@ -314,7 +315,9 @@ export async function runTestAudit(opts: {
 
     const outcome = await raceAgentTurn(
       async () => {
-        await session?.prompt(buildTestAuditPrompt(opts.testRubric, opts.fairnessRules, opts.codeFiles));
+        await session?.prompt(
+          buildTestAuditPrompt(opts.testRubric, opts.fairnessRules, opts.codeFiles, opts.changedCodeDiff),
+        );
       },
       opts.cancelSignal,
       opts.timeoutMinutes * 60 * 1000,
@@ -340,6 +343,7 @@ export async function runTestAuditValidator(opts: {
   testRubric: string;
   fairnessRules: string;
   codeFiles: string[];
+  changedCodeDiff: string;
   findings: TestAuditFinding[];
   timeoutMinutes: number;
   cancelSignal: AbortSignal;
@@ -361,7 +365,13 @@ export async function runTestAuditValidator(opts: {
     const outcome = await raceAgentTurn(
       async () => {
         await session?.prompt(
-          buildTestAuditValidatorPrompt(opts.findings, opts.testRubric, opts.fairnessRules, opts.codeFiles),
+          buildTestAuditValidatorPrompt(
+            opts.findings,
+            opts.testRubric,
+            opts.fairnessRules,
+            opts.codeFiles,
+            opts.changedCodeDiff,
+          ),
         );
       },
       opts.cancelSignal,
@@ -387,6 +397,7 @@ export async function runSolutionAudit(opts: {
   thinkingLevel: ThinkingLevel;
   solutionRules: string;
   codeFiles: string[];
+  changedCodeDiff: string;
   timeoutMinutes: number;
   cancelSignal: AbortSignal;
 }): Promise<SolutionAuditStageResult> {
@@ -406,7 +417,7 @@ export async function runSolutionAudit(opts: {
 
     const outcome = await raceAgentTurn(
       async () => {
-        await session?.prompt(buildSolutionAuditPrompt(opts.solutionRules, opts.codeFiles));
+        await session?.prompt(buildSolutionAuditPrompt(opts.solutionRules, opts.codeFiles, opts.changedCodeDiff));
       },
       opts.cancelSignal,
       opts.timeoutMinutes * 60 * 1000,
@@ -431,6 +442,7 @@ export async function runSolutionAuditValidator(opts: {
   thinkingLevel: ThinkingLevel;
   solutionRules: string;
   codeFiles: string[];
+  changedCodeDiff: string;
   findings: SolutionAuditFinding[];
   timeoutMinutes: number;
   cancelSignal: AbortSignal;
@@ -451,7 +463,9 @@ export async function runSolutionAuditValidator(opts: {
 
     const outcome = await raceAgentTurn(
       async () => {
-        await session?.prompt(buildSolutionAuditValidatorPrompt(opts.findings, opts.solutionRules, opts.codeFiles));
+        await session?.prompt(
+          buildSolutionAuditValidatorPrompt(opts.findings, opts.solutionRules, opts.codeFiles, opts.changedCodeDiff),
+        );
       },
       opts.cancelSignal,
       opts.timeoutMinutes * 60 * 1000,

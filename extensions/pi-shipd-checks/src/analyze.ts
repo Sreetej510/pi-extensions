@@ -25,7 +25,7 @@ import {
   loadChecksConfig,
   loadTestAuditConfig,
 } from "./config.js";
-import { listChangedCodeFiles } from "./git.js";
+import { getChangedCodeDiff, listChangedCodeFiles } from "./git.js";
 import { loadFairnessRules, loadSolutionRules, loadTestGuidelines } from "./rubric.js";
 import type { AnalyzeMode, SolutionAuditFinding, TestAuditFinding, TestGapFinal } from "./types.js";
 
@@ -171,6 +171,8 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
 
       const codeFiles = await listChangedCodeFiles(pi, ctx.cwd, abort.signal);
       if (abort.signal.aborted) throw new Error("Cancelled by user.");
+      const changedCodeDiff = mode === "gaps" ? "" : await getChangedCodeDiff(pi, ctx.cwd, codeFiles, abort.signal);
+      if (abort.signal.aborted) throw new Error("Cancelled by user.");
 
       const base = {
         tempDir: ctx.cwd,
@@ -180,6 +182,7 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
         fairnessRules: loadFairnessRules(),
         solutionRules: loadSolutionRules(),
         codeFiles,
+        changedCodeDiff,
         timeoutMinutes,
         cancelSignal: abort.signal,
       };
