@@ -88,9 +88,9 @@ export interface AnalyzeAgentConfig {
   timeoutMinutes: number;
 }
 
-/** Model settings for the gap-finder mode plus an optional dedicated test-audit model. */
+/** Model settings for gap-analysis mode plus a shared Auditor model for both audit modes. */
 export interface AnalyzeGapConfig extends AnalyzeAgentConfig {
-  /** Dedicated model for test-audit mode; omitted means reuse the gap-finder model. */
+  /** Shared Auditor model for test-audit and solution-audit; omitted means reuse the gap-analysis model. */
   testAuditProvider?: string;
   testAuditModelId?: string;
   testAuditThinkingLevel?: ThinkingLevel;
@@ -124,10 +124,20 @@ export interface TestGapFinal {
 }
 
 /** Modes supported by the agent-callable behavioral analysis tool. */
-export type AnalyzeMode = "gaps" | "audit";
+export type AnalyzeMode = "gaps" | "test-audit" | "solution-audit";
 
 /** Kind of actionable problem found by the post-implementation test audit. */
-export type TestAuditCategory = "unfair-assertion" | "prompt-ambiguity" | "weak-assertion" | "broken-fixture";
+export type TestAuditCategory = "unfair-assertion" | "prompt-ambiguity" | "broken-fixture";
+
+/** Kind of actionable problem found by the post-implementation solution audit. */
+export type SolutionAuditCategory =
+  | "missing-requirement"
+  | "regression"
+  | "architecture"
+  | "unsafe-failure"
+  | "inconsistent-path"
+  | "dead-code"
+  | "unrelated-change";
 
 /** A concrete fairness, ambiguity, strength, or fixture problem in the current tests. */
 export interface TestAuditFinding {
@@ -148,6 +158,27 @@ export interface TestAuditFinding {
 export interface TestAuditStageResult {
   status: "ok" | "timedOut" | "cancelled" | "error" | "noSubmission";
   findings: TestAuditFinding[];
+}
+
+/** A concrete quality problem in the current solution implementation. */
+export interface SolutionAuditFinding {
+  category: SolutionAuditCategory;
+  /** Short behavior, symbol, or concern identifier; avoid requiring a source location. */
+  subject: string;
+  /** What is wrong with the implementation and why it is actionable. */
+  problem: string;
+  /** Prompt, repository, implementation, or regression evidence supporting the finding. */
+  evidence: string;
+  /** The requirement, invariant, or quality property the solution must preserve. */
+  requiredBehavior: string;
+  /** A concrete repair that stays within the prompt and repository conventions. */
+  recommendation: string;
+}
+
+/** Result of one read-only post-implementation solution audit phase. */
+export interface SolutionAuditStageResult {
+  status: "ok" | "timedOut" | "cancelled" | "error" | "noSubmission";
+  findings: SolutionAuditFinding[];
 }
 
 export type ReviewerRoleKey = "description" | "tests" | "solution";

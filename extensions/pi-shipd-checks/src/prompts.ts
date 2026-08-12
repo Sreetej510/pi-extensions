@@ -1,15 +1,24 @@
-/** All prompt text sent to the reviewer / gap-finder / gap-validator / solver-gap-finder agents. */
+/** All prompt text sent to the gap-analysis, audit, reviewer, and solver-gap-finder agents. */
 
 import { SOLVER_GAP_SOLUTIONS_DIRNAME } from "./solvergap.js";
 import {
   GAP_FINDER_TOOL_NAME,
   GAP_VALIDATOR_TOOL_NAME,
   REPORT_TOOL_NAME,
+  SOLUTION_AUDIT_TOOL_NAME,
+  SOLUTION_AUDIT_VALIDATOR_TOOL_NAME,
   SOLVER_GAP_TOOL_NAME,
   TEST_AUDIT_TOOL_NAME,
   TEST_AUDIT_VALIDATOR_TOOL_NAME,
 } from "./tools.js";
-import type { ReviewerRole, ReviewerRoleKey, SolverRunResult, StatementGapReport, TestAuditFinding } from "./types.js";
+import type {
+  ReviewerRole,
+  ReviewerRoleKey,
+  SolutionAuditFinding,
+  SolverRunResult,
+  StatementGapReport,
+  TestAuditFinding,
+} from "./types.js";
 
 const ROLE_FOCUS: Record<ReviewerRoleKey, string> = {
   description:
@@ -527,9 +536,9 @@ export function buildGapValidatorPrompt(
   return parts.join("\n");
 }
 
-export function buildTestAuditPrompt(testRubric: string, fairnessRules: string, codeFiles: string[] = []): string {
+export function buildTestAuditPrompt(_testRubric: string, fairnessRules: string, codeFiles: string[] = []): string {
   const parts = [
-    "You are a strict, skeptical post-implementation test-quality and fairness auditor for a coding-agent benchmark task.",
+    "You are a strict, skeptical post-implementation test-fairness auditor for a coding-agent benchmark task.",
     "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
       "you cannot execute code, edit files, or modify the repository.",
     "The task's `agent_prompt.md` is the contract, and the actual repository source/public APIs are the primary evidence " +
@@ -552,8 +561,8 @@ export function buildTestAuditPrompt(testRubric: string, fairnessRules: string, 
     "2. For EACH assertion, inspect the exact prompt requirement, the actual public repository contract, the fixture " +
       "state, and the observation target. Do not review only the test name or main happy-path assertion; trace it through " +
       "the actual code and verify whether the assertion accepts every prompt-compliant implementation.",
-    "3. Classify every assertion internally as VALID, UNFAIR, AMBIGUOUS, WEAK, or BROKEN. For every non-VALID item, " +
-      "explain the concrete evidence and produce a finding. For every VALID item, actively verify why two reasonable " +
+    "3. Classify every assertion internally as VALID, UNFAIR, AMBIGUOUS, or BROKEN. For every non-VALID item that " +
+      "represents unfairness, explain the concrete evidence and produce a finding. For every VALID item, actively verify why two reasonable " +
       "implementations would both be accepted.",
     "4. Check compound assertions separately. If one co-assertion is unsupported, retain the fair behavioral core and " +
       "report the unsupported part instead of treating the whole test as valid.",
@@ -572,27 +581,24 @@ export function buildTestAuditPrompt(testRubric: string, fairnessRules: string, 
       "representation, value, timing, structure, call path, message, ordering, count, or harness behavior.",
     "- prompt-ambiguity: the prompt does not select one of multiple reasonable behaviors, but the test forces one. " +
       "Recommend clarifying the prompt or relaxing the test; never choose an interpretation from a reference implementation.",
-    "- weak-assertion: the check is fair in scope but observes the wrong target or is too permissive to enforce the " +
-      "intended gap. Strengthen the public semantic observation, not the implementation coupling.",
     "- broken-fixture: setup, mocks, or observers remove a valid repository path or fail before the public behavior is " +
       "reached. Repair the fixture rather than imposing its limitation on implementations.",
     "",
     "A test can contain a fair behavioral core and an unfair co-assertion. Preserve the fair core and recommend " +
-      "removing or relaxing only the unsupported part. Do not discard a genuine gap because the first assertion was " +
-      "too narrow. Conversely, do not call a permissive assertion unfair; classify it as weak and explain how to observe " +
-      "the required public target or relationship precisely.",
+      "removing or relaxing only the unsupported part. Do not report a merely permissive but fair assertion; this mode " +
+      "is only for concrete unfairness in the test or its fixture.",
     "Do not report style preferences, optional coverage, speculative edge cases, or requirements invented from intuition. " +
-      "When the prompt is genuinely vague, do not silently turn the reference solution into a requirement.",
+      "Do not report a weak or permissive assertion merely because it could be stronger; this mode is only for " +
+      "unfairness. Report it only when the weakness itself forces an unsupported requirement or otherwise rejects a " +
+      "prompt-compliant implementation. When the prompt is genuinely vague, do not silently turn the reference " +
+      "solution into a requirement.",
     "",
     "Fair and unfair test guidance (from `rules.md`):",
     fairnessRules,
     "",
-    "Tests checklist for calibration:",
-    testRubric,
-    "",
     "For every finding, provide its category, the test name or short identifier, the problem, concrete evidence, the " +
-      "required behavior that must remain covered, and a fair repair recommendation. If the tests are fair and sufficiently " +
-      "strong, submit an empty list.",
+      "required behavior that must remain covered, and a fair repair recommendation. If the tests are fair, submit an " +
+      "empty list.",
     `When you are done, call the \`${TEST_AUDIT_TOOL_NAME}\` tool exactly once with the complete final list. ` +
       "That tool call is your only way to report a result.",
   ];
@@ -601,12 +607,12 @@ export function buildTestAuditPrompt(testRubric: string, fairnessRules: string, 
 
 export function buildTestAuditValidatorPrompt(
   findings: TestAuditFinding[],
-  testRubric: string,
+  _testRubric: string,
   fairnessRules: string,
   codeFiles: string[] = [],
 ): string {
   const parts = [
-    "You are an independent, strict validator for a post-implementation test-quality and fairness audit.",
+    "You are an independent, strict validator for a post-implementation test-fairness audit.",
     "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
       "you cannot execute code, edit files, or modify the repository.",
     "The first audit agent submitted the following candidate findings:",
@@ -620,12 +626,13 @@ export function buildTestAuditValidatorPrompt(
     "Keep a finding only when it is all of the following:",
     "1. Grounded in an explicit prompt requirement or an unambiguous existing public repository contract.",
     "2. A real issue in the current test or fixture, not a hypothetical improvement or a disagreement with style.",
-    "3. Fairly classified as an unfair assertion, prompt ambiguity, weak assertion, or broken fixture.",
+    "3. Fairly classified as an unfair assertion, prompt ambiguity, or broken fixture.",
     "4. Actionable through a public semantic repair, while preserving the required behavior or gap.",
     "5. Distinct from the other retained findings and supported by concrete evidence.",
     "",
-    "Drop findings that merely ask for more coverage, rely on private/reference-implementation structure, or infer an " +
-      "unstated value, representation, timing, count, ordering, API, error form, or harness shape. If a finding has a " +
+    "Drop findings that merely ask for more coverage, complain that a fair assertion is weak, rely on " +
+      "private/reference-implementation structure, or infer an unstated value, representation, timing, count, ordering, " +
+      "API, error form, or harness shape. If a finding has a " +
       "fair behavioral core plus one unsupported co-assertion, retain it with a recommendation to remove only that " +
       "co-assertion. If a prompt is genuinely ambiguous, recommend clarifying the prompt or relaxing the test rather " +
       "than choosing an interpretation from a reference implementation.",
@@ -633,13 +640,109 @@ export function buildTestAuditValidatorPrompt(
     "Fair and unfair test guidance (from `rules.md`):",
     fairnessRules,
     "",
-    "Tests checklist for calibration:",
-    testRubric,
-    "",
     "Return only the validated, deduplicated findings. Preserve the test name and required behavior, and reword any " +
       "finding so its recommendation is precise without adding an implementation requirement. An empty list is correct " +
       "when no candidate survives independent review.",
     `When you are done, call the \`${TEST_AUDIT_VALIDATOR_TOOL_NAME}\` tool exactly once with the final list. ` +
+      "That tool call is your only way to report a result.",
+  ];
+  return parts.join("\n");
+}
+
+export function buildSolutionAuditPrompt(solutionRules: string, codeFiles: string[] = []): string {
+  const parts = [
+    "You are a strict, skeptical post-implementation solution-quality auditor for a coding-agent benchmark task.",
+    "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
+      "you cannot execute code, edit files, or modify the repository.",
+    "The task's `agent_prompt.md` is the specification. Audit the current implementation in the repository, especially " +
+      "the changed code files listed below. Read the closest neighboring implementations, public APIs, relevant tests, " +
+      "configuration, persistence, and UI/CLI paths needed to understand behavior. The reference `solution.patch` is " +
+      "evidence only; do not treat its private structure, names, or choices as mandatory.",
+    codeFileGuidance(codeFiles),
+    "",
+    "Your sole focus is solution quality. Do not report test fairness, test-strength, prompt-writing, or optional " +
+      "coverage issues. You may read tests to understand the required behavior and regression boundaries, but findings " +
+      "must identify a concrete defect or quality violation in the implementation itself.",
+    "",
+    "Mandatory audit procedure:",
+    "1. Read `agent_prompt.md` sentence by sentence and map every explicit requirement, condition, prohibition, error " +
+      "case, state transition, side effect, and compatibility constraint to the current implementation.",
+    "2. Inspect every changed code file and its closest repository analogues. Check public extension points, layer " +
+      "boundaries, error/logging patterns, state ownership, persistence, async behavior, and supported entry points.",
+    "3. Perform an adversarial shortcut pass: imagine a plausible implementation that passes the obvious tests but " +
+      "misses a boundary, empty value, repeated operation, interaction, failure path, rollback, or state-preservation " +
+      "requirement. Report it only when the current implementation actually has that defect.",
+    "4. Check regression and failure safety: existing behavior, defaults, public APIs, valid prior state, unrelated scopes, " +
+      "dependent work, cancellation, and cleanup must remain safe unless the prompt explicitly changes them.",
+    "5. Check for dead code, unrelated edits, duplicated semantics, mutable global leakage, avoidable defensive code, " +
+      "and repository-pattern violations. Do not fail a defensible implementation choice merely because it differs from " +
+      "the reference solution.",
+    "6. Before submitting, re-read the prompt and perform a final sweep of every changed area. Return an empty list when " +
+      "no concrete, contract-grounded solution defect survives review.",
+    "",
+    "Use only these finding categories:",
+    "- missing-requirement: the implementation does not meet an explicit prompt requirement or required public behavior.",
+    "- regression: the change breaks existing behavior, compatibility, defaults, or an unrelated scope.",
+    "- architecture: the implementation clearly violates an established repository pattern or public extension point, " +
+      "or introduces an avoidable monolithic/duplicated design that affects correctness or maintainability.",
+    "- unsafe-failure: invalid input, cancellation, partial failure, persistence, rollback, concurrency, or cleanup can " +
+      "leave invalid, destructive, leaked, or inconsistent state contrary to the contract.",
+    "- inconsistent-path: equivalent public entry points, representations, modes, or lifecycle paths implement different " +
+      "semantics without a prompt-supported reason.",
+    "- dead-code: added or changed code is provably unused, unreachable, or leftover scaffolding that materially violates " +
+      "the solution-quality contract.",
+    "- unrelated-change: the patch changes behavior outside the task without a contract or regression reason.",
+    "",
+    "The solution-quality rules from `rules.md` are authoritative for this audit:",
+    solutionRules,
+    "",
+    "For every finding, provide its category, a short subject identifier, the concrete problem, evidence from the " +
+      "prompt/repository/implementation, the required behavior or quality property, and a focused repair recommendation. " +
+      "Do not prescribe private names or one equivalent implementation when the contract leaves alternatives open.",
+    `When you are done, call the \`${SOLUTION_AUDIT_TOOL_NAME}\` tool exactly once with the complete candidate list. ` +
+      "That tool call is your only way to report a result.",
+  ];
+  return parts.join("\n");
+}
+
+export function buildSolutionAuditValidatorPrompt(
+  findings: SolutionAuditFinding[],
+  solutionRules: string,
+  codeFiles: string[] = [],
+): string {
+  const parts = [
+    "You are an independent, strict validator for a post-implementation solution-quality audit.",
+    "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
+      "you cannot execute code, edit files, or modify the repository.",
+    "The first solution auditor submitted the following candidate findings:",
+    "",
+    JSON.stringify(findings, null, 2),
+    "",
+    "Independently read `agent_prompt.md`, the current implementation, the changed code files, and the closest " +
+      "repository analogues. Read tests only as behavioral evidence. Do not trust candidate wording, and do not treat " +
+      "`solution.patch` or a reference-only structure as the specification.",
+    codeFileGuidance(codeFiles),
+    "",
+    "Keep a finding only when it is all of the following:",
+    "1. Grounded in an explicit prompt requirement, an existing public contract, or a clear repository-wide convention.",
+    "2. A real defect or solution-quality violation in the current implementation, not a hypothetical improvement or " +
+      "personal style preference.",
+    "3. In scope for solution quality, not a test fairness, test coverage, or prompt-writing complaint.",
+    "4. Concrete, actionable, and supported by evidence from the actual code and relevant analogues.",
+    "5. Distinct from the other retained findings and classified with the narrowest valid category.",
+    "",
+    "Drop findings that merely prefer the reference implementation, private names, one file layout, one algorithm, " +
+      "one error wording, or one equivalent architecture. Also drop optional hardening, speculative edge cases, and " +
+      "dead-code claims unless grep/read confirms the code is truly unused or unreachable. Preserve a finding when a " +
+      "fair implementation-independent contract defect remains, even if the candidate wording needs to be rewritten.",
+    "",
+    "The solution-quality rules from `rules.md` are authoritative for this validation:",
+    solutionRules,
+    "",
+    "Return only the validated, deduplicated findings. Preserve the subject and required behavior, and reword the " +
+      "recommendation so it fixes the defect without adding an implementation requirement. An empty list is correct " +
+      "when no candidate survives independent review.",
+    `When you are done, call the \`${SOLUTION_AUDIT_VALIDATOR_TOOL_NAME}\` tool exactly once with the final list. ` +
       "That tool call is your only way to report a result.",
   ];
   return parts.join("\n");

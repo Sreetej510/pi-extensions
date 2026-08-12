@@ -52,7 +52,7 @@ import type {
 export const CANCEL_SHORTCUT_LABEL = "Ctrl+Shift+X";
 
 const COMMAND_COMPLETIONS: readonly CommandOption[] = [
-  { value: "--config", label: "--config", description: "Configure reviewer, gap-finder, and test-audit models" },
+  { value: "--config", label: "--config", description: "Configure reviewer, gap-analysis, and auditor models" },
   {
     value: "--solver-gap-finder",
     label: "--solver-gap-finder",
@@ -292,14 +292,14 @@ function buildConfigRows(
     {
       id: "analyze-audit-model",
       section: "Analyze Tool",
-      label: "Test-audit model",
+      label: "Auditor model",
       value: testAuditProvider ? `${testAuditProvider}/${testAuditModelId}` : "not set",
       kind: "model",
     },
     {
       id: "analyze-audit-thinking",
       section: "Analyze Tool",
-      label: "Test-audit thinking",
+      label: "Auditor thinking",
       value: analyzeGap.testAuditThinkingLevel ?? analyzeGap.thinkingLevel,
       kind: "cycle",
       values: testAuditLevels,
@@ -548,7 +548,7 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
         : analyzeGap.provider
           ? { provider: analyzeGap.provider, modelId: analyzeGap.modelId }
           : null;
-      const picked = await pickModelOnly(ctx, currentAudit, "Select test-audit model");
+      const picked = await pickModelOnly(ctx, currentAudit, "Select auditor model");
       if (!picked) continue;
       const currentThinking = analyzeGap.testAuditThinkingLevel ?? analyzeGap.thinkingLevel;
       const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
@@ -562,7 +562,7 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
           testAuditThinkingLevel: thinkingLevel,
         },
       });
-      ctx.ui.notify(`Test-audit model saved: ${picked.provider}/${picked.modelId}`, "info");
+      ctx.ui.notify(`Auditor model saved: ${picked.provider}/${picked.modelId}`, "info");
     }
   }
 }

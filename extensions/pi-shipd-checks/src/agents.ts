@@ -1,7 +1,7 @@
 /**
- * Spawns the throwaway gap-finder / gap-validator agent sessions,
- * races each against a timeout + external cancel signal, and pulls the
- * structured result back out of the tool-call capture object.
+ * Spawns the throwaway gap-analysis and audit agent sessions, races each
+ * against a timeout + external cancel signal, and pulls structured results
+ * back out of the tool-call capture objects.
  */
 
 import {
@@ -13,6 +13,8 @@ import {
 import {
   buildGapValidatorPrompt,
   buildSentenceGapFinderPrompt,
+  buildSolutionAuditPrompt,
+  buildSolutionAuditValidatorPrompt,
   buildSolverComparisonPrompt,
   buildSolverPrompt,
   buildTestAuditPrompt,
@@ -21,17 +23,23 @@ import {
 import {
   createGapFinderTool,
   createGapValidatorTool,
+  createSolutionAuditTool,
+  createSolutionAuditValidatorTool,
   createSolverGapTool,
   createTestAuditTool,
   createTestAuditValidatorTool,
   GAP_FINDER_TOOL_NAME,
   GAP_VALIDATOR_TOOL_NAME,
+  SOLUTION_AUDIT_TOOL_NAME,
+  SOLUTION_AUDIT_VALIDATOR_TOOL_NAME,
   SOLVER_GAP_TOOL_NAME,
   TEST_AUDIT_TOOL_NAME,
   TEST_AUDIT_VALIDATOR_TOOL_NAME,
 } from "./tools.js";
 import type {
   GapStageResult,
+  SolutionAuditFinding,
+  SolutionAuditStageResult,
   SolverGap,
   SolverRunResult,
   StatementGapReport,
@@ -355,6 +363,95 @@ export async function runTestAuditValidator(opts: {
         await session?.prompt(
           buildTestAuditValidatorPrompt(opts.findings, opts.testRubric, opts.fairnessRules, opts.codeFiles),
         );
+      },
+      opts.cancelSignal,
+      opts.timeoutMinutes * 60 * 1000,
+    );
+    if (outcome !== "done") {
+      await session.abort();
+      return { status: outcome, findings: [] };
+    }
+  } catch {
+    return { status: "error", findings: [] };
+  } finally {
+    await disposeAgentSession(session);
+  }
+  if (!capture.findings) return { status: "noSubmission", findings: [] };
+  return { status: "ok", findings: capture.findings };
+}
+
+/** Runs the first read-only solution-quality audit phase. */
+export async function runSolutionAudit(opts: {
+  tempDir: string;
+  model: unknown;
+  thinkingLevel: ThinkingLevel;
+  solutionRules: string;
+  codeFiles: string[];
+  timeoutMinutes: number;
+  cancelSignal: AbortSignal;
+}): Promise<SolutionAuditStageResult> {
+  const capture: { findings?: SolutionAuditFinding[] } = {};
+  const model = asSessionModel(opts.model);
+  let session: AgentSession | undefined;
+
+  try {
+    ({ session } = await createAgentSession({
+      cwd: opts.tempDir,
+      model,
+      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
+      tools: [...REVIEWER_TOOLS, SOLUTION_AUDIT_TOOL_NAME],
+      customTools: [createSolutionAuditTool(capture)],
+      sessionManager: SessionManager.inMemory(),
+    }));
+
+    const outcome = await raceAgentTurn(
+      async () => {
+        await session?.prompt(buildSolutionAuditPrompt(opts.solutionRules, opts.codeFiles));
+      },
+      opts.cancelSignal,
+      opts.timeoutMinutes * 60 * 1000,
+    );
+    if (outcome !== "done") {
+      await session.abort();
+      return { status: outcome, findings: [] };
+    }
+  } catch {
+    return { status: "error", findings: [] };
+  } finally {
+    await disposeAgentSession(session);
+  }
+  if (!capture.findings) return { status: "noSubmission", findings: [] };
+  return { status: "ok", findings: capture.findings };
+}
+
+/** Independently validates solution-audit candidates before they reach the caller. */
+export async function runSolutionAuditValidator(opts: {
+  tempDir: string;
+  model: unknown;
+  thinkingLevel: ThinkingLevel;
+  solutionRules: string;
+  codeFiles: string[];
+  findings: SolutionAuditFinding[];
+  timeoutMinutes: number;
+  cancelSignal: AbortSignal;
+}): Promise<SolutionAuditStageResult> {
+  const capture: { findings?: SolutionAuditFinding[] } = {};
+  const model = asSessionModel(opts.model);
+  let session: AgentSession | undefined;
+
+  try {
+    ({ session } = await createAgentSession({
+      cwd: opts.tempDir,
+      model,
+      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
+      tools: [...REVIEWER_TOOLS, SOLUTION_AUDIT_VALIDATOR_TOOL_NAME],
+      customTools: [createSolutionAuditValidatorTool(capture)],
+      sessionManager: SessionManager.inMemory(),
+    }));
+
+    const outcome = await raceAgentTurn(
+      async () => {
+        await session?.prompt(buildSolutionAuditValidatorPrompt(opts.findings, opts.solutionRules, opts.codeFiles));
       },
       opts.cancelSignal,
       opts.timeoutMinutes * 60 * 1000,
