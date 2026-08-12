@@ -9,6 +9,9 @@ import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, Spacer, Text } from "@earendil-works/pi-tui";
 import { runSolverComparisonReviewer } from "./agents.js";
 import {
+  ANALYZE_DEFAULT_TIMEOUT_MINUTES,
+  ANALYZE_TIMEOUT_MAX_MINUTES,
+  ANALYZE_TIMEOUT_MIN_MINUTES,
   getSupportedThinkingLevels,
   isAnalyzeToolEnabled,
   loadAnalyzeEnabledProjects,
@@ -136,7 +139,18 @@ const DEFAULT_ANALYZE_GAP: AnalyzeGapConfig = {
   provider: "",
   modelId: "",
   thinkingLevel: "off",
+  timeoutMinutes: ANALYZE_DEFAULT_TIMEOUT_MINUTES,
 };
+
+function getAnalyzeGapConfig(current: ChecksConfigLike | null): AnalyzeGapConfig {
+  const configured = current?.analyzeGap;
+  const configuredTimeout = configured?.timeoutMinutes;
+  const timeoutMinutes =
+    typeof configuredTimeout === "number" && Number.isFinite(configuredTimeout)
+      ? Math.min(ANALYZE_TIMEOUT_MAX_MINUTES, Math.max(ANALYZE_TIMEOUT_MIN_MINUTES, configuredTimeout))
+      : ANALYZE_DEFAULT_TIMEOUT_MINUTES;
+  return { ...DEFAULT_ANALYZE_GAP, ...configured, timeoutMinutes };
+}
 
 type ConfigRowId =
   | "reviewer-model"
@@ -147,6 +161,7 @@ type ConfigRowId =
   | "solvergap-solver-count"
   | "solvergap-save-artifacts"
   | "analyze-enabled"
+  | "analyze-timeout"
   | "analyze-gap-model"
   | "analyze-gap-thinking"
   | "analyze-audit-model"
@@ -250,6 +265,16 @@ function buildConfigRows(
       values: ["on", "off"],
     },
     {
+      id: "analyze-timeout",
+      section: "Analyze Tool",
+      label: "Timeout",
+      value: `${analyzeGap.timeoutMinutes} min`,
+      kind: "cycle",
+      values: [10, 15, 20, 25, ANALYZE_TIMEOUT_MAX_MINUTES]
+        .filter((value, index, values) => value >= ANALYZE_TIMEOUT_MIN_MINUTES && values.indexOf(value) === index)
+        .map((value) => `${value} min`),
+    },
+    {
       id: "analyze-gap-model",
       section: "Analyze Tool",
       label: "Gap finder model",
@@ -308,7 +333,7 @@ class ConfigMenuComponent {
       ctx,
       loadChecksConfig(),
       loadChecksConfig()?.solverGap ?? DEFAULT_SOLVER_GAP,
-      loadChecksConfig()?.analyzeGap ?? DEFAULT_ANALYZE_GAP,
+      getAnalyzeGapConfig(loadChecksConfig()),
     );
   }
 
@@ -319,7 +344,7 @@ class ConfigMenuComponent {
       this.ctx,
       current,
       current?.solverGap ?? DEFAULT_SOLVER_GAP,
-      current?.analyzeGap ?? DEFAULT_ANALYZE_GAP,
+      getAnalyzeGapConfig(current),
     );
     this.selectedIndex = Math.min(this.selectedIndex, this.rows.length - 1);
   }
@@ -375,7 +400,7 @@ class ConfigMenuComponent {
         return;
       }
       const solverGap = current.solverGap ?? DEFAULT_SOLVER_GAP;
-      const analyzeGap = current.analyzeGap ?? DEFAULT_ANALYZE_GAP;
+      const analyzeGap = getAnalyzeGapConfig(current);
       const currentIndex = row.values.indexOf(row.value);
       const nextValue = row.values[(currentIndex + 1) % row.values.length];
       if (nextValue === undefined) return;
@@ -391,6 +416,11 @@ class ConfigMenuComponent {
         saveChecksConfig({ ...current, solverGap: { ...solverGap, saveArtifacts: nextValue === "on" } });
       } else if (row.id === "analyze-enabled") {
         setAnalyzeProjectEnabled(this.ctx.cwd, nextValue === "on");
+      } else if (row.id === "analyze-timeout") {
+        saveChecksConfig({
+          ...current,
+          analyzeGap: { ...analyzeGap, timeoutMinutes: Number.parseInt(nextValue, 10) },
+        });
       } else if (row.id === "analyze-gap-thinking") {
         saveChecksConfig({ ...current, analyzeGap: { ...analyzeGap, thinkingLevel: nextValue as ThinkingLevel } });
       } else if (row.id === "analyze-audit-thinking") {
@@ -456,7 +486,7 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
 
     const current = loadChecksConfig();
     const solverGap = current?.solverGap ?? DEFAULT_SOLVER_GAP;
-    const analyzeGap = current?.analyzeGap ?? DEFAULT_ANALYZE_GAP;
+    const analyzeGap = getAnalyzeGapConfig(current);
 
     if (activated === "reviewer-model") {
       const picked = await pickModelOnly(ctx, current, "Select reviewer model");

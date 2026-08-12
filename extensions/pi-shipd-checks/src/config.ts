@@ -32,6 +32,9 @@ export const SOLVER_GAP_DEFAULT_SOLVER_COUNT = 3;
 export const SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS = true;
 
 export const ANALYZE_GAP_DEFAULT_ENABLED = false;
+export const ANALYZE_TIMEOUT_MIN_MINUTES = 10;
+export const ANALYZE_TIMEOUT_MAX_MINUTES = 30;
+export const ANALYZE_DEFAULT_TIMEOUT_MINUTES = 15;
 
 export const FARGATE_RESOURCE_PROFILES = {
   small: { cpu: 1, memoryMiB: 2048 },
@@ -206,7 +209,10 @@ export function isAnalyzeToolEnabled(cwd?: string): boolean {
 export function loadAnalyzeGapConfig(): AnalyzeGapConfig | null {
   const analyzeGap = loadChecksConfig()?.analyzeGap;
   if (!analyzeGap?.provider || !analyzeGap.modelId || !analyzeGap.thinkingLevel) return null;
-  return { ...analyzeGap };
+  const timeoutMinutes = Number.isFinite(analyzeGap.timeoutMinutes)
+    ? Math.min(ANALYZE_TIMEOUT_MAX_MINUTES, Math.max(ANALYZE_TIMEOUT_MIN_MINUTES, analyzeGap.timeoutMinutes))
+    : ANALYZE_DEFAULT_TIMEOUT_MINUTES;
+  return { ...analyzeGap, timeoutMinutes };
 }
 
 /**
@@ -220,6 +226,7 @@ export function loadTestAuditConfig(): AnalyzeAgentConfig | null {
     provider: analyzeGap.testAuditProvider ?? analyzeGap.provider,
     modelId: analyzeGap.testAuditModelId ?? analyzeGap.modelId,
     thinkingLevel: analyzeGap.testAuditThinkingLevel ?? analyzeGap.thinkingLevel,
+    timeoutMinutes: analyzeGap.timeoutMinutes,
   };
 }
 
