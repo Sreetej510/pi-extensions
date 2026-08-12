@@ -1,8 +1,9 @@
 /**
  * Shipd Checks Extension for pi
  *
- * Behavioral test-gap analysis and post-implementation test auditing for a task's
- * agent_prompt.md, tests, and repository source, with an optional solver-based gap finder.
+ * Behavioral test-gap analysis plus post-implementation test-fairness and
+ * solution-quality auditing for a task's agent_prompt.md, tests, and repository source,
+ * with an optional solver-based gap finder.
  *
  * Flow:
  *   1. Snapshot the current git HEAD (no working-dir mutation) into a temp dir
@@ -11,8 +12,8 @@
  *      into that temp dir.
  *   3. (/checks --solver-gap-finder) Run TDD solver agents and compare their
  *      passing implementations to the reference behavior.
- *   4. (analyze_task_tests) Run the requested read-only gap or test audit mode;
- *      audit mode uses an auditor plus an independent validator; the caller applies repairs.
+ *   4. (analyze_task_tests) Run the requested read-only gap, test-audit, or
+ *      solution-audit mode; audit modes use an Auditor plus an independent validator.
  *   5. Post a one-line chat message and merge solver results into
  *      shipd_report.json in the project root.
  *
@@ -20,7 +21,7 @@
  *   /analyze:on           enable the agent-callable test-analysis tool for this project
  *   /analyze:off          disable the agent-callable test-analysis tool for this project
  *   /checks               open a menu for config or solver-gap-finder
- *   /checks --config      set reviewer, gap-analysis, and test-audit models
+ *   /checks --config      set reviewer, gap-analysis, and Auditor models
  *   /checks --solver-gap-finder  run several TDD solver agents, then compare their solutions to find gaps
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.
  *

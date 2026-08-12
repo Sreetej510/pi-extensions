@@ -1,8 +1,8 @@
 /**
  * `analyze_task_tests` — a tool the main agent can call for either the
- * sentence-by-sentence behavioral gap analysis or a post-implementation
- * test audit. Both modes are read-only subagent flows and run directly in
- * the current working directory; the caller applies any suggested changes.
+ * sentence-by-sentence behavioral gap analysis, a post-implementation test
+ * fairness audit, or a post-implementation solution-quality audit. All modes
+ * are read-only subagent flows; the caller applies any suggested changes.
  */
 
 import { existsSync } from "node:fs";
@@ -10,7 +10,14 @@ import { join } from "node:path";
 import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { runGapFinder, runGapValidator, runTestAudit, runTestAuditValidator } from "./agents.js";
+import {
+  runGapFinder,
+  runGapValidator,
+  runSolutionAudit,
+  runSolutionAuditValidator,
+  runTestAudit,
+  runTestAuditValidator,
+} from "./agents.js";
 import {
   ANALYZE_DEFAULT_TIMEOUT_MINUTES,
   isAnalyzeToolEnabled,
@@ -19,8 +26,8 @@ import {
   loadTestAuditConfig,
 } from "./config.js";
 import { listChangedCodeFiles } from "./git.js";
-import { loadFairnessRules, loadTestGuidelines } from "./rubric.js";
-import type { AnalyzeMode, TestAuditFinding, TestGapFinal } from "./types.js";
+import { loadFairnessRules, loadSolutionRules, loadTestGuidelines } from "./rubric.js";
+import type { AnalyzeMode, SolutionAuditFinding, TestAuditFinding, TestGapFinal } from "./types.js";
 
 export const ANALYZE_TOOL_NAME = "analyze_task_tests";
 const ANALYZE_PREVIEW_LINES = 6;
@@ -30,28 +37,29 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
     name: ANALYZE_TOOL_NAME,
     label: "Test Analysis",
     description:
-      "Only call this when the user explicitly asks for gap analysis, test-audit, fairness, or " +
+      "Only call this when the user explicitly asks for gap analysis, test-audit, solution-audit, fairness, or " +
       'unfairness analysis. Use mode="gaps" (the default) for sequential sentence-by-sentence behavioral ' +
       "coverage-gap analysis: a read-only finder proposes positive/negative gaps and a read-only fairness reviewer " +
       "filters them (skipped when the finder found nothing), returning confirmed gaps in details.testGaps. Use " +
-      'mode="audit" only for a post-implementation audit of the current tests; a read-only auditor proposes findings and ' +
-      "an independent read-only validator filters them before returning details.testAuditFindings. The validator is " +
-      "skipped when the auditor finds nothing. Findings include unfair assertions, prompt ambiguity, weak assertions, " +
-      "and broken fixtures. " +
+      'mode="test-audit" for a post-implementation test-fairness audit, or mode="solution-audit" for a ' +
+      "post-implementation solution-quality audit. Each audit has a read-only auditor followed by an independent " +
+      "read-only validator; the validator is skipped when the auditor finds nothing. Test-audit findings cover " +
+      "unfair assertions, prompt ambiguity, and broken fixtures. Solution-audit findings cover contract gaps, " +
+      "regressions, architecture, failure safety, inconsistent paths, dead code, and unrelated changes. " +
       "Never writes or modifies files; the caller applies fixes. Run only one invocation at a time, never in parallel. " +
       "If the user requests multiple iterations, complete each invocation and apply its validated result before starting the next.",
-    promptSnippet: "When asked, find test gaps or audit test fairness",
+    promptSnippet: "When asked, find test gaps or audit test or solution quality",
     promptGuidelines: [
-      "Call analyze_task_tests only when the user explicitly asks for gap analysis, test-audit, fairness, or unfairness analysis; never call it proactively or for unrelated work.",
-      'Choose mode="gaps" for coverage-gap discovery and mode="audit" for reviewing tests already implemented. Do not silently substitute one mode for the other.',
+      "Call analyze_task_tests only when the user explicitly asks for gap analysis, test-audit, solution-audit, fairness, or unfairness analysis; never call it proactively or for unrelated work.",
+      'Choose mode="gaps" for coverage-gap discovery, mode="test-audit" for test fairness, or mode="solution-audit" for solution quality. Do not silently substitute one mode for another.',
       "Run one analyze_task_tests invocation at a time and wait for it to finish; never issue multiple invocations in parallel.",
-      "If the user asks for multiple or iterative runs, perform them sequentially: after each result, apply the confirmed gaps or audit repairs, then start the next requested iteration. The tool is read-only, so the caller performs all test and prompt changes.",
+      "If the user asks for multiple or iterative runs, perform them sequentially: after each result, apply the confirmed gaps or audit repairs, then start the next requested iteration. The tool is read-only, so the caller performs all test, prompt, and solution changes.",
     ],
     parameters: Type.Object({
       mode: Type.Optional(
-        Type.Union([Type.Literal("gaps"), Type.Literal("audit")], {
+        Type.Union([Type.Literal("gaps"), Type.Literal("test-audit"), Type.Literal("solution-audit")], {
           description:
-            "Analysis mode. Defaults to gaps; use audit only when the user asks to review implemented tests.",
+            "Analysis mode. Defaults to gaps; use test-audit for test fairness or solution-audit for solution quality.",
         }),
       ),
     }),
@@ -85,25 +93,36 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
       const label = options.isPartial ? "Elapsed" : "Took";
       const endTime = state.endedAt ?? Date.now();
       const duration = state.startedAt !== undefined ? formatDuration(endTime - state.startedAt) : "—";
-      const mode = state.mode === "audit" ? "audit" : "gaps";
-      const details = result.details as { testGaps?: unknown[]; testAuditFindings?: unknown[] } | undefined;
+      const mode: AnalyzeMode = state.mode === "test-audit" || state.mode === "solution-audit" ? state.mode : "gaps";
+      const details = result.details as
+        | {
+            testGaps?: unknown[];
+            testAuditFindings?: unknown[];
+            solutionAuditFindings?: unknown[];
+          }
+        | undefined;
       const resultCount =
-        mode === "audit"
+        mode === "test-audit"
           ? Array.isArray(details?.testAuditFindings)
             ? details.testAuditFindings.length
             : undefined
-          : Array.isArray(details?.testGaps)
-            ? details.testGaps.length
-            : undefined;
+          : mode === "solution-audit"
+            ? Array.isArray(details?.solutionAuditFindings)
+              ? details.solutionAuditFindings.length
+              : undefined
+            : Array.isArray(details?.testGaps)
+              ? details.testGaps.length
+              : undefined;
       const metaParts = [`${label} ${duration}`];
       if (resultCount !== undefined) {
         metaParts.push(
-          mode === "audit"
-            ? `${resultCount} finding${resultCount === 1 ? "" : "s"}`
-            : `${resultCount} gap${resultCount === 1 ? "" : "s"}`,
+          mode === "gaps"
+            ? `${resultCount} gap${resultCount === 1 ? "" : "s"}`
+            : `${resultCount} finding${resultCount === 1 ? "" : "s"}`,
         );
       }
-      const title = mode === "audit" ? "Test Audit" : "Gap Analysis";
+      const title =
+        mode === "test-audit" ? "Test Audit" : mode === "solution-audit" ? "Solution Audit" : "Gap Analysis";
       const header = theme.fg("toolTitle", theme.bold(title)) + theme.fg("muted", `  ${metaParts.join("  ·  ")}`);
       const resultText = (result.content ?? []).map((part) => (part.type === "text" ? part.text : "")).join("\n");
       const output = resultText.trim();
@@ -132,7 +151,7 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
         throw new Error("Missing required file in project root: agent_prompt.md");
       }
 
-      const configuredAnalyze = mode === "audit" ? loadTestAuditConfig() : loadAnalyzeGapConfig();
+      const configuredAnalyze = mode === "gaps" ? loadAnalyzeGapConfig() : loadTestAuditConfig();
       const analyzeConfig = configuredAnalyze ?? loadChecksConfig();
       const config = analyzeConfig;
       const model = config ? ctx.modelRegistry.find(config.provider, config.modelId) : ctx.model;
@@ -159,14 +178,15 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
         thinkingLevel,
         testRubric: loadTestGuidelines(),
         fairnessRules: loadFairnessRules(),
+        solutionRules: loadSolutionRules(),
         codeFiles,
         timeoutMinutes,
         cancelSignal: abort.signal,
       };
 
-      if (mode === "audit") {
+      if (mode === "test-audit") {
         onUpdate?.({
-          content: [{ type: "text", text: "Phase 1/2 — auditing implemented tests for fairness and strength..." }],
+          content: [{ type: "text", text: "Phase 1/2 — auditing implemented tests for fairness..." }],
           details: {},
         });
         const audit = await runTestAudit(base);
@@ -197,6 +217,42 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
             },
           ],
           details: { testAuditFindings: findings },
+        };
+      }
+
+      if (mode === "solution-audit") {
+        onUpdate?.({
+          content: [{ type: "text", text: "Phase 1/2 — auditing solution quality..." }],
+          details: {},
+        });
+        const audit = await runSolutionAudit(base);
+        if (abort.signal.aborted) throw new Error("Cancelled by user.");
+        if (audit.status !== "ok") {
+          throw new Error(`Solution audit did not complete (status: ${audit.status}).`);
+        }
+
+        let findings: SolutionAuditFinding[] = [];
+        if (audit.findings.length > 0) {
+          onUpdate?.({
+            content: [{ type: "text", text: `Phase 2/2 — validating ${audit.findings.length} solution finding(s)...` }],
+            details: {},
+          });
+          const validated = await runSolutionAuditValidator({ ...base, findings: audit.findings });
+          if (abort.signal.aborted) throw new Error("Cancelled by user.");
+          if (validated.status !== "ok") {
+            throw new Error(`Solution-audit validation did not complete (status: ${validated.status}).`);
+          }
+          findings = validated.findings;
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: buildSolutionAuditResultText(findings),
+            },
+          ],
+          details: { solutionAuditFindings: findings },
         };
       }
 
@@ -328,7 +384,7 @@ function buildAnalyzeResultText(testGaps: TestGapFinal[]): string {
 
 function buildTestAuditResultText(findings: TestAuditFinding[]): string {
   if (findings.length === 0) {
-    return "Test audit complete: no actionable fairness, ambiguity, test-strength, or fixture findings were found.";
+    return "Test audit complete: no actionable unfairness findings were found.";
   }
   const lines = findings.map(
     (finding, i) =>
@@ -338,8 +394,27 @@ function buildTestAuditResultText(findings: TestAuditFinding[]): string {
       `   Recommendation: ${finding.recommendation}`,
   );
   return [
-    "Below are findings from a read-only audit of the implemented tests. Apply only fair repairs, preserve each " +
-      "required behavior, and clarify agent_prompt.md instead of guessing when the contract is ambiguous.",
+    "Below are validated unfairness findings from a read-only audit of the implemented tests. Preserve each " +
+      "required behavior when applying the recommended repair.",
+    "",
+    ...lines,
+  ].join("\n");
+}
+
+function buildSolutionAuditResultText(findings: SolutionAuditFinding[]): string {
+  if (findings.length === 0) {
+    return "Solution audit complete: no actionable solution-quality findings were found.";
+  }
+  const lines = findings.map(
+    (finding, i) =>
+      `${i + 1}. [${finding.category}] ${finding.subject}: ${finding.problem}\n` +
+      `   Evidence: ${finding.evidence}\n` +
+      `   Required behavior: ${finding.requiredBehavior}\n` +
+      `   Recommendation: ${finding.recommendation}`,
+  );
+  return [
+    "Below are validated solution-quality findings from a read-only audit. Apply only repairs grounded in the " +
+      "prompt and repository conventions; do not treat the reference implementation as the specification.",
     "",
     ...lines,
   ].join("\n");

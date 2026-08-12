@@ -6,13 +6,22 @@
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ReviewReport, SolverGap, StatementGapReport, TestAuditFinding, TestGapFinal } from "./types.js";
+import type {
+  ReviewReport,
+  SolutionAuditFinding,
+  SolverGap,
+  StatementGapReport,
+  TestAuditFinding,
+  TestGapFinal,
+} from "./types.js";
 
 export const REPORT_TOOL_NAME = "submit_review_report";
 export const GAP_FINDER_TOOL_NAME = "submit_test_gap_candidates";
 export const GAP_VALIDATOR_TOOL_NAME = "submit_filtered_test_gaps";
 export const TEST_AUDIT_TOOL_NAME = "submit_test_audit_findings";
 export const TEST_AUDIT_VALIDATOR_TOOL_NAME = "submit_filtered_test_audit_findings";
+export const SOLUTION_AUDIT_TOOL_NAME = "submit_solution_audit_findings";
+export const SOLUTION_AUDIT_VALIDATOR_TOOL_NAME = "submit_filtered_solution_audit_findings";
 export const SOLVER_GAP_TOOL_NAME = "submit_solver_gaps";
 
 // ── Reviewer report tool ─────────────────────────────────────────────
@@ -150,12 +159,7 @@ export function createGapValidatorTool(capture: {
 
 const testAuditFindingParams = Type.Object({
   category: Type.Union(
-    [
-      Type.Literal("unfair-assertion"),
-      Type.Literal("prompt-ambiguity"),
-      Type.Literal("weak-assertion"),
-      Type.Literal("broken-fixture"),
-    ],
+    [Type.Literal("unfair-assertion"), Type.Literal("prompt-ambiguity"), Type.Literal("broken-fixture")],
     {
       description: "The kind of actionable problem found in the current test or its setup.",
     },
@@ -180,8 +184,8 @@ const testAuditFindingParams = Type.Object({
 const testAuditFindingsParams = Type.Object({
   findings: Type.Array(testAuditFindingParams, {
     description:
-      "Only confirmed, actionable fairness, ambiguity, test-strength, or fixture findings. Use an empty array " +
-      "when the current tests are fair, strong, and grounded.",
+      "Only confirmed, actionable test-fairness, ambiguity, or fixture findings. Use an empty array " +
+      "when the current tests contain no confirmed unfairness.",
   }),
 });
 
@@ -223,6 +227,88 @@ export function createTestAuditValidatorTool(capture: {
       capture.findings = findings;
       return {
         content: [{ type: "text", text: `Recorded ${findings.length} validated test-audit finding(s)` }],
+        details: undefined,
+      };
+    },
+  };
+}
+
+const solutionAuditFindingParams = Type.Object({
+  category: Type.Union(
+    [
+      Type.Literal("missing-requirement"),
+      Type.Literal("regression"),
+      Type.Literal("architecture"),
+      Type.Literal("unsafe-failure"),
+      Type.Literal("inconsistent-path"),
+      Type.Literal("dead-code"),
+      Type.Literal("unrelated-change"),
+    ],
+    {
+      description: "The kind of actionable quality problem found in the solution implementation.",
+    },
+  ),
+  subject: Type.String({
+    description: "A short behavior, symbol, or concern identifier; do not require a source line or file location.",
+  }),
+  problem: Type.String({
+    description: "What is wrong with the implementation and why it is actionable.",
+  }),
+  evidence: Type.String({
+    description: "The prompt, repository, implementation, or regression evidence supporting the finding.",
+  }),
+  requiredBehavior: Type.String({
+    description: "The requirement, invariant, or solution-quality property that must be preserved.",
+  }),
+  recommendation: Type.String({
+    description: "A concrete repair that stays within the prompt and repository conventions.",
+  }),
+});
+
+const solutionAuditFindingsParams = Type.Object({
+  findings: Type.Array(solutionAuditFindingParams, {
+    description:
+      "Only confirmed, actionable solution-quality findings. Use an empty array when the implementation meets the " +
+      "prompt and repository standards.",
+  }),
+});
+
+export function createSolutionAuditTool(capture: {
+  findings?: SolutionAuditFinding[];
+}): ToolDefinition<typeof solutionAuditFindingsParams> {
+  return {
+    name: SOLUTION_AUDIT_TOOL_NAME,
+    label: "Submit Solution Audit Candidates",
+    description:
+      "Submit candidate findings from the first solution-quality audit phase. This is the ONLY way to report your " +
+      "result — call it exactly once, as your last action. Use an empty list when no actionable issue is found.",
+    parameters: solutionAuditFindingsParams,
+    async execute(_toolCallId, params) {
+      const findings = params.findings ?? [];
+      capture.findings = findings;
+      return {
+        content: [{ type: "text", text: `Recorded ${findings.length} solution-audit candidate(s)` }],
+        details: undefined,
+      };
+    },
+  };
+}
+
+export function createSolutionAuditValidatorTool(capture: {
+  findings?: SolutionAuditFinding[];
+}): ToolDefinition<typeof solutionAuditFindingsParams> {
+  return {
+    name: SOLUTION_AUDIT_VALIDATOR_TOOL_NAME,
+    label: "Submit Validated Solution Audit Findings",
+    description:
+      "Submit the final, independently validated solution-quality findings. This is the ONLY way to report your " +
+      "result — call it exactly once, as your last action. Use an empty list when no candidate survives strict review.",
+    parameters: solutionAuditFindingsParams,
+    async execute(_toolCallId, params) {
+      const findings = params.findings ?? [];
+      capture.findings = findings;
+      return {
+        content: [{ type: "text", text: `Recorded ${findings.length} validated solution-audit finding(s)` }],
         details: undefined,
       };
     },

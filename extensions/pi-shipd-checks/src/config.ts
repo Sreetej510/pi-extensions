@@ -205,7 +205,7 @@ export function isAnalyzeToolEnabled(cwd?: string): boolean {
   return loadChecksConfig()?.enableAnalyzeTool ?? ANALYZE_GAP_DEFAULT_ENABLED;
 }
 
-/** The gap-finder model settings for the agent-callable analysis tool. */
+/** The gap-analysis model settings for the agent-callable analysis tool. */
 export function loadAnalyzeGapConfig(): AnalyzeGapConfig | null {
   const analyzeGap = loadChecksConfig()?.analyzeGap;
   if (!analyzeGap?.provider || !analyzeGap.modelId || !analyzeGap.thinkingLevel) return null;
@@ -216,7 +216,7 @@ export function loadAnalyzeGapConfig(): AnalyzeGapConfig | null {
 }
 
 /**
- * The test-audit model settings. Older configs had only one analyze-tool model;
+ * The shared Auditor model settings for test-audit and solution-audit. Older configs had only one analyze-tool model;
  * in that case the audit intentionally reuses the configured gap-finder model.
  */
 export function loadTestAuditConfig(): AnalyzeAgentConfig | null {

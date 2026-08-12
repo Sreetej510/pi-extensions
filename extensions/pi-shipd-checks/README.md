@@ -25,20 +25,22 @@ For `/checks`:
 The agent-callable `analyze_task_tests` tool provides the separate test-analysis workflow:
 
 - `mode: "gaps"` (default) finds and validates sentence-by-sentence behavioral coverage gaps.
-- `mode: "audit"` runs an auditor followed by an independent validator over implemented tests,
-  filtering unfair assertions, prompt ambiguity, weak assertions, and broken fixtures.
+- `mode: "test-audit"` runs an Auditor followed by an independent validator over implemented tests,
+  filtering unfair assertions, prompt ambiguity, and broken fixtures.
+- `mode: "solution-audit"` runs the same Auditor/validator workflow over the implementation,
+  using the `# Solution implementation` rules from `rules.md`.
 
-Both modes are read-only. Invoke the tool only when the user asks, never in parallel, and run
+All modes are read-only. Invoke the tool only when the user asks, never in parallel, and run
 repeated requests sequentially after applying each result.
 
 ## Commands
 
-`--config` must be used alone; solver-gap-finder is the only `/checks` run mode.
+`--config` must be used alone; solver-gap-finder is the only `/checks` run mode. Test and solution audits run through `analyze_task_tests`.
 
 | Command | Effect |
 |---|---|
 | `/checks` | Open a menu with config and solver-gap-finder options |
-| `/checks --config` | Configure reviewer, solver, gap-finder, and test-audit models |
+| `/checks --config` | Configure reviewer, solver, gap-analysis, and Auditor models |
 | `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
 | `/analyze:on` | Enable the agent-callable test-analysis tool for the current project |
 | `/analyze:off` | Disable the agent-callable test-analysis tool for the current project |
@@ -52,9 +54,10 @@ repeated requests sequentially after applying each result.
 - **Solver**: reviewer model and thinking level for the final solver-result reviewer, plus the
   solver model, thinking level, timeout, parallel solver count, and artifact-saving setting.
 - **Analyze Tool**: timeout plus separate models + thinking levels for the agent-callable gap-analysis
-  and Test Audit modes. The timeout applies to each read-only agent phase. The audit model defaults
-  to the gap-analysis model until explicitly changed. These are stored under
-  `analyzeGap.timeoutMinutes`, `analyzeGap.testAuditProvider`, `analyzeGap.testAuditModelId`, and
+  and Auditor modes. The Auditor settings apply to both test-audit and solution-audit. The timeout
+  applies to each read-only agent phase. The Auditor model defaults to the gap-analysis model until
+  explicitly changed. These are stored under `analyzeGap.timeoutMinutes`,
+  `analyzeGap.testAuditProvider`, `analyzeGap.testAuditModelId`, and
   `analyzeGap.testAuditThinkingLevel`. Fargate resources are selected automatically and are not
   configured in this menu.
 
@@ -138,9 +141,10 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
 Use `/analyze:on` and `/analyze:off` to control the tool per project, like HPC. The enabled project
 list is stored alongside the other settings in `~/.pi/agent/checks-config.json`.
 
-The agent-callable tool accepts `mode: "gaps"` (default) or `mode: "audit"`. Invoke it only when the
-user asks, never in parallel, and run repeated requests sequentially after applying each result.
-The audit is read-only and returns repair recommendations; the caller changes the tests or prompt.
+The agent-callable tool accepts `mode: "gaps"` (default), `mode: "test-audit"`, or
+`mode: "solution-audit"`. Invoke it only when the user asks, never in parallel, and run repeated
+requests sequentially after applying each result. Audits are read-only and return repair
+recommendations; the caller changes the tests, prompt, or solution.
 
 
 ```json
