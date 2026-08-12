@@ -116,6 +116,7 @@ export async function runGapFinder(opts: {
   testRubric: string;
   fairnessRules: string;
   codeFiles: string[];
+  timeoutMinutes: number;
   cancelSignal: AbortSignal;
 }): Promise<GapStageResult<StatementGapReport>> {
   const capture: { statements?: StatementGapReport[] } = {};
@@ -132,9 +133,13 @@ export async function runGapFinder(opts: {
       sessionManager: SessionManager.inMemory(),
     }));
 
-    const outcome = await raceAgentTurn(async () => {
-      await session?.prompt(buildSentenceGapFinderPrompt(opts.testRubric, opts.fairnessRules, opts.codeFiles));
-    }, opts.cancelSignal);
+    const outcome = await raceAgentTurn(
+      async () => {
+        await session?.prompt(buildSentenceGapFinderPrompt(opts.testRubric, opts.fairnessRules, opts.codeFiles));
+      },
+      opts.cancelSignal,
+      opts.timeoutMinutes * 60 * 1000,
+    );
     if (outcome !== "done") {
       await session.abort();
       return { status: outcome, gaps: [] };
@@ -235,6 +240,7 @@ export async function runGapValidator(opts: {
   fairnessRules: string;
   statementReports: StatementGapReport[];
   codeFiles: string[];
+  timeoutMinutes: number;
   cancelSignal: AbortSignal;
 }): Promise<GapStageResult<TestGapFinal>> {
   const capture: { gaps?: TestGapFinal[] } = {};
@@ -251,11 +257,15 @@ export async function runGapValidator(opts: {
       sessionManager: SessionManager.inMemory(),
     }));
 
-    const outcome = await raceAgentTurn(async () => {
-      await session?.prompt(
-        buildGapValidatorPrompt(opts.statementReports, opts.testRubric, opts.fairnessRules, opts.codeFiles),
-      );
-    }, opts.cancelSignal);
+    const outcome = await raceAgentTurn(
+      async () => {
+        await session?.prompt(
+          buildGapValidatorPrompt(opts.statementReports, opts.testRubric, opts.fairnessRules, opts.codeFiles),
+        );
+      },
+      opts.cancelSignal,
+      opts.timeoutMinutes * 60 * 1000,
+    );
     if (outcome !== "done") {
       await session.abort();
       return { status: outcome, gaps: [] };
@@ -277,6 +287,7 @@ export async function runTestAudit(opts: {
   testRubric: string;
   fairnessRules: string;
   codeFiles: string[];
+  timeoutMinutes: number;
   cancelSignal: AbortSignal;
 }): Promise<TestAuditStageResult> {
   const capture: { findings?: TestAuditFinding[] } = {};
@@ -293,9 +304,13 @@ export async function runTestAudit(opts: {
       sessionManager: SessionManager.inMemory(),
     }));
 
-    const outcome = await raceAgentTurn(async () => {
-      await session?.prompt(buildTestAuditPrompt(opts.testRubric, opts.fairnessRules, opts.codeFiles));
-    }, opts.cancelSignal);
+    const outcome = await raceAgentTurn(
+      async () => {
+        await session?.prompt(buildTestAuditPrompt(opts.testRubric, opts.fairnessRules, opts.codeFiles));
+      },
+      opts.cancelSignal,
+      opts.timeoutMinutes * 60 * 1000,
+    );
     if (outcome !== "done") {
       await session.abort();
       return { status: outcome, findings: [] };
@@ -318,6 +333,7 @@ export async function runTestAuditValidator(opts: {
   fairnessRules: string;
   codeFiles: string[];
   findings: TestAuditFinding[];
+  timeoutMinutes: number;
   cancelSignal: AbortSignal;
 }): Promise<TestAuditStageResult> {
   const capture: { findings?: TestAuditFinding[] } = {};
@@ -334,11 +350,15 @@ export async function runTestAuditValidator(opts: {
       sessionManager: SessionManager.inMemory(),
     }));
 
-    const outcome = await raceAgentTurn(async () => {
-      await session?.prompt(
-        buildTestAuditValidatorPrompt(opts.findings, opts.testRubric, opts.fairnessRules, opts.codeFiles),
-      );
-    }, opts.cancelSignal);
+    const outcome = await raceAgentTurn(
+      async () => {
+        await session?.prompt(
+          buildTestAuditValidatorPrompt(opts.findings, opts.testRubric, opts.fairnessRules, opts.codeFiles),
+        );
+      },
+      opts.cancelSignal,
+      opts.timeoutMinutes * 60 * 1000,
+    );
     if (outcome !== "done") {
       await session.abort();
       return { status: outcome, findings: [] };

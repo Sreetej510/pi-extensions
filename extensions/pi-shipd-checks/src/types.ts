@@ -84,6 +84,8 @@ export interface AnalyzeAgentConfig {
   provider: string;
   modelId: string;
   thinkingLevel: ThinkingLevel;
+  /** Maximum time allowed for each read-only analysis agent phase. */
+  timeoutMinutes: number;
 }
 
 /** Model settings for the gap-finder mode plus an optional dedicated test-audit model. */

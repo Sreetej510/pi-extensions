@@ -11,7 +11,13 @@ import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { runGapFinder, runGapValidator, runTestAudit, runTestAuditValidator } from "./agents.js";
-import { isAnalyzeToolEnabled, loadAnalyzeGapConfig, loadChecksConfig, loadTestAuditConfig } from "./config.js";
+import {
+  ANALYZE_DEFAULT_TIMEOUT_MINUTES,
+  isAnalyzeToolEnabled,
+  loadAnalyzeGapConfig,
+  loadChecksConfig,
+  loadTestAuditConfig,
+} from "./config.js";
 import { listChangedCodeFiles } from "./git.js";
 import { loadFairnessRules, loadTestGuidelines } from "./rubric.js";
 import type { AnalyzeMode, TestAuditFinding, TestGapFinal } from "./types.js";
@@ -126,7 +132,8 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
         throw new Error("Missing required file in project root: agent_prompt.md");
       }
 
-      const analyzeConfig = (mode === "audit" ? loadTestAuditConfig() : loadAnalyzeGapConfig()) ?? loadChecksConfig();
+      const configuredAnalyze = mode === "audit" ? loadTestAuditConfig() : loadAnalyzeGapConfig();
+      const analyzeConfig = configuredAnalyze ?? loadChecksConfig();
       const config = analyzeConfig;
       const model = config ? ctx.modelRegistry.find(config.provider, config.modelId) : ctx.model;
       if (!model || (config && !ctx.modelRegistry.hasConfiguredAuth(model))) {
@@ -135,6 +142,7 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
         );
       }
       const thinkingLevel = analyzeConfig?.thinkingLevel ?? "off";
+      const timeoutMinutes = configuredAnalyze?.timeoutMinutes ?? ANALYZE_DEFAULT_TIMEOUT_MINUTES;
 
       const abort = new AbortController();
       if (signal) {
@@ -152,6 +160,7 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
         testRubric: loadTestGuidelines(),
         fairnessRules: loadFairnessRules(),
         codeFiles,
+        timeoutMinutes,
         cancelSignal: abort.signal,
       };
 

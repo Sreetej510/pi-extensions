@@ -51,9 +51,10 @@ repeated requests sequentially after applying each result.
 
 - **Solver**: reviewer model and thinking level for the final solver-result reviewer, plus the
   solver model, thinking level, timeout, parallel solver count, and artifact-saving setting.
-- **Analyze Tool**: separate models + thinking levels for the agent-callable gap-analysis and Test
-  Audit modes. The audit model defaults to the gap-analysis model until explicitly changed. These
-  are stored under `analyzeGap.testAuditProvider`, `analyzeGap.testAuditModelId`, and
+- **Analyze Tool**: timeout plus separate models + thinking levels for the agent-callable gap-analysis
+  and Test Audit modes. The timeout applies to each read-only agent phase. The audit model defaults
+  to the gap-analysis model until explicitly changed. These are stored under
+  `analyzeGap.timeoutMinutes`, `analyzeGap.testAuditProvider`, `analyzeGap.testAuditModelId`, and
   `analyzeGap.testAuditThinkingLevel`. Fargate resources are selected automatically and are not
   configured in this menu.
 
