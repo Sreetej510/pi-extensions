@@ -64,6 +64,7 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
       durationMs: r.durationMs,
       totalTests: r.totalTests,
       failedTests: r.failedTests,
+      error: r.error ?? (r.status === "error" ? r.testOutputTail : undefined),
       artifactsDir: r.artifactsDir,
     }));
     merged.solverGaps = input.solverGaps;
@@ -88,6 +89,7 @@ export interface SolverSummaryDetail {
   durationMs: number;
   totalTests: number | null;
   failedTests: number | null;
+  error?: string;
 }
 export interface RunSummary {
   content: string;
