@@ -597,6 +597,7 @@ function fillMissingSolverResults(count: number, completed: WorkerSolverResult[]
         passed: false,
         diff: "",
         testOutputTail: error,
+        error,
         durationMs: 0,
         totalTests: null,
         failedTests: null,

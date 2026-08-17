@@ -213,6 +213,8 @@ export interface SolverRunResult {
   /** Test totals parsed from the verifier's JUnit XML output; null when no report was produced. */
   totalTests: number | null;
   failedTests: number | null;
+  /** Diagnostic for setup, execution, transport, or other non-test failures. */
+  error?: string;
   /** Dir under `.pi/shipd-checks/<runId>/solver_<index>/` where trajectory.json/solution.patch/test output were saved, if any. */
   artifactsDir?: string;
 }
