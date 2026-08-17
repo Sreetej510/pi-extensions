@@ -2,8 +2,7 @@
 
 A monorepo of independently installable [pi coding agent](https://github.com/earendil-works/pi)
 extensions, published to npm under the `@sreetej510` scope so each package name is globally unique
-(`@sreetej510/pi-<extension-name>`). Structure and tooling are modeled after
-[narumiruna/pi-extensions](https://github.com/narumiruna/pi-extensions).
+(`@sreetej510/pi-<extension-name>`).
 
 ## Packages
 
