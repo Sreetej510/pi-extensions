@@ -19,7 +19,10 @@ export async function resolvePiCodexAuth(
       continue;
     }
 
-    const headers = { ...(auth.headers ?? {}) };
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(auth.headers ?? {})) {
+      if (typeof value === "string") headers[name] = value;
+    }
     if (!hasHeader(headers, "Authorization") && auth.apiKey) {
       headers.Authorization = `Bearer ${auth.apiKey}`;
     }

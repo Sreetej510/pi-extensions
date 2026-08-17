@@ -1,6 +1,6 @@
 {
   "name": "@sreetej510/pi-usage",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Pi extension that reports provider usage/rate-limit budgets (Codex, Anthropic OAuth, etc.) via /usage, with a live statusline widget.",
   "type": "module",
   "license": "MIT",
@@ -32,8 +32,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.3",
-    "@earendil-works/pi-coding-agent": "^0.80.3",
-    "@earendil-works/pi-tui": "^0.80.3",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@earendil-works/pi-tui": "^0.84.2",
     "typescript": "^5.7.3"
   },
   "repository": {
