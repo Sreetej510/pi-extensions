@@ -16,6 +16,11 @@ const result = await esbuild.build({
   format: "esm",
   platform: "node",
   target: "node22",
+  // Keep pi-ai as one bundled instance so the OAuth loader registration below
+  // also reaches the copy used by pi-coding-agent.
+  alias: {
+    "@earendil-works/pi-ai": join(packageDir, "../../node_modules/@earendil-works/pi-ai/dist"),
+  },
   legalComments: "none",
   banner: {
     js: 'import { createRequire as __shipdCreateRequire } from "node:module"; globalThis.require = __shipdCreateRequire(import.meta.url);',
