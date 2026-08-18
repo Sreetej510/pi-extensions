@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, posix as posixPath } from "node:path";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
+import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { buildSolverPrompt } from "./prompts.js";
@@ -26,6 +27,10 @@ type WorkerPayload = {
 };
 
 let activeResourceUsage: TaskResourceUsageSampler | undefined;
+
+// The standalone worker cannot resolve pi-ai's lazy OAuth modules relative to
+// /tmp after esbuild bundles this file. Register them statically instead.
+registerBunOAuthFlows();
 
 const AGENT_DIR = "/opt/shipd-agent";
 const SOLVERS_DIR = "/work/solvers";
