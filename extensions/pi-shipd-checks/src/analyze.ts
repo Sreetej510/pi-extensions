@@ -10,14 +10,7 @@ import { join } from "node:path";
 import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import {
-  runGapFinder,
-  runGapValidator,
-  runSolutionAudit,
-  runSolutionAuditValidator,
-  runTestAudit,
-  runTestAuditValidator,
-} from "./agents.js";
+import { runGapFinder, runGapValidator, runSolutionAudit, runTestAudit } from "./agents.js";
 import {
   ANALYZE_DEFAULT_TIMEOUT_MINUTES,
   isAnalyzeToolEnabled,
@@ -26,7 +19,7 @@ import {
   loadTestAuditConfig,
 } from "./config.js";
 import { getChangedCodeDiff, listChangedCodeFiles } from "./git.js";
-import { loadFairnessRules, loadSolutionRules, loadTestGuidelines } from "./rubric.js";
+import { loadFairnessRules, loadGapRules, loadSolutionRules, loadTestGuidelines } from "./rubric.js";
 import type { AnalyzeMode, SolutionAuditFinding, TestAuditFinding, TestGapFinal } from "./types.js";
 
 export const ANALYZE_TOOL_NAME = "analyze_task_tests";
@@ -42,8 +35,8 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
       "coverage-gap analysis: a read-only finder proposes positive/negative gaps and a read-only fairness reviewer " +
       "filters them (skipped when the finder found nothing), returning confirmed gaps in details.testGaps. Use " +
       'mode="test-audit" for a post-implementation test-fairness audit, or mode="solution-audit" for a ' +
-      "post-implementation solution-quality audit. Each audit has a read-only auditor followed by an independent " +
-      "read-only validator; the validator is skipped when the auditor finds nothing. Test-audit findings cover " +
+      "post-implementation solution-quality audit. Each audit uses one read-only auditor that performs its own " +
+      "full validation before reporting. Test-audit findings cover " +
       "unfair assertions, prompt ambiguity, and broken fixtures. Solution-audit findings cover contract gaps, " +
       "regressions, architecture, failure safety, inconsistent paths, dead code, and unrelated changes. " +
       "Never writes or modifies files; the caller applies fixes. Run only one invocation at a time, never in parallel. " +
@@ -179,6 +172,7 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
         model,
         thinkingLevel,
         testRubric: loadTestGuidelines(),
+        gapRules: loadGapRules(),
         fairnessRules: loadFairnessRules(),
         solutionRules: loadSolutionRules(),
         codeFiles,
@@ -189,7 +183,7 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
 
       if (mode === "test-audit") {
         onUpdate?.({
-          content: [{ type: "text", text: "Phase 1/2 — auditing implemented tests for fairness..." }],
+          content: [{ type: "text", text: "Auditing implemented tests for fairness (single pass)..." }],
           details: {},
         });
         const audit = await runTestAudit(base);
@@ -198,19 +192,7 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
           throw new Error(`Test audit did not complete (status: ${audit.status}).`);
         }
 
-        let findings: TestAuditFinding[] = [];
-        if (audit.findings.length > 0) {
-          onUpdate?.({
-            content: [{ type: "text", text: `Phase 2/2 — validating ${audit.findings.length} audit finding(s)...` }],
-            details: {},
-          });
-          const validated = await runTestAuditValidator({ ...base, findings: audit.findings });
-          if (abort.signal.aborted) throw new Error("Cancelled by user.");
-          if (validated.status !== "ok") {
-            throw new Error(`Test-audit validation did not complete (status: ${validated.status}).`);
-          }
-          findings = validated.findings;
-        }
+        const findings: TestAuditFinding[] = audit.findings;
 
         return {
           content: [
@@ -225,7 +207,7 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
 
       if (mode === "solution-audit") {
         onUpdate?.({
-          content: [{ type: "text", text: "Phase 1/2 — auditing solution quality..." }],
+          content: [{ type: "text", text: "Auditing solution quality (single pass)..." }],
           details: {},
         });
         const audit = await runSolutionAudit(base);
@@ -234,19 +216,7 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
           throw new Error(`Solution audit did not complete (status: ${audit.status}).`);
         }
 
-        let findings: SolutionAuditFinding[] = [];
-        if (audit.findings.length > 0) {
-          onUpdate?.({
-            content: [{ type: "text", text: `Phase 2/2 — validating ${audit.findings.length} solution finding(s)...` }],
-            details: {},
-          });
-          const validated = await runSolutionAuditValidator({ ...base, findings: audit.findings });
-          if (abort.signal.aborted) throw new Error("Cancelled by user.");
-          if (validated.status !== "ok") {
-            throw new Error(`Solution-audit validation did not complete (status: ${validated.status}).`);
-          }
-          findings = validated.findings;
-        }
+        const findings: SolutionAuditFinding[] = audit.findings;
 
         return {
           content: [

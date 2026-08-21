@@ -139,7 +139,7 @@ export type SolutionAuditCategory =
   | "dead-code"
   | "unrelated-change";
 
-/** A concrete fairness, ambiguity, strength, or fixture problem in the current tests. */
+/** A concrete fairness, ambiguity, or fixture problem in the current tests. */
 export interface TestAuditFinding {
   category: TestAuditCategory;
   /** Test name or short identifier that lets the caller find the affected assertion. */
@@ -154,7 +154,7 @@ export interface TestAuditFinding {
   recommendation: string;
 }
 
-/** Result of one read-only post-implementation test audit. */
+/** Result of the single read-only post-implementation test audit. */
 export interface TestAuditStageResult {
   status: "ok" | "timedOut" | "cancelled" | "error" | "noSubmission";
   findings: TestAuditFinding[];
@@ -175,7 +175,7 @@ export interface SolutionAuditFinding {
   recommendation: string;
 }
 
-/** Result of one read-only post-implementation solution audit phase. */
+/** Result of the single read-only post-implementation solution audit. */
 export interface SolutionAuditStageResult {
   status: "ok" | "timedOut" | "cancelled" | "error" | "noSubmission";
   findings: SolutionAuditFinding[];

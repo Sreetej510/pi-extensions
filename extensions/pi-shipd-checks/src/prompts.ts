@@ -6,26 +6,17 @@ import {
   GAP_VALIDATOR_TOOL_NAME,
   REPORT_TOOL_NAME,
   SOLUTION_AUDIT_TOOL_NAME,
-  SOLUTION_AUDIT_VALIDATOR_TOOL_NAME,
   SOLVER_GAP_TOOL_NAME,
   TEST_AUDIT_TOOL_NAME,
-  TEST_AUDIT_VALIDATOR_TOOL_NAME,
 } from "./tools.js";
-import type {
-  ReviewerRole,
-  ReviewerRoleKey,
-  SolutionAuditFinding,
-  SolverRunResult,
-  StatementGapReport,
-  TestAuditFinding,
-} from "./types.js";
+import type { ReviewerRole, ReviewerRoleKey, SolverRunResult, StatementGapReport } from "./types.js";
 
 const ROLE_FOCUS: Record<ReviewerRoleKey, string> = {
   description:
     "Focus area: the task description in `agent_prompt.md`. Judge it strictly against rubric items P1-P5 below. " +
     "You do not need to judge the tests or solution — other reviewers cover those.",
   tests:
-    "Focus area: the tests added in `test.patch` (a unified diff). Judge them strictly against rubric items T1-T6 below. " +
+    "Focus area: the tests added in `test.patch` (a unified diff). Judge them strictly against rubric items T1-T8 below. " +
     "You cannot execute code or apply the patch, so read the diff carefully and reason about determinism, coverage, and " +
     "strictness directly from the added code. Read `agent_prompt.md` for context on what behavior is in scope, and skim " +
     "`solution.patch` only to understand what the tests are checking. Do not judge the description or the solution's code quality.\n" +
@@ -119,138 +110,15 @@ const GAP_FINDER_AGGRESSION = [
     "you have systematically covered the prompt and relevant repository code.",
   "- After your first pass, run at least one deliberate second sweep (re-read `agent_prompt.md` and grep/read the " +
     "relevant code files) before submitting — but if that sweep still finds nothing, submit an empty list.",
-  "- Do not self-censor or merge distinct genuine gaps into one — the validator will prune. Never invent or pad the list " +
+  "- Do not self-censor or merge distinct genuine gaps into one — the fairness reviewer will prune. Never invent or pad the list " +
     "to seem thorough; an empty array is correct when exhaustive analysis truly finds none.",
   "- Hunt subtle gaps too: behaviors that may be missed under other valid inputs, repository conventions, interaction " +
     "effects, ordering/timing, and branches in the relevant source code that need behavioral coverage.",
   "- Include a candidate only when you can cite specific grounding and a concrete false-pass risk — not to meet a quota.",
 ];
 
-const GAP_FAIRNESS_RULES = [
-  "Fairness rules — apply these to every proposed gap and every proposed assertion:",
-  "- Ground every candidate in a specific sentence or requirement in `agent_prompt.md`, or in an existing public " +
-    "contract that is clear and directly relevant in the repository. Record the observable behavior and the plausible " +
-    "incorrect implementation that could pass without this check. Do not create requirements from intuition, taste, " +
-    "general best practice, or a desire for more coverage.",
-  "- Treat `agent_prompt.md` as the task contract. Existing source can clarify how an already-public API behaves and can " +
-    "make an established convention discoverable, but a neighboring helper, default, example, or implementation choice " +
-    "does not automatically become a requirement for a new behavior. If repository evidence is absent, mixed, or " +
-    "contradictory, leave the detail open rather than choosing one interpretation.",
-  "- A fair check must be expressible through a user-visible result, a caller-visible side effect, a named public API, " +
-    "or another documented/public contract. Do not require private state, private helpers, internal classes, file " +
-    "placement, module boundaries, call order, a particular algorithm, or a particular direct platform/API call when " +
-    "another repo-valid route produces the required outcome.",
-  "- A newly invented function, class, property, export, constructor, method name, argument shape, import path, or " +
-    "registry/config key is not a fair requirement merely because it would be a convenient way to test the feature. " +
-    "Require a new API only when `agent_prompt.md` names it, or when the API already exists publicly and the task " +
-    "explicitly relies on it.",
-  "- For UI behavior, assert the user-facing control, label, visible state, accessible action, or resulting effect when " +
-    "that is the contract. Do not require a particular DOM hierarchy, tag, CSS class, selector, test/data attribute, " +
-    "ARIA attribute, hidden-shim text, focus order, keyboard traversal, or control implementation unless the prompt " +
-    "or an established public UI contract explicitly requires it.",
-  "- Test semantics rather than source representation. Do not pin quote style, whitespace, line breaks, token adjacency, " +
-    "identifier spelling, generated-source wording, code length, AST node shape, type-text spelling, serialization " +
-    "style, or a particular equivalent syntax when the resulting behavior is the same. Normalize, parse, compile, or " +
-    "observe the result when that is necessary to compare equivalent forms.",
-  "- For structured results, assert the fields, values, relationships, ordering, and preservation that the contract " +
-    "actually requires. Allow additional valid fields and metadata unless the prompt explicitly forbids them. Do not " +
-    "compare a whole object, list, mapping, or serialized document to a minimal reference-shaped object when only a " +
-    "subset of its contents is contractual. For unspecified unknown fields, do not assume either permissive or strict " +
-    "validation: acceptance is fair only when extras are expressly allowed or established, and rejection is fair only " +
-    "when unknown fields are expressly forbidden or established at that schema level.",
-  "- Treat configuration schemas as contracts, not guesses. Field type, collection shape, omitted-field defaults, " +
-    "unknown-key policy, extension-based dispatch, coercion, and cross-field constraints are independently specified " +
-    "decisions. Do not require a string-only name, a particular list shape, a filename-driven parser, a boolean-only " +
-    "flag, a valid range relationship, or rejection of an extra key unless the prompt or a public schema settles it.",
-  "- Make aggregation semantics explicit before requiring exact counts. A count may be per input, field, item, target, " +
-    "rule, match, category, finding, log record, or operation; multiple units may overlap or be mutually exclusive. " +
-    "For repair or mutation output, also distinguish findings measured before the change from findings remaining after " +
-    "the change. If the contract does not choose the unit, test presence, effect, or a stated relationship rather than " +
-    "an exact number.",
-  "- Do not resolve interactions between separately described rules by intuition. Optional-path handling versus " +
-    "target-level checks, validation versus evaluation, duplicate detection across collections, cache reuse versus a " +
-    "new input, and consensus among agreeing versus dissenting values each need an explicit precedence or scope. " +
-    "A test must not silently choose skip-all versus continue, majority versus unanimity, per-collection versus global " +
-    "deduplication, or disjoint versus overlapping diagnostic categories.",
-  "- Do not infer a concrete value from relational wording. Terms such as current, latest, selected, next, matching, " +
-    "appropriate, or stable require the stated relationship or effect, not an arbitrary numeric or serialized value. " +
-    "Pin a concrete value only when the prompt or a clear existing public contract determines it.",
-  "- Do not infer an exact ordering, grouping, cardinality, count, or error-counting model from incidental map order, " +
-    "loop order, a convenient fixture, or one implementation. Require ordering or counts only when the contract makes " +
-    "them observable; otherwise assert membership, relationships, preservation, and the required effect without " +
-    "choosing a granularity the prompt leaves open. This includes order of newly added versus loaded values and the " +
-    "number or placement of repeated diagnostic terms.",
-  "- Preserve scope qualifiers. A requirement for aware values, naive values, all-day values, one mode, one target " +
-    "state, or one lifecycle phase does not automatically apply to every representation or phase. Do not transfer a " +
-    "rule from one subtype to another, or require a changed wall time, timezone, normalization, or side effect outside " +
-    "the scope in which the prompt states it.",
-  "- Do not invent an input-domain policy for unspecified cases. Do not require acceptance or rejection of a particular " +
-    "malformed, nullish, Unicode, unusually large, boolean-like, platform-specific, symlink, missing-parent, or other " +
-    "boundary value unless the prompt or an established public contract settles that case. A sensible API policy is not " +
-    "automatically the specified policy.",
-  "- For failures, assert the failure or user-visible error behavior required by the contract. Do not require a specific " +
-    "exception class, message wording, punctuation, embedded input value, capitalization, basename, validation phase, " +
-    "or eager-versus-deferred timing unless it is explicitly promised or publicly established. If the contract only says " +
-    "an operation fails clearly, accept equivalent clear failures. When the prompt expressly permits more than one " +
-    "failure phase or handling path—such as load-time rejection or evaluation-time violation—accept every permitted " +
-    "path; do not force one merely because it is easier to assert.",
-  "- Do not assume an expression or embedded language has unlisted builtins, operators, container types, mutability, " +
-    "mapping shapes, or context bindings. Test only the language surface and binding representation that the prompt or " +
-    "an existing public evaluator contract names. A useful operation such as length, indexing, mutation, or a helper " +
-    "call is not implicitly available in a restricted environment.",
-  "- Respect asynchronous and lazy contracts. If the prompt promises an eventual effect, do not require a callback to " +
-    "return a promise, immediate settlement, a particular debounce interval, construction-time validation, or one exact " +
-    "observation point. Trigger the public operation and observe or wait for the promised result at a fair boundary.",
-  "- Do not select an outcome for an underspecified mode boundary. Dry-run, preview, no-op, conflict, rollback, cache, " +
-    "preflight, and post-context-change behavior may have multiple valid outcomes unless the prompt chooses one. Test " +
-    "the guarantees that are stated, such as non-mutation or reporting, without adding a rejection, write, refresh, or " +
-    "validation policy that was not stated.",
-  "- Do not convert an incidental side effect into a requirement. For a no-op or reuse case, test the required content, " +
-    "state, preservation, or absence of duplicate effects; do not additionally require an empty file, directory, cache " +
-    "entry, history item, or other artifact to exist or not exist unless that artifact is part of the contract.",
-  "- For logs and status messages, check that the required operation or failure is reported when reporting is contractual. " +
-    "Do not demand arbitrary English words, formatting, punctuation, path spelling, message fragments, or exact output " +
-    "layout when the prompt only requires that the operation be communicated.",
-  "- A fair behavioral test must not depend on a hidden harness's mock shape, a source-level monkeypatch landing at one " +
-    "import binding, an incomplete module mock, reassigned exported state, a particular failure-injection primitive, or " +
-    "a synthetic fixture that violates real repository invariants. Patch or fake a dependency at a public lookup boundary " +
-    "that supports the repository's valid import styles, rather than assuming whether code imports a module or a symbol. " +
-    "A reasonable implementation must be able to use the repository's valid public exports and state model without " +
-    "being rejected by the setup.",
-  "- Test doubles must preserve the public interface and lifecycle needed to reach the assertion. A double for a " +
-    "collaborator must implement existing extension points, return valid shapes, and provide newly required public " +
-    "capabilities or isolate them through an explicit seam. Do not make a detached constructor, unmounted widget, " +
-    "partial collection, missing pane service, or fake cache stand in for an active production flow unless that " +
-    "detached behavior is itself contractual.",
-  "- Separate fairness from test strength. A test can be fairly scoped yet too weak if it observes a color anywhere " +
-    "instead of on the required target, checks a generic message without associating it with the operation, or verifies " +
-    "a destination representation without preserving the required identity/instant/relationship. Do not call such a " +
-    "test unfair for being permissive; treat it as insufficient coverage and require a precise public observation.",
-  "- Distinguish the semantic goal from the assertion form. If a candidate contains a fair behavioral core plus an " +
-    "unsupported value, representation, timing, API, or harness assumption, keep or rewrite the fair core and remove " +
-    "only the unsupported co-assertion. Do not discard a real gap merely because the first proposed assertion was too " +
-    "specific.",
-  "- Do not turn a harness safety limit into a product requirement. A test-level subprocess timeout, signal alarm, " +
-    "poll interval, viewport size, or platform-specific signal is only fair when the task or public performance contract " +
-    "specifies it. Use a separate generous anti-hang guard for malformed or pathological evaluation, and assert the " +
-    "required bounded/failure outcome without choosing an arbitrary wall-clock budget.",
-  "- A failed setup and a failed behavioral assertion are different evidence. If a shared fixture crashes before the " +
-    "feature is observed, or an observer renders the wrong viewport/widget after locating a valid result, the test is " +
-    "broken rather than proof of an implementation gap. If the fixture reaches the public behavior but rejects a valid " +
-    "alternative representation or integration path, it is a contract/test mismatch. Do not treat either as a fair " +
-    "behavioral requirement.",
-  "- Edge-case coverage is valuable only when the edge case is required or discoverable. Do not report 'more negative " +
-    "tests would be nice' or every conceivable malformed input. Keep a candidate only when it is distinct, publicly " +
-    "testable, concretely grounded, and could let a materially incorrect implementation pass.",
-  "- When uncertain, re-read the exact prompt sentence and the closest public source analogues. If two competent " +
-    "implementations can satisfy the contract while differing on the proposed assertion, the assertion is not fair; " +
-    "return the semantic relationship instead or drop the candidate. An empty result is correct when no candidate " +
-    "survives this standard.",
-];
-
-// Keep the same detailed rules for finders, validators, and solver-based comparison calibration.
-const GAP_FINDER_GROUND_RULES = GAP_FAIRNESS_RULES;
-const GAP_VALIDATOR_ADDITIONAL_RULES = GAP_FAIRNESS_RULES;
+// Rule text is supplied by the mode-specific `rules.md` section. Keep prompt
+// builders focused on procedure and evidence rather than duplicating policy.
 
 export function buildReviewerPrompt(role: ReviewerRole, rubric: string, fairnessRules: string): string {
   const parts = [
@@ -317,11 +185,7 @@ export function buildReviewerPrompt(role: ReviewerRole, rubric: string, fairness
   return parts.join("\n");
 }
 
-export function buildSentenceGapFinderPrompt(
-  testRubric: string,
-  _fairnessRules: string,
-  codeFiles: string[] = [],
-): string {
+export function buildSentenceGapFinderPrompt(testRubric: string, gapRules: string, codeFiles: string[] = []): string {
   const parts = [
     ...gapFinderPreamble(
       "You are an exhaustive behavioral test-gap finder. Review the task prompt sentence by sentence, finding both " +
@@ -343,9 +207,11 @@ export function buildSentenceGapFinderPrompt(
     "",
     ...GAP_FINDER_AGGRESSION,
     "",
-    ...GAP_FINDER_GROUND_RULES,
+    "The `# Gaps in tests` section of `rules.md` is authoritative for this analysis. Apply its candidate, " +
+      "T-metric, contract-first, assertion-strength, fixture, and edge-case rules to every proposed gap:",
+    gapRules,
     "",
-    "Test-coverage checklist for calibration:",
+    "Test-coverage checklist for additional calibration:",
     testRubric,
   ];
   parts.push(
@@ -367,11 +233,7 @@ export function buildSentenceGapFinderPrompt(
   return parts.join("\n");
 }
 
-export function buildPositiveGapFinderPrompt(
-  testRubric: string,
-  fairnessRules: string,
-  codeFiles: string[] = [],
-): string {
+export function buildPositiveGapFinderPrompt(testRubric: string, gapRules: string, codeFiles: string[] = []): string {
   const parts = [
     ...gapFinderPreamble(
       "You are an exhaustive, research-minded POSITIVE test-coverage analyst for a coding-agent benchmark task. " +
@@ -405,19 +267,16 @@ export function buildPositiveGapFinderPrompt(
     "5. Second-pass sweep: return to any requirement you marked 'covered' and ask whether coverage is shallow — one happy-path " +
       "assertion is not enough if other valid inputs, sequences, or combinations could still slip through.",
     ...GAP_FINDER_AGGRESSION,
-    "Do not filter yourself or self-censor for volume. A separate validator will strictly filter afterward — " +
+    "Do not filter yourself or self-censor for volume. A separate fairness reviewer will strictly filter afterward — " +
       "your job is recall on POSITIVE gaps only.",
     "",
-    ...GAP_FINDER_GROUND_RULES,
+    "The `# Gaps in tests` section of `rules.md` is authoritative for this finder:",
+    gapRules,
     "",
     "For reference, here is the checklist for the tests focus area (use it to calibrate what good coverage looks " +
       "like, not as a list of gaps to report verbatim):",
     testRubric,
   ];
-
-  if (fairnessRules) {
-    parts.push("", "Fairness methodology (context on what a fair, in-scope requirement looks like):", fairnessRules);
-  }
 
   parts.push(
     "",
@@ -432,11 +291,7 @@ export function buildPositiveGapFinderPrompt(
   return parts.join("\n");
 }
 
-export function buildNegativeGapFinderPrompt(
-  testRubric: string,
-  fairnessRules: string,
-  codeFiles: string[] = [],
-): string {
+export function buildNegativeGapFinderPrompt(testRubric: string, gapRules: string, codeFiles: string[] = []): string {
   const parts = [
     ...gapFinderPreamble(
       "You are an exhaustive, research-minded NEGATIVE test-coverage analyst for a coding-agent benchmark task. " +
@@ -472,10 +327,11 @@ export function buildNegativeGapFinderPrompt(
       "way it could still violate the prompt (wrong scope, wrong timing, wrong guard, spurious side effect, missing " +
       "rejection) and check whether the current tests would catch each one.",
     ...GAP_FINDER_AGGRESSION,
-    "Do not filter yourself or self-censor for volume. A separate validator will strictly filter afterward — " +
+    "Do not filter yourself or self-censor for volume. A separate fairness reviewer will strictly filter afterward — " +
       "your job is recall on NEGATIVE gaps only.",
     "",
-    ...GAP_FINDER_GROUND_RULES,
+    "The `# Gaps in tests` section of `rules.md` is authoritative for this finder:",
+    gapRules,
     "- Negative gaps must be grounded in an explicit or clearly implied prohibition/constraint in `agent_prompt.md` " +
       "— not generic 'more negative tests would be nice'.",
     "- A single test that asserts both the positive outcome AND that the forbidden/wrong outcome did not occur counts " +
@@ -485,10 +341,6 @@ export function buildNegativeGapFinderPrompt(
       "like, not as a list of gaps to report verbatim):",
     testRubric,
   ];
-
-  if (fairnessRules) {
-    parts.push("", "Fairness methodology (context on what a fair, in-scope requirement looks like):", fairnessRules);
-  }
 
   parts.push(
     "",
@@ -514,9 +366,9 @@ export function buildGapValidatorPrompt(
     "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
       "you cannot execute code or edit files.",
     codeFileGuidance(codeFiles),
-    "Two specialized research agents reviewed `agent_prompt.md` and the repository's source/code files sentence by " +
-      "sentence, proposing both positive (missing required-behavior) and negative (missing forbidden/wrong-behavior) " +
-      "gaps. It submitted the following per-sentence candidate report:",
+    "The first gap-finder agent reviewed `agent_prompt.md` and the repository's source/code files sentence by sentence, " +
+      "proposing both positive (missing required-behavior) and negative (missing forbidden/wrong-behavior) gaps. It " +
+      "submitted the following per-sentence candidate report for your independent fairness review:",
     "",
     JSON.stringify(statementReports, null, 2),
     "",
@@ -544,13 +396,10 @@ export function buildGapValidatorPrompt(
 
   parts.push(
     "",
-    "Fairness: keep only behavior that a user, caller, or existing public contract can observe. Do not require private " +
-      "helpers, internal state, implementation structure, call order, selectors, or incidental strings unless the task " +
-      "explicitly makes them public requirements.",
+    "Fairness vs. unfairness rules from `rules.md` are authoritative for this review. Keep only behavior that a user, " +
+      "caller, or existing public contract can observe; do not require private helpers, internal state, implementation " +
+      "structure, call order, selectors, or incidental strings unless the task explicitly makes them public requirements.",
     "",
-    ...GAP_VALIDATOR_ADDITIONAL_RULES,
-    "",
-    "Fairness methodology (use this to verify the candidates):",
     fairnessRules,
   );
 
@@ -572,115 +421,63 @@ export function buildTestAuditPrompt(
   changedCodeDiff = "",
 ): string {
   const parts = [
-    "You are a strict, skeptical post-implementation test-fairness auditor for a coding-agent benchmark task.",
+    "You are the sole, strict post-implementation test-fairness auditor for a coding-agent benchmark task.",
+    "This is a single-pass audit: there is no second validator. You must do both candidate discovery and skeptical " +
+      "independent re-checking yourself before submitting. Do not defer any doubt or validation to another agent.",
     "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
       "you cannot execute code, edit files, or modify the repository.",
-    "The task's `agent_prompt.md` is the contract, and the actual repository source/public APIs are the primary evidence " +
-      "for what an agent can discover and what a fair test can observe. Inspect the current test files, fixtures, mocks, " +
-      "and application source directly from the repository. Do not use generated representations or a reference " +
-      "implementation as the specification, and do not audit a textual diff instead of tracing assertions " +
-      "through the actual public code and fixture behavior.",
+    "The task's `agent_prompt.md` is the contract. The actual repository source, public APIs, tests, fixtures, mocks, and " +
+      "helpers are the evidence for what a fair test can observe. Do not use the reference solution, generated output, " +
+      "or a textual diff as the specification; trace each assertion through the real public code and fixture lifecycle.",
     codeFileGuidance(codeFiles),
     changedCodeDiffGuidance(changedCodeDiff),
     "",
-    "Your goal is to find actionable problems in the tests that were written or changed during the current gap-finding " +
-      "iteration, while preserving the behavioral gap they were intended to close.",
-    "Do not assume an assertion is valid because it is precise, passes the reference solution, or appears related to the " +
-      "prompt. The audit must explicitly check the validity of every assertion; finding no issue is acceptable only after " +
-      "a complete assertion-by-assertion review.",
+    "Audit every test and assertion/expectation that is present in the current repository, especially tests written or " +
+      "changed during the current gap-finding iteration. Preserve the fair behavioral gap the tests were intended to " +
+      "close, but report any unsupported requirement that could reject a prompt-compliant implementation.",
     "",
-    "Mandatory audit procedure:",
-    "1. Start from the actual repository: locate and read the relevant application source, public APIs, current test " +
-      "files, fixtures, mocks, and helpers. Use the provided code-file list as your first-pass checklist. Create an " +
-      "internal checklist and do not submit until every test and assertion/expectation in the current files has been reviewed.",
-    "2. For EACH assertion, inspect the exact prompt requirement, the actual public repository contract, the fixture " +
-      "state, and the observation target. Do not review only the test name or main happy-path assertion; trace it through " +
-      "the actual code and verify whether the assertion accepts every prompt-compliant implementation.",
-    "3. Classify every assertion internally as VALID, UNFAIR, AMBIGUOUS, or BROKEN. For every non-VALID item that " +
-      "represents unfairness, explain the concrete evidence and produce a finding. For every VALID item, actively verify why two reasonable " +
-      "implementations would both be accepted.",
-    "4. Check compound assertions separately. If one co-assertion is unsupported, retain the fair behavioral core and " +
-      "report the unsupported part instead of treating the whole test as valid.",
-    "5. Perform a final sweep of the checklist before submitting. Do not return an empty list merely because the tests " +
-      "are small, the intended behavior seems obvious, or the reference implementation satisfies them.",
-    "",
-    "For each assertion and relevant fixture, independently ask:",
-    "1. What exact prompt sentence or established public contract supports this check?",
-    "2. What can a user, caller, or public API observe?",
-    "3. Could two competent implementations satisfy the contract while differing on this assertion?",
-    "4. Does the fixture preserve repository-valid state, module shape, exports, references, and lifecycle?",
-    "5. Would the assertion catch a materially incorrect implementation rather than merely a different implementation?",
+    "Mandatory full-audit procedure — complete every step before calling the report tool:",
+    "1. Inventory the relevant test files, fixtures, mocks, observers, helpers, and application/public source. Create an " +
+      "internal checklist of every test, setup path, assertion, snapshot, matcher, count, ordering check, error check, " +
+      "and implicit observation; do not stop after reviewing test names or the happy path.",
+    "2. For EACH assertion, identify the exact prompt sentence or established public contract that supports it, the public " +
+      "observation it makes, the fixture state and lifecycle that reaches it, and the materially wrong behavior it is meant " +
+      "to catch. Trace compound assertions and helper-generated expectations separately.",
+    "3. Apply the Fairness vs. unfairness rules below to every assertion. Internally classify each item as VALID, " +
+      "UNFAIR, AMBIGUOUS, or BROKEN. For VALID items, actively ask why two competent implementations using different " +
+      "public integration paths would both pass. For every non-VALID item, record concrete evidence before deciding to " +
+      "report it.",
+    "4. Check the five core questions explicitly: is the check grounded in the prompt/public contract; is it observable by " +
+      "a user, caller, or public API; could two compliant implementations differ; does the fixture preserve valid exports, " +
+      "state invariants, and lifecycle paths; and does the assertion catch wrong behavior rather than merely a different " +
+      "representation?",
+    "5. Inspect mocks and setup for hidden unfairness: incomplete module shape, reassigned exported state, stale or detached " +
+      "objects, invalid outer documents, wrong import-binding patch, missing lifecycle capability, unrelated malformed data, " +
+      "or an observer that fails before the requested behavior is reached. Classify setup failures as broken fixtures, not " +
+      "implementation failures.",
+    "6. Split mixed assertions. Keep the fair semantic core and report only the unsupported value, representation, timing, " +
+      "API, call path, message, count, ordering, selector, or harness assumption. Do not call a fair but weak assertion " +
+      "unfair merely because it could provide stronger coverage; this audit reports unfairness, ambiguity, and broken setup.",
+    "7. Perform a final assertion-by-assertion sweep, deduplicate findings, and challenge every proposed finding once more. " +
+      "An empty list is correct only after this complete review, not because the tests are small or the reference solution " +
+      "passes them.",
     "",
     "Report only concrete, actionable findings in these categories:",
-    "- unfair-assertion: a valid implementation could fail because the test requires an undocumented API, exact " +
-      "representation, value, timing, structure, call path, message, ordering, count, or harness behavior.",
-    "- prompt-ambiguity: the prompt does not select one of multiple reasonable behaviors, but the test forces one. " +
-      "Recommend clarifying the prompt or relaxing the test; never choose an interpretation from a reference implementation.",
+    "- unfair-assertion: a prompt-compliant implementation could fail because the test requires an undocumented API, " +
+      "private structure, exact representation/value/timing/order/count/message, one call path, or harness behavior.",
+    "- prompt-ambiguity: the prompt leaves multiple reasonable outcomes or phases open but the test forces one; recommend " +
+      "clarifying the prompt or accepting the alternatives, never choosing from the reference implementation.",
     "- broken-fixture: setup, mocks, or observers remove a valid repository path or fail before the public behavior is " +
-      "reached. Repair the fixture rather than imposing its limitation on implementations.",
+      "reached; recommend repairing the fixture while preserving the intended behavioral check.",
     "",
-    "A test can contain a fair behavioral core and an unfair co-assertion. Preserve the fair core and recommend " +
-      "removing or relaxing only the unsupported part. Do not report a merely permissive but fair assertion; this mode " +
-      "is only for concrete unfairness in the test or its fixture.",
-    "Do not report style preferences, optional coverage, speculative edge cases, or requirements invented from intuition. " +
-      "Do not report a weak or permissive assertion merely because it could be stronger; this mode is only for " +
-      "unfairness. Report it only when the weakness itself forces an unsupported requirement or otherwise rejects a " +
-      "prompt-compliant implementation. When the prompt is genuinely vague, do not silently turn the reference " +
-      "solution into a requirement.",
-    "",
-    "Fair and unfair test guidance (from `rules.md`):",
+    "Fair and unfair rules from `rules.md` — authoritative for this audit:",
     fairnessRules,
     "",
-    "For every finding, provide its category, the test name or short identifier, the problem, concrete evidence, the " +
-      "required behavior that must remain covered, and a fair repair recommendation. If the tests are fair, submit an " +
-      "empty list.",
+    "Do not report optional coverage, style preferences, speculative edge cases, or a merely permissive/weak fair " +
+      "assertion. For each retained finding provide the category, test name or short identifier, concrete problem and " +
+      "evidence, required behavior that must remain covered, and a fair repair recommendation. If all tests survive the " +
+      "fairness screen, submit an empty list.",
     `When you are done, call the \`${TEST_AUDIT_TOOL_NAME}\` tool exactly once with the complete final list. ` +
-      "That tool call is your only way to report a result.",
-  ];
-  return parts.join("\n");
-}
-
-export function buildTestAuditValidatorPrompt(
-  findings: TestAuditFinding[],
-  _testRubric: string,
-  fairnessRules: string,
-  codeFiles: string[] = [],
-  changedCodeDiff = "",
-): string {
-  const parts = [
-    "You are an independent, strict validator for a post-implementation test-fairness audit.",
-    "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
-      "you cannot execute code, edit files, or modify the repository.",
-    "The first audit agent submitted the following candidate findings:",
-    "",
-    JSON.stringify(findings, null, 2),
-    "",
-    "Independently start with the actual repository source, public APIs, current test files, fixtures, and mocks. Use " +
-      "the provided code-file list as your first-pass checklist and trace every candidate through the actual code. Do not " +
-      "trust candidate wording, generated representations, or a reference implementation as the specification.",
-    codeFileGuidance(codeFiles),
-    changedCodeDiffGuidance(changedCodeDiff),
-    "Keep a finding only when it is all of the following:",
-    "1. Grounded in an explicit prompt requirement or an unambiguous existing public repository contract.",
-    "2. A real issue in the current test or fixture, not a hypothetical improvement or a disagreement with style.",
-    "3. Fairly classified as an unfair assertion, prompt ambiguity, or broken fixture.",
-    "4. Actionable through a public semantic repair, while preserving the required behavior or gap.",
-    "5. Distinct from the other retained findings and supported by concrete evidence.",
-    "",
-    "Drop findings that merely ask for more coverage, complain that a fair assertion is weak, rely on " +
-      "private/reference-implementation structure, or infer an unstated value, representation, timing, count, ordering, " +
-      "API, error form, or harness shape. If a finding has a " +
-      "fair behavioral core plus one unsupported co-assertion, retain it with a recommendation to remove only that " +
-      "co-assertion. If a prompt is genuinely ambiguous, recommend clarifying the prompt or relaxing the test rather " +
-      "than choosing an interpretation from a reference implementation.",
-    "",
-    "Fair and unfair test guidance (from `rules.md`):",
-    fairnessRules,
-    "",
-    "Return only the validated, deduplicated findings. Preserve the test name and required behavior, and reword any " +
-      "finding so its recommendation is precise without adding an implementation requirement. An empty list is correct " +
-      "when no candidate survives independent review.",
-    `When you are done, call the \`${TEST_AUDIT_VALIDATOR_TOOL_NAME}\` tool exactly once with the final list. ` +
       "That tool call is your only way to report a result.",
   ];
   return parts.join("\n");
@@ -692,101 +489,60 @@ export function buildSolutionAuditPrompt(
   changedCodeDiff = "",
 ): string {
   const parts = [
-    "You are a strict, skeptical post-implementation solution-quality auditor for a coding-agent benchmark task.",
+    "You are the sole, strict post-implementation solution-quality auditor for a coding-agent benchmark task.",
+    "This is a single-pass audit: there is no second validator. You must discover candidate defects and then skeptically " +
+      "re-check and deduplicate them yourself before submitting. Do not defer validation to another agent.",
     "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
       "you cannot execute code, edit files, or modify the repository.",
-    "This mode is a focused code-quality review, not a full repository or task-completeness review. The changed code " +
-      "file list below is the authoritative scope. Read `agent_prompt.md` for the contract, but do not inspect " +
-      "solution/test patch files, other Markdown, shell scripts, Dockerfiles, generated files, lockfiles, or unrelated " +
-      "areas. Do not run a sentence-by-sentence prompt audit here.",
+    "The task contract is `agent_prompt.md`. The changed code-file list and in-memory changed-code diff below are the " +
+      "authoritative implementation scope. Inspect the changed source and directly relevant public code/analogues only. " +
+      "Do not inspect `solution.patch`, `test.patch`, other patches, unrelated Markdown, shell scripts, Dockerfiles, " +
+      "generated files, lockfiles, or unrelated repository areas.",
     solutionAuditCodeFileGuidance(codeFiles),
     changedCodeDiffGuidance(changedCodeDiff),
     "",
-    "Ask whether the changed code is good quality under the supplied solution-quality rules. Inspect each changed code " +
-      "file, then only the directly relevant imported/extended code and one or two closest code analogues when needed. " +
-      "Report concrete defects in the implementation, not hypothetical improvements or test-quality concerns.",
+    "Use the `# Gaps in solution` section of `rules.md` below as the authoritative solution-gap contract. Report " +
+      "concrete implementation defects, not test-quality complaints, hypothetical hardening, reference-only differences, " +
+      "or personal style preferences.",
     "",
-    "Review procedure:",
-    "1. Read every listed changed code file completely enough to understand its changed symbols, control flow, state, " +
-      "error handling, and public boundaries.",
-    "2. Compare those changed areas with one or two closest code analogues for repository conventions: layering, naming, " +
-      "logging/errors, resource cleanup, async/state handling, and public extension points.",
-    "3. Check for concrete quality defects: missing or unsafe behavior visible in the changed code, regressions caused by " +
-      "the change, inconsistent paths, dead or unreachable code, duplicated semantics, mutable global leakage, avoidable " +
-      "defensive scaffolding, and unrelated behavior changes.",
-    "4. Do not infer requirements from files you were told not to inspect, and do not treat the reference solution as the " +
-      "only valid implementation. Return an empty list when the changed code is good quality and no concrete defect is " +
-      "supported by the inspected code and the supplied rules.",
-
+    "Mandatory full-audit procedure — complete every step before calling the report tool:",
+    "1. Read `agent_prompt.md` and every listed changed code file completely enough to understand all changed symbols, " +
+      "control flow, public boundaries, state transitions, error handling, cleanup, and compatibility behavior.",
+    "2. Map each explicit requirement, public invariant, prohibition, supported path, and failure guarantee to the changed " +
+      "code. Check for missing requirements, wrong public results/state, regressions, inconsistent equivalent entry points, " +
+      "unsafe partial failure/cancellation/rollback/concurrency/resource behavior, dead or unreachable code, and unrelated " +
+      "changes.",
+    "3. Compare changed areas with one or two closest real repository analogues for layering, naming, exports, logging and " +
+      "errors, persistence, async/state handling, cleanup, and public extension points. Treat a convention as evidence " +
+      "only when it is directly relevant and unambiguous; do not prescribe one equivalent architecture.",
+    "4. For every candidate, cite the exact prompt/public contract or established convention, the concrete changed-code " +
+      "evidence, the observable consequence, and why it is a real defect rather than a different valid implementation. " +
+      "Use the narrowest S1/S2/S3 quality classification implied by the rules, and allow combined metrics when justified.",
+    "5. Perform an adversarial self-review: imagine a compliant caller, invalid input, later-phase failure, repeated or " +
+      "parallel invocation, fresh process/backend, and every equivalent public path. Re-read every candidate and drop " +
+      "anything speculative, duplicate, unrelated to the inspected scope, or unsupported by evidence.",
+    "6. Return an empty list when the changed code is good quality after this complete review. Do not use the reference " +
+      "solution or visible tests as a completeness oracle.",
     "",
-    "Use only these finding categories:",
-    "- missing-requirement: the implementation does not meet an explicit prompt requirement or required public behavior.",
-    "- regression: the change breaks existing behavior, compatibility, defaults, or an unrelated scope.",
-    "- architecture: the implementation clearly violates an established repository pattern or public extension point, " +
-      "or introduces an avoidable monolithic/duplicated design that affects correctness or maintainability.",
-    "- unsafe-failure: invalid input, cancellation, partial failure, persistence, rollback, concurrency, or cleanup can " +
-      "leave invalid, destructive, leaked, or inconsistent state contrary to the contract.",
-    "- inconsistent-path: equivalent public entry points, representations, modes, or lifecycle paths implement different " +
-      "semantics without a prompt-supported reason.",
-    "- dead-code: added or changed code is provably unused, unreachable, or leftover scaffolding that materially violates " +
-      "the solution-quality contract.",
-    "- unrelated-change: the patch changes behavior outside the task without a contract or regression reason.",
+    "Use only these finding categories (include S1/S2/S3 in the evidence or subject when useful):",
+    "- missing-requirement: the implementation misses an explicit prompt requirement or required public behavior (usually S1).",
+    "- regression: the change breaks existing behavior, compatibility, defaults, or an unrelated public scope (S1/S3).",
+    "- architecture: the implementation violates a clear repository pattern/public extension point or adds avoidable " +
+      "duplication/coupling that harms correctness or maintainability (S3).",
+    "- unsafe-failure: invalid input, cancellation, partial failure, persistence, rollback, concurrency, or cleanup leaves " +
+      "invalid, destructive, leaked, or inconsistent state contrary to the contract (S2, possibly S1).",
+    "- inconsistent-path: equivalent public entry points, representations, modes, or lifecycle paths have different " +
+      "semantics without a prompt-supported reason (S1/S2).",
+    "- dead-code: grep/read proves added or changed code is unused, unreachable, or leftover scaffolding (S3).",
+    "- unrelated-change: behavior outside the task changed without a contract or regression reason (S3).",
     "",
-    "The supplied solution-quality rules are authoritative for this code-quality review:",
+    "Solution-gap rules from `rules.md` — authoritative for this audit:",
     solutionRules,
     "",
-    "For every finding, provide its category, a short subject identifier, the concrete code-quality problem, evidence " +
-      "from the inspected files/analogues, the quality property that must be preserved, and a focused repair recommendation. " +
-      "Do not prescribe private names or one equivalent implementation when the inspected code leaves alternatives open.",
+    "For every retained finding provide its category, short subject identifier, concrete problem, evidence from the " +
+      "inspected code/analogues and prompt, required behavior or quality property to preserve, and a focused repair " +
+      "recommendation. Do not prescribe a private name or one equivalent implementation when alternatives remain valid.",
     `When you are done, call the \`${SOLUTION_AUDIT_TOOL_NAME}\` tool exactly once with the complete candidate list. ` +
-      "That tool call is your only way to report a result.",
-  ];
-  return parts.join("\n");
-}
-
-export function buildSolutionAuditValidatorPrompt(
-  findings: SolutionAuditFinding[],
-  solutionRules: string,
-  codeFiles: string[] = [],
-  changedCodeDiff = "",
-): string {
-  const parts = [
-    "You are an independent, strict validator for a post-implementation solution-quality audit.",
-    "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
-      "you cannot execute code, edit files, or modify the repository.",
-    "The first solution auditor submitted the following candidate findings:",
-    "",
-    JSON.stringify(findings, null, 2),
-    "",
-    "Independently read `agent_prompt.md`, then inspect only the changed code files and the directly relevant " +
-      "code/analogues needed to validate the candidates. Do not inspect `solution.patch`, `test.patch`, any other " +
-      "`.patch`, Markdown other than `agent_prompt.md`, or `.sh` file, Dockerfiles, generated files, lockfiles, or " +
-      "unrelated repository areas. Do not " +
-      "trust candidate wording or a reference-only structure.",
-    solutionAuditCodeFileGuidance(codeFiles),
-    changedCodeDiffGuidance(changedCodeDiff),
-    "",
-    "Keep a finding only when it is all of the following:",
-    "1. Grounded in the inspected changed code, a directly relevant public contract, or a clear convention visible in the " +
-      "inspected code analogues.",
-    "2. A real defect or solution-quality violation in the current implementation, not a hypothetical improvement or " +
-      "personal style preference.",
-    "3. In scope for solution quality, not a test fairness, test coverage, or prompt-writing complaint.",
-    "4. Concrete, actionable, and supported by evidence from the actual code and relevant analogues.",
-    "5. Distinct from the other retained findings and classified with the narrowest valid category.",
-    "",
-    "Drop findings that merely prefer the reference implementation, private names, one file layout, one algorithm, " +
-      "one error wording, or one equivalent architecture. Also drop optional hardening, speculative edge cases, and " +
-      "dead-code claims unless grep/read confirms the code is truly unused or unreachable. Preserve a finding when a " +
-      "fair implementation-independent contract defect remains, even if the candidate wording needs to be rewritten.",
-    "",
-    "The solution-quality rules from `rules.md` are authoritative for this validation:",
-    solutionRules,
-    "",
-    "Return only the validated, deduplicated findings. Preserve the subject and required behavior, and reword the " +
-      "recommendation so it fixes the defect without adding an implementation requirement. An empty list is correct " +
-      "when no candidate survives independent review.",
-    `When you are done, call the \`${SOLUTION_AUDIT_VALIDATOR_TOOL_NAME}\` tool exactly once with the final list. ` +
       "That tool call is your only way to report a result.",
   ];
   return parts.join("\n");
@@ -845,6 +601,7 @@ function formatSolverStatusLine(result: SolverRunResult): string {
 export function buildSolverComparisonPrompt(
   solverResults: SolverRunResult[],
   testRubric: string,
+  gapRules: string,
   fairnessRules: string,
 ): string {
   const parts = [
@@ -884,7 +641,8 @@ export function buildSolverComparisonPrompt(
     "5. Treat multiple solvers converging on the same divergent-but-passing shortcut as stronger evidence of a " +
       "real gap, not proof it's acceptable — the tests are what's under scrutiny, not majority solver behavior.",
     "",
-    ...GAP_FINDER_GROUND_RULES,
+    "The `# Gaps in tests` section of `rules.md` is authoritative for candidate gaps:",
+    gapRules,
     "- Every gap must be evidenced by an actual, cited solver diff and a contrasting reference behavior. For a " +
       "solver that failed the full suite, also cite its test output showing that the relevant behavior already passed " +
       "or is unrelated to the failure. Cite the prompt sentence that makes the behavioral difference required; do " +
@@ -897,11 +655,10 @@ export function buildSolverComparisonPrompt(
     "For reference, here is the checklist for the tests focus area (use it to calibrate what good coverage looks " +
       "like, not as a list of gaps to report verbatim):",
     testRubric,
+    "",
+    "Apply the `# Fairness vs. unfairness` rules from `rules.md` before retaining any candidate:",
+    fairnessRules,
   ];
-
-  if (fairnessRules) {
-    parts.push("", "Fairness methodology (context on what a fair, in-scope requirement looks like):", fairnessRules);
-  }
 
   parts.push(
     "",

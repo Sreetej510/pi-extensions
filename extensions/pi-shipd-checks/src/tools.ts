@@ -19,9 +19,7 @@ export const REPORT_TOOL_NAME = "submit_review_report";
 export const GAP_FINDER_TOOL_NAME = "submit_test_gap_candidates";
 export const GAP_VALIDATOR_TOOL_NAME = "submit_filtered_test_gaps";
 export const TEST_AUDIT_TOOL_NAME = "submit_test_audit_findings";
-export const TEST_AUDIT_VALIDATOR_TOOL_NAME = "submit_filtered_test_audit_findings";
 export const SOLUTION_AUDIT_TOOL_NAME = "submit_solution_audit_findings";
-export const SOLUTION_AUDIT_VALIDATOR_TOOL_NAME = "submit_filtered_solution_audit_findings";
 export const SOLVER_GAP_TOOL_NAME = "submit_solver_gaps";
 
 // ── Reviewer report tool ─────────────────────────────────────────────
@@ -184,8 +182,8 @@ const testAuditFindingParams = Type.Object({
 const testAuditFindingsParams = Type.Object({
   findings: Type.Array(testAuditFindingParams, {
     description:
-      "Only confirmed, actionable test-fairness, ambiguity, or fixture findings. Use an empty array " +
-      "when the current tests contain no confirmed unfairness.",
+      "Only confirmed, actionable test-fairness, ambiguity, or fixture findings from the complete single-pass audit. " +
+      "Use an empty array when the current tests contain no confirmed unfairness.",
   }),
 });
 
@@ -194,10 +192,10 @@ export function createTestAuditTool(capture: {
 }): ToolDefinition<typeof testAuditFindingsParams> {
   return {
     name: TEST_AUDIT_TOOL_NAME,
-    label: "Submit Test Audit Candidates",
+    label: "Submit Test Audit Findings",
     description:
-      "Submit candidate findings from the first post-implementation test audit phase. This is the ONLY way to " +
-      "report your result — call it exactly once, as your last action. Use an empty list when no actionable issue " +
+      "Submit the complete result from the single post-implementation test-fairness audit. This is the ONLY way " +
+      "to report your result — call it exactly once, as your last action. Use an empty list when no actionable issue " +
       "is found.",
     parameters: testAuditFindingsParams,
     async execute(_toolCallId, params) {
@@ -205,28 +203,6 @@ export function createTestAuditTool(capture: {
       capture.findings = findings;
       return {
         content: [{ type: "text", text: `Recorded ${findings.length} test-audit candidate(s)` }],
-        details: undefined,
-      };
-    },
-  };
-}
-
-export function createTestAuditValidatorTool(capture: {
-  findings?: TestAuditFinding[];
-}): ToolDefinition<typeof testAuditFindingsParams> {
-  return {
-    name: TEST_AUDIT_VALIDATOR_TOOL_NAME,
-    label: "Submit Validated Test Audit Findings",
-    description:
-      "Submit the final, independently validated findings from the post-implementation test audit. This is the " +
-      "ONLY way to report your result — call it exactly once, as your last action. Use an empty list when no " +
-      "candidate survives strict review.",
-    parameters: testAuditFindingsParams,
-    async execute(_toolCallId, params) {
-      const findings = params.findings ?? [];
-      capture.findings = findings;
-      return {
-        content: [{ type: "text", text: `Recorded ${findings.length} validated test-audit finding(s)` }],
         details: undefined,
       };
     },
@@ -278,37 +254,17 @@ export function createSolutionAuditTool(capture: {
 }): ToolDefinition<typeof solutionAuditFindingsParams> {
   return {
     name: SOLUTION_AUDIT_TOOL_NAME,
-    label: "Submit Solution Audit Candidates",
+    label: "Submit Solution Audit Findings",
     description:
-      "Submit candidate findings from the first solution-quality audit phase. This is the ONLY way to report your " +
-      "result — call it exactly once, as your last action. Use an empty list when no actionable issue is found.",
+      "Submit the complete result from the single post-implementation solution-quality audit. This is the ONLY " +
+      "way to report your result — call it exactly once, as your last action. Use an empty list when no actionable " +
+      "issue is found.",
     parameters: solutionAuditFindingsParams,
     async execute(_toolCallId, params) {
       const findings = params.findings ?? [];
       capture.findings = findings;
       return {
-        content: [{ type: "text", text: `Recorded ${findings.length} solution-audit candidate(s)` }],
-        details: undefined,
-      };
-    },
-  };
-}
-
-export function createSolutionAuditValidatorTool(capture: {
-  findings?: SolutionAuditFinding[];
-}): ToolDefinition<typeof solutionAuditFindingsParams> {
-  return {
-    name: SOLUTION_AUDIT_VALIDATOR_TOOL_NAME,
-    label: "Submit Validated Solution Audit Findings",
-    description:
-      "Submit the final, independently validated solution-quality findings. This is the ONLY way to report your " +
-      "result — call it exactly once, as your last action. Use an empty list when no candidate survives strict review.",
-    parameters: solutionAuditFindingsParams,
-    async execute(_toolCallId, params) {
-      const findings = params.findings ?? [];
-      capture.findings = findings;
-      return {
-        content: [{ type: "text", text: `Recorded ${findings.length} validated solution-audit finding(s)` }],
+        content: [{ type: "text", text: `Recorded ${findings.length} solution-audit finding(s)` }],
         details: undefined,
       };
     },
