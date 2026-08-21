@@ -14,27 +14,21 @@ import {
   buildGapValidatorPrompt,
   buildSentenceGapFinderPrompt,
   buildSolutionAuditPrompt,
-  buildSolutionAuditValidatorPrompt,
   buildSolverComparisonPrompt,
   buildSolverPrompt,
   buildTestAuditPrompt,
-  buildTestAuditValidatorPrompt,
 } from "./prompts.js";
 import {
   createGapFinderTool,
   createGapValidatorTool,
   createSolutionAuditTool,
-  createSolutionAuditValidatorTool,
   createSolverGapTool,
   createTestAuditTool,
-  createTestAuditValidatorTool,
   GAP_FINDER_TOOL_NAME,
   GAP_VALIDATOR_TOOL_NAME,
   SOLUTION_AUDIT_TOOL_NAME,
-  SOLUTION_AUDIT_VALIDATOR_TOOL_NAME,
   SOLVER_GAP_TOOL_NAME,
   TEST_AUDIT_TOOL_NAME,
-  TEST_AUDIT_VALIDATOR_TOOL_NAME,
 } from "./tools.js";
 import type {
   GapStageResult,
@@ -122,7 +116,7 @@ export async function runGapFinder(opts: {
   model: unknown;
   thinkingLevel: ThinkingLevel;
   testRubric: string;
-  fairnessRules: string;
+  gapRules: string;
   codeFiles: string[];
   timeoutMinutes: number;
   cancelSignal: AbortSignal;
@@ -143,7 +137,7 @@ export async function runGapFinder(opts: {
 
     const outcome = await raceAgentTurn(
       async () => {
-        await session?.prompt(buildSentenceGapFinderPrompt(opts.testRubric, opts.fairnessRules, opts.codeFiles));
+        await session?.prompt(buildSentenceGapFinderPrompt(opts.testRubric, opts.gapRules, opts.codeFiles));
       },
       opts.cancelSignal,
       opts.timeoutMinutes * 60 * 1000,
@@ -207,6 +201,7 @@ export async function runSolverComparisonReviewer(opts: {
   thinkingLevel: ThinkingLevel;
   solverResults: SolverRunResult[];
   testRubric: string;
+  gapRules: string;
   fairnessRules: string;
   cancelSignal: AbortSignal;
 }): Promise<GapStageResult<SolverGap>> {
@@ -225,7 +220,9 @@ export async function runSolverComparisonReviewer(opts: {
     }));
 
     const outcome = await raceAgentTurn(async () => {
-      await session?.prompt(buildSolverComparisonPrompt(opts.solverResults, opts.testRubric, opts.fairnessRules));
+      await session?.prompt(
+        buildSolverComparisonPrompt(opts.solverResults, opts.testRubric, opts.gapRules, opts.fairnessRules),
+      );
     }, opts.cancelSignal);
     if (outcome !== "done") {
       await session.abort();
@@ -335,62 +332,7 @@ export async function runTestAudit(opts: {
   return { status: "ok", findings: capture.findings };
 }
 
-/** Independently validates the first audit agent's candidates before they reach the caller. */
-export async function runTestAuditValidator(opts: {
-  tempDir: string;
-  model: unknown;
-  thinkingLevel: ThinkingLevel;
-  testRubric: string;
-  fairnessRules: string;
-  codeFiles: string[];
-  changedCodeDiff: string;
-  findings: TestAuditFinding[];
-  timeoutMinutes: number;
-  cancelSignal: AbortSignal;
-}): Promise<TestAuditStageResult> {
-  const capture: { findings?: TestAuditFinding[] } = {};
-  const model = asSessionModel(opts.model);
-  let session: AgentSession | undefined;
-
-  try {
-    ({ session } = await createAgentSession({
-      cwd: opts.tempDir,
-      model,
-      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
-      tools: [...REVIEWER_TOOLS, TEST_AUDIT_VALIDATOR_TOOL_NAME],
-      customTools: [createTestAuditValidatorTool(capture)],
-      sessionManager: SessionManager.inMemory(),
-    }));
-
-    const outcome = await raceAgentTurn(
-      async () => {
-        await session?.prompt(
-          buildTestAuditValidatorPrompt(
-            opts.findings,
-            opts.testRubric,
-            opts.fairnessRules,
-            opts.codeFiles,
-            opts.changedCodeDiff,
-          ),
-        );
-      },
-      opts.cancelSignal,
-      opts.timeoutMinutes * 60 * 1000,
-    );
-    if (outcome !== "done") {
-      await session.abort();
-      return { status: outcome, findings: [] };
-    }
-  } catch {
-    return { status: "error", findings: [] };
-  } finally {
-    await disposeAgentSession(session);
-  }
-  if (!capture.findings) return { status: "noSubmission", findings: [] };
-  return { status: "ok", findings: capture.findings };
-}
-
-/** Runs the first read-only solution-quality audit phase. */
+/** Runs one read-only solution-quality audit over the changed implementation. */
 export async function runSolutionAudit(opts: {
   tempDir: string;
   model: unknown;
@@ -418,54 +360,6 @@ export async function runSolutionAudit(opts: {
     const outcome = await raceAgentTurn(
       async () => {
         await session?.prompt(buildSolutionAuditPrompt(opts.solutionRules, opts.codeFiles, opts.changedCodeDiff));
-      },
-      opts.cancelSignal,
-      opts.timeoutMinutes * 60 * 1000,
-    );
-    if (outcome !== "done") {
-      await session.abort();
-      return { status: outcome, findings: [] };
-    }
-  } catch {
-    return { status: "error", findings: [] };
-  } finally {
-    await disposeAgentSession(session);
-  }
-  if (!capture.findings) return { status: "noSubmission", findings: [] };
-  return { status: "ok", findings: capture.findings };
-}
-
-/** Independently validates solution-audit candidates before they reach the caller. */
-export async function runSolutionAuditValidator(opts: {
-  tempDir: string;
-  model: unknown;
-  thinkingLevel: ThinkingLevel;
-  solutionRules: string;
-  codeFiles: string[];
-  changedCodeDiff: string;
-  findings: SolutionAuditFinding[];
-  timeoutMinutes: number;
-  cancelSignal: AbortSignal;
-}): Promise<SolutionAuditStageResult> {
-  const capture: { findings?: SolutionAuditFinding[] } = {};
-  const model = asSessionModel(opts.model);
-  let session: AgentSession | undefined;
-
-  try {
-    ({ session } = await createAgentSession({
-      cwd: opts.tempDir,
-      model,
-      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
-      tools: [...REVIEWER_TOOLS, SOLUTION_AUDIT_VALIDATOR_TOOL_NAME],
-      customTools: [createSolutionAuditValidatorTool(capture)],
-      sessionManager: SessionManager.inMemory(),
-    }));
-
-    const outcome = await raceAgentTurn(
-      async () => {
-        await session?.prompt(
-          buildSolutionAuditValidatorPrompt(opts.findings, opts.solutionRules, opts.codeFiles, opts.changedCodeDiff),
-        );
       },
       opts.cancelSignal,
       opts.timeoutMinutes * 60 * 1000,

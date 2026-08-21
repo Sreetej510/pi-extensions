@@ -25,14 +25,14 @@ For `/checks`:
 The agent-callable `analyze_task_tests` tool provides the separate test-analysis workflow:
 
 - `mode: "gaps"` (default) finds and validates sentence-by-sentence behavioral coverage gaps.
-- `mode: "test-audit"` runs an Auditor followed by an independent validator over implemented tests,
-  filtering unfair assertions, prompt ambiguity, and broken fixtures. Auditors receive the in-memory
-  HEAD diff for changed code files so they can distinguish old and new behavior.
-- `mode: "solution-audit"` runs the same Auditor/validator workflow over the implementation,
-  using the `# Solution implementation` rules from `rules.md` and the same in-memory changed-code diff.
+- `mode: "test-audit"` runs one exhaustive Auditor over implemented tests, using the
+  `# Fairness vs. unfairness` rules to classify unfair assertions, prompt ambiguity, and broken fixtures.
+- `mode: "solution-audit"` runs one exhaustive Auditor over the implementation, using the
+  `# Gaps in solution` rules and the same in-memory changed-code diff.
 
-All modes are read-only. Invoke the tool only when the user asks, never in parallel, and run
-repeated requests sequentially after applying each result.
+All modes are read-only. Gap analysis uses two agents: a gap finder followed by a fairness reviewer.
+Each audit uses one agent to keep the tool affordable. Invoke the tool only when the user asks, never in
+parallel, and run repeated requests sequentially after applying each result.
 
 ## Commands
 

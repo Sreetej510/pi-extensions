@@ -13,7 +13,7 @@
  *   3. (/checks --solver-gap-finder) Run TDD solver agents and compare their
  *      passing implementations to the reference behavior.
  *   4. (analyze_task_tests) Run the requested read-only gap, test-audit, or
- *      solution-audit mode; audit modes use an Auditor plus an independent validator.
+ *      solution-audit mode; gaps use a finder plus fairness reviewer, while each audit uses one agent.
  *   5. Post a one-line chat message and merge solver results into
  *      shipd_report.json in the project root.
  *
@@ -28,7 +28,7 @@
  * File layout:
  *   index.ts     extension entry point (this file) — renderer, shortcut, command registration
  *   command.ts   /checks command: arg parsing, --config flow, run orchestration
- *   agents.ts     spawns/races the reviewer + gap-finder/validator agent sessions
+ *   agents.ts     spawns/races the reviewer + gap-finder/reviewer agent sessions
  *   prompts.ts    all prompt text sent to those agents
  *   tools.ts      custom tools agents call to submit structured results
  *   rubric.ts     embedded guidelines/fairness rubric text + section loaders

@@ -34,7 +34,7 @@ import { runFargateSolverGapFinder } from "./fargate-runner.js";
 import { snapshotGitHead } from "./git.js";
 import { PROGRESS_WIDGET_KEY, renderProgressLines } from "./progress.js";
 import { buildRunSummary, formatLocalTimestamp, loadExistingReport, mergeReport, REQUIRED_FILES } from "./report.js";
-import { loadFairnessRules, loadTestGuidelines } from "./rubric.js";
+import { loadFairnessRules, loadGapRules, loadTestGuidelines } from "./rubric.js";
 import { writeSolverSolutionsToDisk } from "./solvergap.js";
 import { endReview, isReviewInProgress, startReview } from "./state.js";
 import { analyzeToolSettingChanged } from "./tool-sync.js";
@@ -663,6 +663,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         if (abort.signal.aborted) return;
         for (const file of REQUIRED_FILES) copyFileSync(join(ctx.cwd, file), join(dir, file));
         const testRubric = loadTestGuidelines();
+        const gapRules = loadGapRules();
         const fairnessRules = loadFairnessRules();
         let completed = 0;
         let solverResults: SolverRunResult[] = [];
@@ -725,6 +726,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
               thinkingLevel: config.thinkingLevel,
               solverResults,
               testRubric,
+              gapRules,
               fairnessRules,
               cancelSignal: abort.signal,
             });
