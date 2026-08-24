@@ -182,7 +182,7 @@ const testAuditFindingParams = Type.Object({
 const testAuditFindingsParams = Type.Object({
   findings: Type.Array(testAuditFindingParams, {
     description:
-      "Only confirmed, actionable test-fairness, ambiguity, or fixture findings from the complete single-pass audit. " +
+      "Only confirmed, actionable test-fairness, ambiguity, or fixture findings from the complete audit. " +
       "Use an empty array when the current tests contain no confirmed unfairness.",
   }),
 });

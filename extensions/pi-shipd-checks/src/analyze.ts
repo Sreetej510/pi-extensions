@@ -183,7 +183,7 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
 
       if (mode === "test-audit") {
         onUpdate?.({
-          content: [{ type: "text", text: "Auditing implemented tests for fairness (single pass)..." }],
+          content: [{ type: "text", text: "Auditing implemented tests for fairness..." }],
           details: {},
         });
         const audit = await runTestAudit(base);
@@ -207,7 +207,7 @@ export function registerAnalyzeGapsTool(pi: ExtensionAPI) {
 
       if (mode === "solution-audit") {
         onUpdate?.({
-          content: [{ type: "text", text: "Auditing solution quality (single pass)..." }],
+          content: [{ type: "text", text: "Auditing solution quality..." }],
           details: {},
         });
         const audit = await runSolutionAudit(base);
