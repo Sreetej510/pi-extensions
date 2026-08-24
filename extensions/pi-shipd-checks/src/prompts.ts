@@ -422,8 +422,8 @@ export function buildTestAuditPrompt(
 ): string {
   const parts = [
     "You are the sole, strict post-implementation test-fairness auditor for a coding-agent benchmark task.",
-    "This is a single-pass audit: there is no second validator. You must do both candidate discovery and skeptical " +
-      "independent re-checking yourself before submitting. Do not defer any doubt or validation to another agent.",
+    "You must do both candidate discovery and skeptical independent re-checking yourself before submitting. Do not defer " +
+      "any doubt or validation to another agent.",
     "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
       "you cannot execute code, edit files, or modify the repository.",
     "The task's `agent_prompt.md` is the contract. The actual repository source, public APIs, tests, fixtures, mocks, and " +
@@ -490,8 +490,8 @@ export function buildSolutionAuditPrompt(
 ): string {
   const parts = [
     "You are the sole, strict post-implementation solution-quality auditor for a coding-agent benchmark task.",
-    "This is a single-pass audit: there is no second validator. You must discover candidate defects and then skeptically " +
-      "re-check and deduplicate them yourself before submitting. Do not defer validation to another agent.",
+    "You must discover candidate defects and then skeptically re-check and deduplicate them yourself before submitting. " +
+      "Do not defer validation to another agent.",
     "You are working inside the actual repository in read-only mode. You have access to read/grep/find/ls tools only — " +
       "you cannot execute code, edit files, or modify the repository.",
     "The task contract is `agent_prompt.md`. The changed code-file list and in-memory changed-code diff below are the " +
