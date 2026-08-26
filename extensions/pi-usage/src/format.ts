@@ -29,9 +29,9 @@ export function formatCodexUsageReport(report: CodexUsageReport, _cacheAgeMs?: n
     if (!isPrimaryCodexSnapshot(snapshot)) {
       lines.push(`  ${label} limit:`);
     }
-    const weeklyWindow = selectCodexWeeklyWindow(snapshot);
-    if (weeklyWindow) lines.push(formatWindowLine("Weekly limit:", weeklyWindow));
-    if (!weeklyWindow) {
+    if (snapshot.primary) lines.push(formatWindowLine("5h limit:", snapshot.primary));
+    if (snapshot.secondary) lines.push(formatWindowLine("7d limit:", snapshot.secondary));
+    if (!snapshot.primary && !snapshot.secondary) {
       lines.push("  Limits unavailable for this account");
     }
   }
@@ -52,8 +52,8 @@ export function formatCodexUsageStatusline(report: CodexUsageReport, model?: Pro
   if (!snapshot) return "usage unavailable";
 
   const parts = [formatStatuslinePrefix(snapshot)];
-  const weeklyWindow = selectCodexWeeklyWindow(snapshot);
-  if (weeklyWindow) parts.push(`${clampPercent(weeklyWindow.usedPercent).toFixed(0)}% wk`);
+  if (snapshot.primary) parts.push(`${clampPercent(snapshot.primary.usedPercent).toFixed(0)}% 5h`);
+  if (snapshot.secondary) parts.push(`${clampPercent(snapshot.secondary.usedPercent).toFixed(0)}% 7d`);
   if (parts.length === 1 && snapshot.credits) parts.push(formatCredits(snapshot.credits));
   return parts.join(" ");
 }
@@ -163,19 +163,6 @@ function codexModelVariantKeys(modelKeys: Set<string>): string[] {
     if (match?.[1]) variants.add(match[1]);
   }
   return [...variants];
-}
-
-function selectCodexWeeklyWindow(snapshot: NormalizedRateLimitSnapshot): NormalizedRateLimitWindow | undefined {
-  const { primary, secondary } = snapshot;
-  if (!primary) return secondary;
-  if (!secondary) return primary;
-
-  if (primary.windowMinutes !== undefined && secondary.windowMinutes !== undefined) {
-    return primary.windowMinutes > secondary.windowMinutes ? primary : secondary;
-  }
-
-  // In the former two-window payload, the weekly limit was secondary.
-  return secondary;
 }
 
 function formatStatuslinePrefix(snapshot: NormalizedRateLimitSnapshot): string {
