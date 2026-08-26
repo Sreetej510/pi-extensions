@@ -25,6 +25,7 @@ const PI_EXTERNALS = [
   "@earendil-works/pi-tui",
   "@earendil-works/pi-ai",
   "@earendil-works/pi-agent-core",
+  "playwright-core",
 ];
 
 const result = await esbuild.build({

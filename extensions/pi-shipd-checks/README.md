@@ -30,9 +30,21 @@ The agent-callable `analyze_task_tests` tool provides the separate test-analysis
 - `mode: "solution-audit"` runs one exhaustive Auditor over the implementation, using the
   `# Gaps in solution` rules and the same in-memory changed-code diff.
 
-All modes are read-only. Gap analysis uses two agents: a gap finder followed by a fairness reviewer.
-Each audit uses one agent to keep the tool affordable. Invoke the tool only when the user asks, never in
-parallel, and run repeated requests sequentially after applying each result.
+The agent-callable `submit_shipd` tool runs `create_patches.sh` in the current working directory, reads
+`agent_prompt.md`, `test.patch`, and `solution.patch`, fills the authenticated Shipd draft fields, starts the Test
+Quality and then Solution Quality reruns in one browser tab, waits for both jobs, and returns only the useful report data:
+`details.testQuality.coverageSuggestions`, `details.testQuality.tests` filtered to items whose `fairness` is exactly
+`"Not fair"`, and the complete `details.solutionQuality.evaluation` block. Its compact UI is labeled `Quality Checks`,
+shows live elapsed time, and only displays unfair-test count, suggestion count, code-quality score, and
+comprehensiveness score. It takes no parameters. Set the session's
+job link with `/shipd:link <job-link>`; the link is stored in that chat session only. It uses one fresh headless
+browser tab per invocation and does not click the final orange challenge-submit button. Authentication comes from
+`SHIPD_STORAGE_STATE` or the saved state created by `scripts/playwright-auth-smoke.mjs`.
+
+All analysis modes are read-only. Gap analysis uses two agents: a gap finder followed by a fairness reviewer.
+Each audit uses one agent to keep the tool affordable. Invoke analysis only when the user asks, never in
+parallel, and run repeated requests sequentially after applying each result. `submit_shipd` consumes Shipd tokens;
+do not run overlapping invocations for the same challenge.
 
 ## Commands
 
@@ -43,6 +55,7 @@ parallel, and run repeated requests sequentially after applying each result.
 | `/checks` | Open a menu with config and solver-gap-finder options |
 | `/checks --config` | Configure reviewer, solver, gap-analysis, and Auditor models |
 | `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
+| `/shipd:link <url>` | Save the Shipd job link for the current chat session |
 | `/analyze:on` | Enable the agent-callable test-analysis tool for the current project |
 | `/analyze:off` | Disable the agent-callable test-analysis tool for the current project |
 
@@ -185,6 +198,7 @@ Or, for local development, point at the entry point directly:
 | File | Responsibility |
 |---|---|
 | `src/index.ts` | Extension entry point: message renderer, cancel shortcut, command registration |
+| `src/submit.ts` | `submit_shipd`: Playwright draft filling, sequential quality checks, polling, and report extraction |
 | `src/command.ts` | The `/checks` command: argument parsing, `--config` flow, run orchestration |
 | `src/agents.ts` | Spawns and races the gap-finder/reviewer/solver agent sessions |
 | `src/solvergap.ts` | Local solver result persistence and comparison artifacts |

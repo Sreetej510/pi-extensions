@@ -3,7 +3,7 @@
  *
  * Behavioral test-gap analysis plus post-implementation test-fairness and
  * solution-quality auditing for a task's agent_prompt.md, tests, and repository source,
- * with an optional solver-based gap finder.
+ * with an optional solver-based gap finder and an agent-callable Shipd submission tool.
  *
  * Flow:
  *   1. Snapshot the current git HEAD (no working-dir mutation) into a temp dir
@@ -20,6 +20,7 @@
  * Commands:
  *   /analyze:on           enable the agent-callable test-analysis tool for this project
  *   /analyze:off          disable the agent-callable test-analysis tool for this project
+ *   /shipd:link <url>     save the Shipd job link for this chat session
  *   /checks               open a menu for config or solver-gap-finder
  *   /checks --config      set reviewer, gap-analysis, and Auditor models
  *   /checks --solver-gap-finder  run several TDD solver agents, then compare their solutions to find gaps
@@ -48,6 +49,7 @@ import { PROGRESS_WIDGET_KEY } from "./progress.js";
 import type { SolverSummaryDetail } from "./report.js";
 import { formatDuration } from "./report.js";
 import { cancelReview, isReviewInProgress } from "./state.js";
+import { registerSubmitShipdTool } from "./submit.js";
 import {
   isAnalyzeSyncNeeded,
   isAnalyzeSyncPending,
@@ -143,6 +145,7 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
   });
 
   registerAnalyzeGapsSync(pi);
+  registerSubmitShipdTool(pi);
   registerChecksCommand(pi);
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@sreetej510/pi-shipd-checks",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "Pi extension that runs a strict, multi-agent fairness review of a benchmark task's agent_prompt.md, test.patch, and solution.patch, plus behavioral test-gap analysis, via /checks.",
   "type": "module",
   "license": "MIT",
@@ -28,6 +28,8 @@
     "prepublishOnly": "npm run build",
     "check": "biome check . && npm run typecheck",
     "format": "biome check --write .",
+    "smoke:playwright-auth": "node scripts/playwright-auth-smoke.mjs",
+    "smoke:playwright-quality": "node scripts/playwright-quality-concurrent-smoke.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
@@ -52,6 +54,7 @@
     "@aws-sdk/client-s3": "^3.1104.0",
     "@aws-sdk/client-sts": "^3.1104.0",
     "@aws-sdk/credential-provider-node": "^3.972.78",
-    "@aws-sdk/s3-request-presigner": "^3.1104.0"
+    "@aws-sdk/s3-request-presigner": "^3.1104.0",
+    "playwright-core": "^1.62.1"
   }
 }
