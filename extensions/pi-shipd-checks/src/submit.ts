@@ -208,6 +208,12 @@ async function navigateAuthenticated(page: Page, targetUrl: string, signal?: Abo
   checkCancelled(signal);
 }
 
+async function fillCodeEditor(page: Page, editor: Locator, value: string): Promise<void> {
+  await editor.click({ timeout: UI_TIMEOUT_MS });
+  await page.keyboard.press(`${process.platform === "darwin" ? "Meta" : "Control"}+A`);
+  await page.keyboard.insertText(value);
+}
+
 async function fillChallengeFields(page: Page, files: SubmissionFiles, signal?: AbortSignal): Promise<void> {
   checkCancelled(signal);
   const description = page.locator("#problem-description");
@@ -218,8 +224,8 @@ async function fillChallengeFields(page: Page, files: SubmissionFiles, signal?: 
   }
 
   await description.fill(files.taskPrompt);
-  await testEditor.fill(files.testPatch);
-  await solutionEditor.fill(files.solutionPatch);
+  await fillCodeEditor(page, testEditor, files.testPatch);
+  await fillCodeEditor(page, solutionEditor, files.solutionPatch);
   await qualityRow(page, "Test Quality").hover();
   await sleep(1_000, signal);
 }
@@ -355,6 +361,11 @@ function qualitySummaryText(details: unknown, theme: Theme): string[] {
   ];
 }
 
+function compactToolError(result: { content?: Array<{ type: string; text?: string }> }): string {
+  const text = (result.content ?? []).map((part) => (part.type === "text" ? (part.text ?? "") : "")).join(" ");
+  return clean(text).slice(0, 300) || "Quality checks failed";
+}
+
 export function registerSubmitShipdTool(pi: ExtensionAPI): void {
   let jobLink: string | undefined;
 
@@ -437,7 +448,9 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
       if (options.isPartial) {
         return new Text(`${header}\n  ${theme.fg("muted", "Running quality checks...")}`, 0, 0);
       }
-      if (context.isError) return new Text(`${header}\n  ${theme.fg("error", "Quality checks failed")}`, 0, 0);
+      if (context.isError) {
+        return new Text(`${header}\n  ${theme.fg("error", compactToolError(result))}`, 0, 0);
+      }
       return new Text([header, ...qualitySummaryText(result.details, theme)].join("\n"), 0, 0);
     },
     async execute(_toolCallId, _params, signal, onUpdate, ctx) {
