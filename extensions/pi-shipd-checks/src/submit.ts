@@ -398,18 +398,15 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
     label: "Quality Checks",
     description:
       "Run create_patches.sh in the current working directory, read agent_prompt.md, test.patch, and solution.patch, " +
-      "fill the saved Shipd job's draft fields, start Test Quality and then Solution Quality in one browser tab, wait " +
+      "fill the Shipd challenge draft fields, start Test Quality and then Solution Quality in one browser tab, wait " +
       "for both jobs, and return agent-focused JSON. details.testQuality contains coverageSuggestions and only tests whose " +
-      'fairness is exactly "Not fair"; details.solutionQuality contains the complete evaluation block. The job link ' +
-      `is set with /${SHIPD_JOB_LINK_COMMAND} and is scoped to this chat session. This consumes Shipd tokens and does not ` +
-      "click the final challenge-submit button.",
+      'fairness is exactly "Not fair"; details.solutionQuality contains the complete evaluation block. This consumes Shipd ' +
+      "tokens and does not click the final challenge-submit button.",
     promptSnippet: "Submit the working-directory patches to Shipd",
     promptGuidelines: [
-      "Use submit_shipd when the user explicitly asks to submit or evaluate the current Shipd task.",
-      `Before calling submit_shipd, set the session job link with /${SHIPD_JOB_LINK_COMMAND} <job-link> if it is not already set.`,
-      "submit_shipd has no parameters: it runs create_patches.sh, then reads agent_prompt.md, test.patch, and solution.patch from the working directory.",
-      "A saved Shipd authentication state is required; never request or expose its contents.",
-      "submit_shipd starts Test Quality and then Solution Quality in one browser tab, and waits for both before returning.",
+      "Use submit_shipd when the user explicitly asks to submit",
+      "submit_shipd has no parameters",
+      "submit_shipd starts Test Quality and then Solution Quality by another agent",
       "Read details.testQuality.coverageSuggestions and details.testQuality.tests for test-quality feedback.",
       "Read details.solutionQuality.evaluation for the complete solution-quality feedback.",
     ],
