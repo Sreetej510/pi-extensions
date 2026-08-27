@@ -20,7 +20,8 @@ const DEFAULT_STORAGE_STATE_PATH = join(homedir(), ".pi", "agent", "shipd-auth",
 const DEFAULT_TIMEOUT_MS = 900_000;
 const MAX_TIMEOUT_MS = 1_800_000;
 const PATCH_SCRIPT_TIMEOUT_MS = 120_000;
-const POLL_INTERVAL_MS = 5_000;
+const INITIAL_WAIT_MS = 300_000;
+const RECHECK_INTERVAL_MS = 90_000;
 const UI_TIMEOUT_MS = 5_000;
 const QUALITY_NAMES = ["Test Quality", "Solution Quality"] as const;
 
@@ -208,6 +209,33 @@ async function navigateAuthenticated(page: Page, targetUrl: string, signal?: Abo
   checkCancelled(signal);
 }
 
+async function openShipdPage(
+  executablePath: string,
+  storageStatePath: string,
+  targetUrl: string,
+  signal?: AbortSignal,
+): Promise<{ browser: Browser; page: Page }> {
+  checkCancelled(signal);
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const context = await browser.newContext({ storageState: storageStatePath });
+    await context.route("**/*", async (route) => {
+      const resourceType = route.request().resourceType();
+      if (resourceType === "image" || resourceType === "font" || resourceType === "media") {
+        await route.abort();
+      } else {
+        await route.continue();
+      }
+    });
+    const page = await context.newPage();
+    await navigateAuthenticated(page, targetUrl, signal);
+    return { browser, page };
+  } catch (error) {
+    await browser.close().catch(() => undefined);
+    throw error;
+  }
+}
+
 async function fillCodeEditor(page: Page, editor: Locator, value: string): Promise<void> {
   await editor.click({ timeout: UI_TIMEOUT_MS });
   await page.keyboard.press(`${process.platform === "darwin" ? "Meta" : "Control"}+A`);
@@ -234,7 +262,7 @@ async function clickAndConfirm(page: Page, quality: QualityName, signal?: AbortS
   checkCancelled(signal);
   const row = qualityRow(page, quality);
   const initialText = clean(await row.innerText());
-  if (isBusy(initialText)) throw new Error(`${quality} is already running; refusing to start a duplicate job.`);
+  if (isBusy(initialText)) return { quality, status: "already-running", rowTextAfterConfirm: initialText };
 
   const rerun = row.locator('button[title^="Re-run"]');
   const count = await rerun.count();
@@ -253,24 +281,23 @@ async function clickAndConfirm(page: Page, quality: QualityName, signal?: AbortS
   return { quality, status: "started", rerunTitle: title, confirmation };
 }
 
-async function waitForQualityComplete(
-  page: Page,
-  quality: QualityName,
-  deadline: number,
-  signal?: AbortSignal,
-): Promise<{ rowText: string }> {
-  let sawBusy = false;
-  let lastRowText = "";
-  while (Date.now() < deadline) {
+interface QualityStatus {
+  quality: QualityName;
+  rowText: string;
+  busy: boolean;
+}
+
+async function readQualityStatuses(page: Page, signal?: AbortSignal): Promise<QualityStatus[]> {
+  const statuses: QualityStatus[] = [];
+  for (const quality of QUALITY_NAMES) {
     checkCancelled(signal);
-    const row = qualityRow(page, quality);
-    lastRowText = clean(await row.innerText());
-    const busy = isBusy(lastRowText);
-    if (busy) sawBusy = true;
-    if (sawBusy && !busy) return { rowText: lastRowText };
-    await sleep(POLL_INTERVAL_MS, signal);
+    const label = qualityLabel(page, quality);
+    if ((await label.count()) !== 1) throw new Error(`${quality}: quality status row was not found.`);
+    await label.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
+    const rowText = clean(await label.locator("..").innerText());
+    statuses.push({ quality, rowText, busy: isBusy(rowText) });
   }
-  throw new Error(`${quality} timed out waiting for completion; last row text: ${lastRowText}`);
+  return statuses;
 }
 
 async function getQualityExpander(page: Page, quality: QualityName): Promise<Locator> {
@@ -473,6 +500,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
       );
       const deadline = Date.now() + timeoutMs;
       let browser: Browser | undefined;
+      let page: Page | undefined;
       const closeOnAbort = () => {
         void browser?.close().catch(() => undefined);
       };
@@ -488,10 +516,9 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           content: [{ type: "text", text: "Opening Shipd and filling draft fields..." }],
           details: undefined,
         });
-        browser = await chromium.launch({ executablePath, headless: true });
-        const context = await browser.newContext({ storageState: storageStatePath });
-        const page = await context.newPage();
-        await navigateAuthenticated(page, targetUrl, signal);
+        const initial = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
+        browser = initial.browser;
+        page = initial.page;
         await fillChallengeFields(page, files, signal);
 
         onUpdate?.({
@@ -503,11 +530,62 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           started.push(await clickAndConfirm(page, quality, signal));
         }
 
-        onUpdate?.({ content: [{ type: "text", text: "Waiting for both Shipd quality jobs..." }], details: undefined });
-        const completed = await Promise.all(
-          QUALITY_NAMES.map((quality) => waitForQualityComplete(page, quality, deadline, signal)),
-        );
+        onUpdate?.({
+          content: [
+            { type: "text", text: "Quality jobs started; closing the browser until the first check in 5 minutes..." },
+          ],
+          details: undefined,
+        });
+        await browser.close();
+        browser = undefined;
+        page = undefined;
 
+        const completed: Array<{ quality: QualityName; rowText: string }> = [];
+        let nextCheckAt = Date.now() + INITIAL_WAIT_MS;
+        while (true) {
+          const waitMs = Math.min(nextCheckAt, deadline) - Date.now();
+          if (waitMs > 0) {
+            onUpdate?.({
+              content: [{ type: "text", text: `Browser closed; next quality check in ${formatDuration(waitMs)}...` }],
+              details: undefined,
+            });
+            await sleep(waitMs, signal);
+          }
+          checkCancelled(signal);
+          if (Date.now() >= deadline) {
+            throw new Error(`Shipd quality checks timed out after ${formatDuration(timeoutMs)}.`);
+          }
+
+          onUpdate?.({
+            content: [{ type: "text", text: "Reopening Shipd to check quality job status..." }],
+            details: undefined,
+          });
+          const reopened = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
+          browser = reopened.browser;
+          page = reopened.page;
+          const statuses = await readQualityStatuses(page, signal);
+          if (statuses.every((status) => !status.busy)) {
+            completed.push(...statuses.map(({ quality, rowText }) => ({ quality, rowText })));
+            break;
+          }
+
+          const statusText = statuses.map((status) => `${status.quality}: ${status.rowText}`).join("; ");
+          onUpdate?.({
+            content: [
+              {
+                type: "text",
+                text: `Quality jobs still running (${statusText}); closing browser until the next check...`,
+              },
+            ],
+            details: undefined,
+          });
+          await browser.close();
+          browser = undefined;
+          page = undefined;
+          nextCheckAt += RECHECK_INTERVAL_MS;
+        }
+
+        if (!page) throw new Error("Shipd quality status page was closed before report extraction.");
         onUpdate?.({ content: [{ type: "text", text: "Extracting quality reports..." }], details: undefined });
         const reports: ExtractedReport[] = [];
         for (const quality of QUALITY_NAMES) {
