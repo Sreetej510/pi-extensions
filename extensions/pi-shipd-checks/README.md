@@ -38,7 +38,9 @@ Quality and then Solution Quality reruns in one browser tab, waits for both jobs
 shows live elapsed time, and only displays unfair-test count, suggestion count, code-quality score, and
 comprehensiveness score. It takes no parameters. Set the session's
 job link with `/shipd:link <job-link>`; the link is stored in that chat session only. It uses one fresh headless
-browser tab per invocation and does not click the final orange challenge-submit button. Authentication comes from
+browser tab at a time: it closes the browser after starting both jobs, checks after 5 minutes, then reopens every
+90 seconds until both jobs finish. Each browser context blocks images, fonts, and media to reduce memory use. It does not
+click the final orange challenge-submit button. Authentication comes from
 `SHIPD_STORAGE_STATE` or the saved state created by `scripts/playwright-auth-smoke.mjs`.
 
 All analysis modes are read-only. Gap analysis uses two agents: a gap finder followed by a fairness reviewer.
