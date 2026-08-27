@@ -1,12 +1,14 @@
 /** Shipd submission tool: build patches, fill a challenge draft, run quality checks, and return focused results. */
 
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer } from "node:net";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import type { Browser, Locator, Page } from "playwright-core";
+import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { Type } from "typebox";
 import { getShellExecutable } from "./config.js";
@@ -17,6 +19,7 @@ export const SHIPD_JOB_LINK_COMMAND = "shipd:link";
 export const SHIPD_JOB_LINK_ENTRY = "shipd_job_link";
 
 const DEFAULT_STORAGE_STATE_PATH = join(homedir(), ".pi", "agent", "shipd-auth", "shipd.ai.json");
+const SHIPD_AUTH_URL = "https://shipd.ai/";
 const DEFAULT_TIMEOUT_MS = 900_000;
 const MAX_TIMEOUT_MS = 1_800_000;
 const PATCH_SCRIPT_TIMEOUT_MS = 120_000;
@@ -93,6 +96,61 @@ function findChrome(): string | undefined {
     "/usr/bin/chromium-browser",
   ].filter((candidate): candidate is string => Boolean(candidate));
   return candidates.find((candidate) => existsSync(candidate));
+}
+
+function findFreePort(): Promise<number> {
+  const server = createServer();
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        reject(new Error("Could not allocate a local Chrome debugging port."));
+        return;
+      }
+      server.close((error) => (error ? reject(error) : resolve(address.port)));
+    });
+  });
+}
+
+async function waitForChromeDebuggingPort(
+  port: number,
+  chromeProcess: ReturnType<typeof spawn>,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (chromeProcess.exitCode !== null)
+      throw new Error("Chrome exited before its debugging connection became available.");
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      if (response.ok) return;
+    } catch {
+      // Chrome may need a few moments to start listening.
+    }
+    await sleep(250);
+  }
+  throw new Error("Timed out waiting for Chrome to start.");
+}
+
+async function findAuthenticatedShipdPage(context: BrowserContext, timeoutMs = 30_000): Promise<Page | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pages = context.pages();
+    for (const page of pages) {
+      if (!isShipdJobLink(page.url())) continue;
+      const userMenu = page.locator('button[aria-label="Open user menu"]');
+      if (await userMenu.isVisible({ timeout: 1_000 }).catch(() => false)) return page;
+    }
+
+    for (const page of pages) {
+      if (!isShipdJobLink(page.url())) continue;
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => undefined);
+    }
+    await sleep(1_000);
+  }
+  return undefined;
 }
 
 function isShipdJobLink(value: string): boolean {
@@ -400,6 +458,82 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
     jobLink = readSavedJobLink(ctx.sessionManager.getBranch());
   });
 
+  pi.registerCommand("shipd:auth", {
+    description: "Open Shipd in a browser so you can sign in and save authentication.",
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("/shipd:auth requires interactive mode.", "error");
+        return;
+      }
+      const executablePath = findChrome();
+      if (!executablePath) {
+        ctx.ui.notify("Could not find Chrome/Chromium. Set SHIPD_CHROME_PATH and retry.", "error");
+        return;
+      }
+
+      const storageStatePath = process.env.SHIPD_STORAGE_STATE ?? DEFAULT_STORAGE_STATE_PATH;
+      let browser: Browser | undefined;
+      let chromeProcess: ReturnType<typeof spawn> | undefined;
+      let userDataDir: string | undefined;
+      try {
+        mkdirSync(dirname(storageStatePath), { recursive: true });
+        userDataDir = await mkdtemp(join(tmpdir(), "shipd-auth-"));
+        const port = await findFreePort();
+        chromeProcess = spawn(
+          executablePath,
+          [
+            `--remote-debugging-port=${port}`,
+            `--user-data-dir=${userDataDir}`,
+            "--no-first-run",
+            "--no-default-browser-check",
+            SHIPD_AUTH_URL,
+          ],
+          { stdio: "ignore", windowsHide: false },
+        );
+        await waitForChromeDebuggingPort(port, chromeProcess);
+        browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+        const context = browser.contexts()[0] ?? (await browser.newContext());
+        const page = context.pages()[0] ?? (await context.newPage());
+        await page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => undefined);
+        if (!isShipdJobLink(page.url())) {
+          await page.goto(SHIPD_AUTH_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        }
+        ctx.ui.notify("A Shipd browser window is open. Sign in there, then return here.", "info");
+        const confirmed = await ctx.ui.confirm(
+          "Shipd sign-in",
+          "After you finish signing in in the browser, press OK to save the session.",
+        );
+        if (!confirmed) {
+          ctx.ui.notify("Shipd sign-in cancelled; nothing was saved.", "info");
+          return;
+        }
+
+        // Save immediately after the user's confirmation so the state is not lost if the
+        // post-login page uses a different tab or UI shape than expected.
+        await context.storageState({ path: storageStatePath });
+        const authenticatedPage = await findAuthenticatedShipdPage(context);
+        if (!authenticatedPage) {
+          ctx.ui.notify(
+            `Shipd state was saved to ${storageStatePath}, but the signed-in page could not be verified. Try submit_shipd; if it reports an authentication error, run /shipd:auth again and wait for Shipd to return before confirming.`,
+            "warning",
+          );
+        } else {
+          await context.storageState({ path: storageStatePath });
+          ctx.ui.notify(`Shipd authentication saved to ${storageStatePath}. submit_shipd is ready to use.`, "info");
+        }
+      } catch (error) {
+        ctx.ui.notify(
+          `Shipd authentication failed: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      } finally {
+        await browser?.close().catch(() => undefined);
+        if (chromeProcess && chromeProcess.exitCode === null) chromeProcess.kill();
+        if (userDataDir) await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    },
+  });
+
   pi.registerCommand(SHIPD_JOB_LINK_COMMAND, {
     description: "Save the Shipd job link for this chat session.",
     handler: async (args, ctx) => {
@@ -486,9 +620,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
       const targetUrl = jobLink;
       const storageStatePath = process.env.SHIPD_STORAGE_STATE ?? DEFAULT_STORAGE_STATE_PATH;
       if (!existsSync(storageStatePath)) {
-        throw new Error(
-          `Shipd authentication state not found at ${storageStatePath}. Run scripts/playwright-auth-smoke.mjs first.`,
-        );
+        throw new Error(`Shipd authentication state not found at ${storageStatePath}. Run /shipd:auth first.`);
       }
       const executablePath = findChrome();
       if (!executablePath) throw new Error("Could not find Chrome/Chromium. Set SHIPD_CHROME_PATH and retry.");

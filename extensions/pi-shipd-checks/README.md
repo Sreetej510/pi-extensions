@@ -41,7 +41,9 @@ job link with `/shipd:link <job-link>`; the link is stored in that chat session 
 browser tab at a time: it closes the browser after starting both jobs, checks after 5 minutes, then reopens every
 90 seconds until both jobs finish. Each browser context blocks images, fonts, and media to reduce memory use. It does not
 click the final orange challenge-submit button. Authentication comes from
-`SHIPD_STORAGE_STATE` or the saved state created by `scripts/playwright-auth-smoke.mjs`.
+`SHIPD_STORAGE_STATE` or the saved state created by `/shipd:auth`. `/shipd:auth` launches the installed browser
+as a normal visible process and attaches over local CDP, which supports Google/SSO sign-in better than an automated
+browser launch.
 
 All analysis modes are read-only. Gap analysis uses two agents: a gap finder followed by a fairness reviewer.
 Each audit uses one agent to keep the tool affordable. Invoke analysis only when the user asks, never in
@@ -57,6 +59,7 @@ do not run overlapping invocations for the same challenge.
 | `/checks` | Open a menu with config and solver-gap-finder options |
 | `/checks --config` | Configure reviewer, solver, gap-analysis, and Auditor models |
 | `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
+| `/shipd:auth` | Open a browser for first-time Shipd sign-in and save the session |
 | `/shipd:link <url>` | Save the Shipd job link for the current chat session |
 | `/analyze:on` | Enable the agent-callable test-analysis tool for the current project |
 | `/analyze:off` | Disable the agent-callable test-analysis tool for the current project |

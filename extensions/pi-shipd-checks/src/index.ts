@@ -20,6 +20,7 @@
  * Commands:
  *   /analyze:on           enable the agent-callable test-analysis tool for this project
  *   /analyze:off          disable the agent-callable test-analysis tool for this project
+ *   /shipd:auth           open a browser for first-time Shipd sign-in
  *   /shipd:link <url>     save the Shipd job link for this chat session
  *   /checks               open a menu for config or solver-gap-finder
  *   /checks --config      set reviewer, gap-analysis, and Auditor models
