@@ -31,13 +31,14 @@ The agent-callable `solution-precheck` tool runs one exhaustive read-only soluti
 unrelated changes.
 
 The agent-callable `quality-check` tool runs `create_patches.sh` in the current working directory, reads
-`agent_prompt.md`, `test.patch`, and `solution.patch`, fills the authenticated Shipd draft fields, starts the Test
-Quality and then Solution Quality reruns in one browser tab, waits for both jobs, and returns only the useful report data:
+`agent_prompt.md`, `test.patch`, and `solution.patch`, fills the authenticated Shipd draft fields, reruns only checks whose status is
+`Stale`, starts Test Quality before Solution Quality in one browser tab, waits for any started jobs, and returns only the useful report data:
 `details.testQuality.coverageSuggestions`, `details.testQuality.tests` filtered to items whose `fairness` is exactly
 `"Not fair"`, and the complete `details.solutionQuality.evaluation` block. Its compact UI is labeled `Quality Checks`,
 shows live elapsed time, and only displays unfair-test count, suggestion count, code-quality score, and
 comprehensiveness score. It takes no parameters. It uses one fresh headless browser tab at a time: it closes the
-browser after starting both jobs, checks after 5 minutes, then reopens every 90 seconds until both jobs finish. Each
+browser after starting the stale jobs, checks after 5 minutes, then reopens every 90 seconds until those jobs finish. If
+no check is stale, it uses the existing reports without starting a job. Each
 browser context blocks images, fonts, and media to reduce memory use. It does not click the final orange
 challenge-submit button. Authentication comes from `SHIPD_STORAGE_STATE` or the saved state created by
 `/shipd:auth`. `/shipd:auth` launches the installed browser as a normal visible process and attaches over local CDP,

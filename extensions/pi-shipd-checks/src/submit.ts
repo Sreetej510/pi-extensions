@@ -198,6 +198,10 @@ function isBusy(rowText: string): boolean {
   );
 }
 
+function isStale(rowText: string): boolean {
+  return /\bstale\b/i.test(rowText);
+}
+
 function parseJson(raw: string, quality: QualityName): QualityReport {
   const normalized = raw
     .trim()
@@ -345,9 +349,13 @@ interface QualityStatus {
   busy: boolean;
 }
 
-async function readQualityStatuses(page: Page, signal?: AbortSignal): Promise<QualityStatus[]> {
+async function readQualityStatuses(
+  page: Page,
+  signal?: AbortSignal,
+  qualities: readonly QualityName[] = QUALITY_NAMES,
+): Promise<QualityStatus[]> {
   const statuses: QualityStatus[] = [];
-  for (const quality of QUALITY_NAMES) {
+  for (const quality of qualities) {
     checkCancelled(signal);
     const label = qualityLabel(page, quality);
     if ((await label.count()) !== 1) throw new Error(`${quality}: quality status row was not found.`);
@@ -559,15 +567,15 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
     label: "Quality Checks",
     description:
       "Run create_patches.sh in the current working directory, read agent_prompt.md, test.patch, and solution.patch, " +
-      "fill the Shipd challenge draft fields, start Test Quality and then Solution Quality in one browser tab, wait " +
-      "for both jobs, and return agent-focused JSON. details.testQuality contains coverageSuggestions and only tests whose " +
+      "fill the Shipd challenge draft fields, rerun only quality checks whose status is Stale, and start Test Quality " +
+      "then Solution Quality in one browser tab. Wait for any started jobs and return agent-focused JSON. details.testQuality contains coverageSuggestions and only tests whose " +
       'fairness is exactly "Not fair"; details.solutionQuality contains the complete evaluation block. This consumes Shipd ' +
       "tokens and does not click the final challenge-submit button.",
     promptSnippet: "Submit the working-directory patches to Shipd",
     promptGuidelines: [
       "Use quality-check when the user explicitly asks to submit or evaluate the current Shipd task.",
       "quality-check has no parameters.",
-      "quality-check starts Test Quality and then Solution Quality in one browser tab, then waits using scheduled browser reopen checks.",
+      "quality-check reruns only checks marked Stale after the draft update, then waits using scheduled browser reopen checks.",
       "Read details.testQuality.coverageSuggestions and details.testQuality.tests for test-quality feedback.",
       "Read details.solutionQuality.evaluation for the complete solution-quality feedback.",
     ],
@@ -654,59 +662,31 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         await fillChallengeFields(page, files, signal);
 
         onUpdate?.({
-          content: [{ type: "text", text: "Starting Test Quality, then Solution Quality..." }],
+          content: [{ type: "text", text: "Checking which quality checks are stale..." }],
           details: undefined,
         });
+        const initialStatuses = await readQualityStatuses(page, signal);
+        const qualitiesToMonitor = initialStatuses
+          .filter((status) => status.busy || isStale(status.rowText))
+          .map((status) => status.quality);
         const started: JsonRecord[] = [];
         for (const quality of QUALITY_NAMES) {
-          started.push(await clickAndConfirm(page, quality, signal));
+          const status = initialStatuses.find((item) => item.quality === quality);
+          if (!status) throw new Error(`${quality}: quality status was not available after updating the draft.`);
+          if (isStale(status.rowText)) {
+            started.push(await clickAndConfirm(page, quality, signal));
+          } else if (status.busy) {
+            started.push({ quality, status: "already-running", rowTextAfterConfirm: status.rowText });
+          }
         }
 
-        onUpdate?.({
-          content: [
-            { type: "text", text: "Quality jobs started; closing the browser until the first check in 5 minutes..." },
-          ],
-          details: undefined,
-        });
-        await browser.close();
-        browser = undefined;
-        page = undefined;
-
-        const completed: Array<{ quality: QualityName; rowText: string }> = [];
-        let nextCheckAt = Date.now() + INITIAL_WAIT_MS;
-        while (true) {
-          const waitMs = Math.min(nextCheckAt, deadline) - Date.now();
-          if (waitMs > 0) {
-            onUpdate?.({
-              content: [{ type: "text", text: `Browser closed; next quality check in ${formatDuration(waitMs)}...` }],
-              details: undefined,
-            });
-            await sleep(waitMs, signal);
-          }
-          checkCancelled(signal);
-          if (Date.now() >= deadline) {
-            throw new Error(`Shipd quality checks timed out after ${formatDuration(timeoutMs)}.`);
-          }
-
-          onUpdate?.({
-            content: [{ type: "text", text: "Reopening Shipd to check quality job status..." }],
-            details: undefined,
-          });
-          const reopened = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
-          browser = reopened.browser;
-          page = reopened.page;
-          const statuses = await readQualityStatuses(page, signal);
-          if (statuses.every((status) => !status.busy)) {
-            completed.push(...statuses.map(({ quality, rowText }) => ({ quality, rowText })));
-            break;
-          }
-
-          const statusText = statuses.map((status) => `${status.quality}: ${status.rowText}`).join("; ");
+        let completed = initialStatuses.map(({ quality, rowText }) => ({ quality, rowText }));
+        if (qualitiesToMonitor.length > 0) {
           onUpdate?.({
             content: [
               {
                 type: "text",
-                text: `Quality jobs still running (${statusText}); closing browser until the next check...`,
+                text: `Quality checks queued (${qualitiesToMonitor.join(", ")}); closing the browser until the first check in 5 minutes...`,
               },
             ],
             details: undefined,
@@ -714,7 +694,60 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           await browser.close();
           browser = undefined;
           page = undefined;
-          nextCheckAt += RECHECK_INTERVAL_MS;
+
+          let nextCheckAt = Date.now() + INITIAL_WAIT_MS;
+          while (true) {
+            const waitMs = Math.min(nextCheckAt, deadline) - Date.now();
+            if (waitMs > 0) {
+              onUpdate?.({
+                content: [{ type: "text", text: `Browser closed; next quality check in ${formatDuration(waitMs)}...` }],
+                details: undefined,
+              });
+              await sleep(waitMs, signal);
+            }
+            checkCancelled(signal);
+            if (Date.now() >= deadline) {
+              throw new Error(`Shipd quality checks timed out after ${formatDuration(timeoutMs)}.`);
+            }
+
+            onUpdate?.({
+              content: [{ type: "text", text: "Reopening Shipd to check quality job status..." }],
+              details: undefined,
+            });
+            const reopened = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
+            browser = reopened.browser;
+            page = reopened.page;
+            const statuses = await readQualityStatuses(page, signal, qualitiesToMonitor);
+            if (statuses.every((status) => !status.busy)) {
+              completed = [
+                ...initialStatuses
+                  .filter((status) => !qualitiesToMonitor.includes(status.quality))
+                  .map(({ quality, rowText }) => ({ quality, rowText })),
+                ...statuses.map(({ quality, rowText }) => ({ quality, rowText })),
+              ];
+              break;
+            }
+
+            const statusText = statuses.map((status) => `${status.quality}: ${status.rowText}`).join("; ");
+            onUpdate?.({
+              content: [
+                {
+                  type: "text",
+                  text: `Quality jobs still running (${statusText}); closing browser until the next check...`,
+                },
+              ],
+              details: undefined,
+            });
+            await browser.close();
+            browser = undefined;
+            page = undefined;
+            nextCheckAt += RECHECK_INTERVAL_MS;
+          }
+        } else {
+          onUpdate?.({
+            content: [{ type: "text", text: "No stale quality checks found; using the current reports." }],
+            details: undefined,
+          });
         }
 
         if (!page) throw new Error("Shipd quality status page was closed before report extraction.");
