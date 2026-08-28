@@ -1,5 +1,5 @@
 /**
- * Spawns the throwaway gap-analysis and audit agent sessions, races each
+ * Spawns the throwaway gap-finder and solution-precheck agent sessions, races each
  * against a timeout + external cancel signal, and pulls structured results
  * back out of the tool-call capture objects.
  */
@@ -11,24 +11,18 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import {
-  buildGapValidatorPrompt,
   buildSentenceGapFinderPrompt,
   buildSolutionAuditPrompt,
   buildSolverComparisonPrompt,
   buildSolverPrompt,
-  buildTestAuditPrompt,
 } from "./prompts.js";
 import {
   createGapFinderTool,
-  createGapValidatorTool,
   createSolutionAuditTool,
   createSolverGapTool,
-  createTestAuditTool,
-  GAP_FINDER_TOOL_NAME,
-  GAP_VALIDATOR_TOOL_NAME,
+  GAP_FINDER_REPORT_TOOL_NAME,
   SOLUTION_AUDIT_TOOL_NAME,
   SOLVER_GAP_TOOL_NAME,
-  TEST_AUDIT_TOOL_NAME,
 } from "./tools.js";
 import type {
   GapStageResult,
@@ -36,9 +30,6 @@ import type {
   SolutionAuditStageResult,
   SolverGap,
   SolverRunResult,
-  StatementGapReport,
-  TestAuditFinding,
-  TestAuditStageResult,
   TestGapFinal,
   ThinkingLevel,
 } from "./types.js";
@@ -117,11 +108,12 @@ export async function runGapFinder(opts: {
   thinkingLevel: ThinkingLevel;
   testRubric: string;
   gapRules: string;
+  fairnessRules: string;
   codeFiles: string[];
   timeoutMinutes: number;
   cancelSignal: AbortSignal;
-}): Promise<GapStageResult<StatementGapReport>> {
-  const capture: { statements?: StatementGapReport[] } = {};
+}): Promise<GapStageResult<TestGapFinal>> {
+  const capture: { gaps?: TestGapFinal[] } = {};
   const model = asSessionModel(opts.model);
   let session: AgentSession | undefined;
 
@@ -130,14 +122,16 @@ export async function runGapFinder(opts: {
       cwd: opts.tempDir,
       model,
       thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
-      tools: [...REVIEWER_TOOLS, GAP_FINDER_TOOL_NAME],
+      tools: [...REVIEWER_TOOLS, GAP_FINDER_REPORT_TOOL_NAME],
       customTools: [createGapFinderTool(capture)],
       sessionManager: SessionManager.inMemory(),
     }));
 
     const outcome = await raceAgentTurn(
       async () => {
-        await session?.prompt(buildSentenceGapFinderPrompt(opts.testRubric, opts.gapRules, opts.codeFiles));
+        await session?.prompt(
+          buildSentenceGapFinderPrompt(opts.testRubric, opts.gapRules, opts.fairnessRules, opts.codeFiles),
+        );
       },
       opts.cancelSignal,
       opts.timeoutMinutes * 60 * 1000,
@@ -151,8 +145,8 @@ export async function runGapFinder(opts: {
   } finally {
     await disposeAgentSession(session);
   }
-  if (!capture.statements) return { status: "noSubmission", gaps: [] };
-  return { status: "ok", gaps: capture.statements };
+  if (!capture.gaps) return { status: "noSubmission", gaps: [] };
+  return { status: "ok", gaps: capture.gaps };
 }
 
 export const SOLVER_AGENT_TOOLS = ["read", "grep", "find", "ls", "write", "edit", "bash"] as const;
@@ -237,102 +231,7 @@ export async function runSolverComparisonReviewer(opts: {
   return { status: "ok", gaps: capture.gaps };
 }
 
-export async function runGapValidator(opts: {
-  tempDir: string;
-  model: unknown;
-  thinkingLevel: ThinkingLevel;
-  testRubric: string;
-  fairnessRules: string;
-  statementReports: StatementGapReport[];
-  codeFiles: string[];
-  timeoutMinutes: number;
-  cancelSignal: AbortSignal;
-}): Promise<GapStageResult<TestGapFinal>> {
-  const capture: { gaps?: TestGapFinal[] } = {};
-  const model = asSessionModel(opts.model);
-  let session: AgentSession | undefined;
-
-  try {
-    ({ session } = await createAgentSession({
-      cwd: opts.tempDir,
-      model,
-      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
-      tools: [...REVIEWER_TOOLS, GAP_VALIDATOR_TOOL_NAME],
-      customTools: [createGapValidatorTool(capture)],
-      sessionManager: SessionManager.inMemory(),
-    }));
-
-    const outcome = await raceAgentTurn(
-      async () => {
-        await session?.prompt(
-          buildGapValidatorPrompt(opts.statementReports, opts.testRubric, opts.fairnessRules, opts.codeFiles),
-        );
-      },
-      opts.cancelSignal,
-      opts.timeoutMinutes * 60 * 1000,
-    );
-    if (outcome !== "done") {
-      await session.abort();
-      return { status: outcome, gaps: [] };
-    }
-  } catch {
-    return { status: "error", gaps: [] };
-  } finally {
-    await disposeAgentSession(session);
-  }
-  if (!capture.gaps) return { status: "noSubmission", gaps: [] };
-  return { status: "ok", gaps: capture.gaps };
-}
-
-/** Runs one read-only audit over the tests currently present in the repository. */
-export async function runTestAudit(opts: {
-  tempDir: string;
-  model: unknown;
-  thinkingLevel: ThinkingLevel;
-  testRubric: string;
-  fairnessRules: string;
-  codeFiles: string[];
-  changedCodeDiff: string;
-  timeoutMinutes: number;
-  cancelSignal: AbortSignal;
-}): Promise<TestAuditStageResult> {
-  const capture: { findings?: TestAuditFinding[] } = {};
-  const model = asSessionModel(opts.model);
-  let session: AgentSession | undefined;
-
-  try {
-    ({ session } = await createAgentSession({
-      cwd: opts.tempDir,
-      model,
-      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
-      tools: [...REVIEWER_TOOLS, TEST_AUDIT_TOOL_NAME],
-      customTools: [createTestAuditTool(capture)],
-      sessionManager: SessionManager.inMemory(),
-    }));
-
-    const outcome = await raceAgentTurn(
-      async () => {
-        await session?.prompt(
-          buildTestAuditPrompt(opts.testRubric, opts.fairnessRules, opts.codeFiles, opts.changedCodeDiff),
-        );
-      },
-      opts.cancelSignal,
-      opts.timeoutMinutes * 60 * 1000,
-    );
-    if (outcome !== "done") {
-      await session.abort();
-      return { status: outcome, findings: [] };
-    }
-  } catch {
-    return { status: "error", findings: [] };
-  } finally {
-    await disposeAgentSession(session);
-  }
-  if (!capture.findings) return { status: "noSubmission", findings: [] };
-  return { status: "ok", findings: capture.findings };
-}
-
-/** Runs one read-only solution-quality audit over the changed implementation. */
+/** Runs one read-only solution-quality precheck over the changed implementation. */
 export async function runSolutionAudit(opts: {
   tempDir: string;
   model: unknown;

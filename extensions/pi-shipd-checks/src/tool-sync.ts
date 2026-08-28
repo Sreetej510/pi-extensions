@@ -1,14 +1,16 @@
-/** Keeps the `analyze_task_tests` tool's active/inactive state in sync with /checks config. */
+/** Keeps the gap-finder and solution-precheck tools active only when enabled for the project. */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { ANALYZE_TOOL_NAME, registerAnalyzeGapsTool } from "./analyze.js";
+import { GAP_FINDER_TOOL_NAME, registerAnalysisTools, SOLUTION_PRECHECK_TOOL_NAME } from "./analyze.js";
 import { isAnalyzeProjectEnabled, setAnalyzeProjectEnabled } from "./config.js";
+import { QUALITY_CHECK_TOOL_NAME } from "./submit.js";
 
-const LEGACY_ANALYZE_TOOL_NAME = "analyze_test_gaps";
+const ANALYSIS_TOOL_NAMES = [GAP_FINDER_TOOL_NAME, SOLUTION_PRECHECK_TOOL_NAME] as const;
+const LEGACY_TOOL_NAMES = ["analyze_task_tests", "analyze_test_gaps", "submit_shipd"] as const;
 
 let analyzeEnabled = false;
 let toolsRegistered = false;
-/** Sync the tool after pi has populated/restored its built-in active tools. */
+/** Sync the tools after pi has populated/restored its built-in active tools. */
 let pendingToolSync = false;
 
 /** pi.getActiveTools() normally returns strings; accept names too for compatibility. */
@@ -23,20 +25,20 @@ function wantAnalyzeEnabled(): boolean {
 
 export function isAnalyzeSyncNeeded(pi: ExtensionAPI): boolean {
   const active = getActiveToolNames(pi);
-  return active.includes(LEGACY_ANALYZE_TOOL_NAME) || wantAnalyzeEnabled() !== active.includes(ANALYZE_TOOL_NAME);
+  const hasLegacy = LEGACY_TOOL_NAMES.some((name) => active.includes(name));
+  const hasAllCurrent = ANALYSIS_TOOL_NAMES.every((name) => active.includes(name));
+  const hasAnyCurrent = ANALYSIS_TOOL_NAMES.some((name) => active.includes(name));
+  return hasLegacy || (wantAnalyzeEnabled() ? !hasAllCurrent : hasAnyCurrent);
 }
 
-function ensureAnalyzeToolRegistered(pi: ExtensionAPI): void {
+function ensureAnalysisToolsRegistered(pi: ExtensionAPI): void {
   if (toolsRegistered) return;
-  registerAnalyzeGapsTool(pi);
+  registerAnalysisTools(pi);
   toolsRegistered = true;
 }
 
-/**
- * Toggle only analyze_task_tests on the current active set.
- * ON adds it to the existing tools; OFF removes it without changing anything else.
- */
-function applyAnalyzeToolVisibility(pi: ExtensionAPI, enabled: boolean): void {
+/** Toggle both read-only analysis tools on the current active set. */
+function applyAnalysisToolVisibility(pi: ExtensionAPI, enabled: boolean): void {
   const current = getActiveToolNames(pi);
 
   if (enabled && current.length === 0) {
@@ -44,10 +46,11 @@ function applyAnalyzeToolVisibility(pi: ExtensionAPI, enabled: boolean): void {
     return;
   }
 
-  const withoutLegacy = current.filter((name) => name !== LEGACY_ANALYZE_TOOL_NAME);
-  const next = enabled
-    ? [...new Set([...withoutLegacy, ANALYZE_TOOL_NAME])]
-    : withoutLegacy.filter((name) => name !== ANALYZE_TOOL_NAME);
+  const hadLegacyQualityTool = current.includes("submit_shipd");
+  const withoutLegacy = current.filter((name) => !LEGACY_TOOL_NAMES.includes(name as never));
+  const withoutAnalysis = withoutLegacy.filter((name) => !ANALYSIS_TOOL_NAMES.includes(name as never));
+  const next = enabled ? [...withoutAnalysis, ...ANALYSIS_TOOL_NAMES] : [...withoutAnalysis];
+  if (hadLegacyQualityTool && !next.includes(QUALITY_CHECK_TOOL_NAME)) next.push(QUALITY_CHECK_TOOL_NAME);
   const changed = next.length !== current.length || next.some((name, index) => name !== current[index]);
   if (changed) pi.setActiveTools(next);
 
@@ -57,8 +60,8 @@ function applyAnalyzeToolVisibility(pi: ExtensionAPI, enabled: boolean): void {
 /** Apply the in-memory enabled state to pi's active tool list. */
 export function syncAnalyzeTool(pi: ExtensionAPI): void {
   const want = wantAnalyzeEnabled();
-  if (want) ensureAnalyzeToolRegistered(pi);
-  applyAnalyzeToolVisibility(pi, want);
+  if (want) ensureAnalysisToolsRegistered(pi);
+  applyAnalysisToolVisibility(pi, want);
 }
 
 /** Load the persisted per-project setting for the current session and synchronize immediately. */
@@ -85,9 +88,7 @@ export function scheduleAnalyzeSync(pi: ExtensionAPI, attempt = 0): void {
 export function scheduleDelayedAnalyzeSync(pi: ExtensionAPI): void {
   for (const delayMs of [0, 50, 150, 400]) {
     setTimeout(() => {
-      if (pendingToolSync || isAnalyzeSyncNeeded(pi)) {
-        syncAnalyzeTool(pi);
-      }
+      if (pendingToolSync || isAnalyzeSyncNeeded(pi)) syncAnalyzeTool(pi);
     }, delayMs);
   }
 }
@@ -97,7 +98,7 @@ export function isAnalyzeSyncPending(): boolean {
   return pendingToolSync;
 }
 
-/** Persist and apply the per-project setting, just like /hpc:on and /hpc:off. */
+/** Persist and apply the per-project setting, just like HPC tools. */
 export function setAnalyzeEnabled(pi: ExtensionAPI, cwd: string, enabled: boolean): void {
   analyzeEnabled = enabled;
   setAnalyzeProjectEnabled(cwd, enabled);

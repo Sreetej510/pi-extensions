@@ -78,8 +78,7 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
 }
 
 export function formatDuration(ms: number): string {
-  const seconds = Math.round(ms / 1000);
-  return seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
+  return `${Math.floor(ms / 1000)}s`;
 }
 
 export interface SolverSummaryDetail {

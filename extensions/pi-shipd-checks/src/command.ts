@@ -52,7 +52,7 @@ import type {
 export const CANCEL_SHORTCUT_LABEL = "Ctrl+Shift+X";
 
 const COMMAND_COMPLETIONS: readonly CommandOption[] = [
-  { value: "--config", label: "--config", description: "Configure reviewer, gap-analysis, and auditor models" },
+  { value: "--config", label: "--config", description: "Configure reviewer, solver, and analysis models" },
   {
     value: "--solver-gap-finder",
     label: "--solver-gap-finder",
@@ -163,13 +163,11 @@ type ConfigRowId =
   | "analyze-enabled"
   | "analyze-timeout"
   | "analyze-gap-model"
-  | "analyze-gap-thinking"
-  | "analyze-audit-model"
-  | "analyze-audit-thinking";
+  | "analyze-gap-thinking";
 
 interface ConfigRow {
   id: ConfigRowId;
-  section: "Solver" | "Analyze Tool";
+  section: "Solver" | "Analysis Tools";
   label: string;
   value: string;
   /** "model" rows open a picker (closes the menu, then reopens it); "cycle" rows step through `values` in place. */
@@ -190,11 +188,6 @@ function buildConfigRows(
     : ["off"];
   const analyzeGapLevels = analyzeGap.provider
     ? supportedThinkingLevelsFor(ctx, analyzeGap.provider, analyzeGap.modelId)
-    : ["off"];
-  const testAuditProvider = analyzeGap.testAuditProvider ?? analyzeGap.provider;
-  const testAuditModelId = analyzeGap.testAuditModelId ?? analyzeGap.modelId;
-  const testAuditLevels = testAuditProvider
-    ? supportedThinkingLevelsFor(ctx, testAuditProvider, testAuditModelId)
     : ["off"];
   return [
     {
@@ -258,7 +251,7 @@ function buildConfigRows(
     },
     {
       id: "analyze-enabled",
-      section: "Analyze Tool",
+      section: "Analysis Tools",
       label: "Enabled here",
       value: isAnalyzeToolEnabled(ctx.cwd) ? "on" : "off",
       kind: "cycle",
@@ -266,7 +259,7 @@ function buildConfigRows(
     },
     {
       id: "analyze-timeout",
-      section: "Analyze Tool",
+      section: "Analysis Tools",
       label: "Timeout",
       value: `${analyzeGap.timeoutMinutes} min`,
       kind: "cycle",
@@ -276,33 +269,18 @@ function buildConfigRows(
     },
     {
       id: "analyze-gap-model",
-      section: "Analyze Tool",
-      label: "Gap finder model",
+      section: "Analysis Tools",
+      label: "Analysis model",
       value: analyzeGap.provider ? `${analyzeGap.provider}/${analyzeGap.modelId}` : "not set",
       kind: "model",
     },
     {
       id: "analyze-gap-thinking",
-      section: "Analyze Tool",
-      label: "Gap finder thinking",
+      section: "Analysis Tools",
+      label: "Analysis thinking",
       value: analyzeGap.thinkingLevel,
       kind: "cycle",
       values: analyzeGapLevels,
-    },
-    {
-      id: "analyze-audit-model",
-      section: "Analyze Tool",
-      label: "Auditor model",
-      value: testAuditProvider ? `${testAuditProvider}/${testAuditModelId}` : "not set",
-      kind: "model",
-    },
-    {
-      id: "analyze-audit-thinking",
-      section: "Analyze Tool",
-      label: "Auditor thinking",
-      value: analyzeGap.testAuditThinkingLevel ?? analyzeGap.thinkingLevel,
-      kind: "cycle",
-      values: testAuditLevels,
     },
   ];
 }
@@ -317,7 +295,7 @@ type ChecksConfigLike = {
   analyzeGap?: AnalyzeGapConfig;
 };
 
-/** Custom row-based menu component: renders Solver and Analyze Tool rows. Cycling rows update and persist in place; only model rows exit the overlay to run a picker. */
+/** Custom row-based menu component: renders Solver and Analysis Tools rows. Cycling rows update and persist in place; only model rows exit the overlay to run a picker. */
 class ConfigMenuComponent {
   selectedIndex = 0;
   private rows: ConfigRow[];
@@ -423,11 +401,6 @@ class ConfigMenuComponent {
         });
       } else if (row.id === "analyze-gap-thinking") {
         saveChecksConfig({ ...current, analyzeGap: { ...analyzeGap, thinkingLevel: nextValue as ThinkingLevel } });
-      } else if (row.id === "analyze-audit-thinking") {
-        saveChecksConfig({
-          ...current,
-          analyzeGap: { ...analyzeGap, testAuditThinkingLevel: nextValue as ThinkingLevel },
-        });
       }
       this.refresh();
       this.onCycleSaved();
@@ -435,7 +408,7 @@ class ConfigMenuComponent {
   }
 }
 
-/** Interactive `/checks --config` settings menu with Solver and Analyze Tool sections; Ctrl+S (or Esc) saves and exits. */
+/** Interactive `/checks --config` settings menu with Solver and Analysis Tools sections; Ctrl+S (or Esc) saves and exits. */
 async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
   if (ctx.mode !== "tui") {
     ctx.ui.notify("/checks --config requires interactive mode", "error");
@@ -532,37 +505,6 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
       const thinkingLevel = levels.includes(analyzeGap.thinkingLevel) ? analyzeGap.thinkingLevel : (levels[0] ?? "off");
       saveChecksConfig({ ...current, analyzeGap: { ...analyzeGap, ...picked, thinkingLevel } });
       ctx.ui.notify(`Gap-finder model saved: ${picked.provider}/${picked.modelId}`, "info");
-      continue;
-    }
-
-    if (activated === "analyze-audit-model") {
-      if (!current) {
-        ctx.ui.notify("Set the reviewer model first — it's required before analyze-tool settings.", "warning");
-        continue;
-      }
-      const currentAudit = analyzeGap.testAuditProvider
-        ? {
-            provider: analyzeGap.testAuditProvider,
-            modelId: analyzeGap.testAuditModelId ?? analyzeGap.modelId,
-          }
-        : analyzeGap.provider
-          ? { provider: analyzeGap.provider, modelId: analyzeGap.modelId }
-          : null;
-      const picked = await pickModelOnly(ctx, currentAudit, "Select auditor model");
-      if (!picked) continue;
-      const currentThinking = analyzeGap.testAuditThinkingLevel ?? analyzeGap.thinkingLevel;
-      const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
-      const thinkingLevel = levels.includes(currentThinking) ? currentThinking : (levels[0] ?? "off");
-      saveChecksConfig({
-        ...current,
-        analyzeGap: {
-          ...analyzeGap,
-          testAuditProvider: picked.provider,
-          testAuditModelId: picked.modelId,
-          testAuditThinkingLevel: thinkingLevel,
-        },
-      });
-      ctx.ui.notify(`Auditor model saved: ${picked.provider}/${picked.modelId}`, "info");
     }
   }
 }

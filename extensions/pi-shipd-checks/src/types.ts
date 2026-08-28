@@ -71,15 +71,15 @@ export interface ChecksConfig {
   thinkingLevel: ThinkingLevel;
   fargate?: FargateConfig;
   solverGap?: SolverGapConfig;
-  /** Project folders where the agent-callable test-analysis tool is enabled. */
+  /** Project folders where the agent-callable analysis tools are enabled. */
   enabledProjects?: string[];
   /** Legacy global setting retained for migration. */
   enableAnalyzeTool?: boolean;
-  /** Dedicated model/thinking-level for the `analyze_task_tests` tool's gap finder + audit agents. */
+  /** Model/thinking-level settings for the agent-callable gap-finder and solution-precheck tools. */
   analyzeGap?: AnalyzeGapConfig;
 }
 
-/** Model/thinking-level settings for one mode of the agent-callable analysis tool. */
+/** Model settings shared by the read-only gap-finder and solution-precheck tools. */
 export interface AnalyzeAgentConfig {
   provider: string;
   modelId: string;
@@ -88,13 +88,7 @@ export interface AnalyzeAgentConfig {
   timeoutMinutes: number;
 }
 
-/** Model settings for gap-analysis mode plus a shared Auditor model for both audit modes. */
-export interface AnalyzeGapConfig extends AnalyzeAgentConfig {
-  /** Shared Auditor model for test-audit and solution-audit; omitted means reuse the gap-analysis model. */
-  testAuditProvider?: string;
-  testAuditModelId?: string;
-  testAuditThinkingLevel?: ThinkingLevel;
-}
+export interface AnalyzeGapConfig extends AnalyzeAgentConfig {}
 
 export interface ReviewReport {
   verdict: Verdict;
@@ -105,31 +99,13 @@ export interface ReviewReport {
   notes: string[];
 }
 
-/** A candidate behavioral test gap proposed for one sentence in the task prompt. */
-export interface TestGapCandidate {
-  description: string;
-  risk: string;
-}
-
-/** The finder must account for every prompt sentence, including sentences with no gaps. */
-export interface StatementGapReport {
-  statement: string;
-  gaps: TestGapCandidate[];
-}
-
-/** A gap that survived the strict fairness-filter agent — goes into the final report. */
+/** A fair, public behavioral test gap found by the gap-finder. */
 export interface TestGapFinal {
   description: string;
   justification: string;
 }
 
-/** Modes supported by the agent-callable behavioral analysis tool. */
-export type AnalyzeMode = "gaps" | "test-audit" | "solution-audit";
-
-/** Kind of actionable problem found by the post-implementation test audit. */
-export type TestAuditCategory = "unfair-assertion" | "prompt-ambiguity" | "broken-fixture";
-
-/** Kind of actionable problem found by the post-implementation solution audit. */
+/** Kind of actionable problem found by the solution-precheck. */
 export type SolutionAuditCategory =
   | "missing-requirement"
   | "regression"
@@ -138,27 +114,6 @@ export type SolutionAuditCategory =
   | "inconsistent-path"
   | "dead-code"
   | "unrelated-change";
-
-/** A concrete fairness, ambiguity, or fixture problem in the current tests. */
-export interface TestAuditFinding {
-  category: TestAuditCategory;
-  /** Test name or short identifier that lets the caller find the affected assertion. */
-  testName: string;
-  /** What is wrong with the test and why it is actionable. */
-  problem: string;
-  /** Prompt/repository/test evidence supporting the finding. */
-  evidence: string;
-  /** The behavioral gap or contract that must remain covered after the repair. */
-  requiredBehavior: string;
-  /** A fair repair, or a prompt clarification when the contract is genuinely ambiguous. */
-  recommendation: string;
-}
-
-/** Result of the single read-only post-implementation test audit. */
-export interface TestAuditStageResult {
-  status: "ok" | "timedOut" | "cancelled" | "error" | "noSubmission";
-  findings: TestAuditFinding[];
-}
 
 /** A concrete quality problem in the current solution implementation. */
 export interface SolutionAuditFinding {
@@ -175,7 +130,7 @@ export interface SolutionAuditFinding {
   recommendation: string;
 }
 
-/** Result of the single read-only post-implementation solution audit. */
+/** Result of the single read-only solution-precheck. */
 export interface SolutionAuditStageResult {
   status: "ok" | "timedOut" | "cancelled" | "error" | "noSubmission";
   findings: SolutionAuditFinding[];

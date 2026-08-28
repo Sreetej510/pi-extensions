@@ -1,8 +1,8 @@
 /**
  * Shipd Checks Extension for pi
  *
- * Behavioral test-gap analysis plus post-implementation test-fairness and
- * solution-quality auditing for a task's agent_prompt.md, tests, and repository source,
+ * Behavioral test-gap finding plus post-implementation solution-quality prechecking for a task's
+ * agent_prompt.md, tests, and repository source,
  * with an optional solver-based gap finder and an agent-callable Shipd submission tool.
  *
  * Flow:
@@ -12,8 +12,8 @@
  *      into that temp dir.
  *   3. (/checks --solver-gap-finder) Run TDD solver agents and compare their
  *      passing implementations to the reference behavior.
- *   4. (analyze_task_tests) Run the requested read-only gap, test-audit, or
- *      solution-audit mode; gaps use a finder plus fairness reviewer, while each audit uses one agent.
+ *   4. (gap-finder / solution-precheck) Run one read-only agent for behavioral
+ *      gap finding or solution-quality prechecking.
  *   5. Post a one-line chat message and merge solver results into
  *      shipd_report.json in the project root.
  *
@@ -23,14 +23,14 @@
  *   /shipd:auth           open a browser for first-time Shipd sign-in
  *   /shipd:link <url>     save the Shipd job link for this chat session
  *   /checks               open a menu for config or solver-gap-finder
- *   /checks --config      set reviewer, gap-analysis, and Auditor models
+ *   /checks --config      set reviewer and analysis models
  *   /checks --solver-gap-finder  run several TDD solver agents, then compare their solutions to find gaps
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.
  *
  * File layout:
  *   index.ts     extension entry point (this file) — renderer, shortcut, command registration
  *   command.ts   /checks command: arg parsing, --config flow, run orchestration
- *   agents.ts     spawns/races the reviewer + gap-finder/reviewer agent sessions
+ *   agents.ts     spawns/races the gap-finder, solution-precheck, reviewer, and solver agent sessions
  *   prompts.ts    all prompt text sent to those agents
  *   tools.ts      custom tools agents call to submit structured results
  *   rubric.ts     embedded guidelines/fairness rubric text + section loaders
@@ -64,18 +64,18 @@ const CANCEL_SHORTCUT = Key.ctrlShift("x");
 
 export default function shipdChecksExtension(pi: ExtensionAPI) {
   pi.registerCommand("analyze:on", {
-    description: "Enable the test-analysis tool for this project folder",
+    description: "Enable the gap-finder and solution-precheck tools for this project folder",
     handler: async (_args, ctx) => {
       setAnalyzeEnabled(pi, ctx.cwd, true);
-      ctx.ui.notify("Test-analysis tool ON in this project", "info");
+      ctx.ui.notify("Gap-finder and solution-precheck tools ON in this project", "info");
     },
   });
 
   pi.registerCommand("analyze:off", {
-    description: "Disable the test-analysis tool for this project folder",
+    description: "Disable the gap-finder and solution-precheck tools for this project folder",
     handler: async (_args, ctx) => {
       setAnalyzeEnabled(pi, ctx.cwd, false);
-      ctx.ui.notify("Test-analysis tool OFF in this project", "info");
+      ctx.ui.notify("Gap-finder and solution-precheck tools OFF in this project", "info");
     },
   });
 
@@ -145,13 +145,13 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
     },
   });
 
-  registerAnalyzeGapsSync(pi);
+  registerAnalysisToolsSync(pi);
   registerSubmitShipdTool(pi);
   registerChecksCommand(pi);
 }
 
-/** Keeps the analyze_task_tests tool visible only while enabled (like HPC tools). */
-function registerAnalyzeGapsSync(pi: ExtensionAPI) {
+/** Keeps the gap-finder and solution-precheck tools visible only while enabled (like HPC tools). */
+function registerAnalysisToolsSync(pi: ExtensionAPI) {
   pi.on("session_start", (event, ctx) => {
     // New, resume, reload, fork — load the persisted setting for this session.
     onAnalyzeProjectContext(pi, ctx.cwd);
