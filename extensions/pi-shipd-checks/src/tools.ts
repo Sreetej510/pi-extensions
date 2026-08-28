@@ -6,19 +6,10 @@
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type {
-  ReviewReport,
-  SolutionAuditFinding,
-  SolverGap,
-  StatementGapReport,
-  TestAuditFinding,
-  TestGapFinal,
-} from "./types.js";
+import type { ReviewReport, SolutionAuditFinding, SolverGap, TestGapFinal } from "./types.js";
 
 export const REPORT_TOOL_NAME = "submit_review_report";
-export const GAP_FINDER_TOOL_NAME = "submit_test_gap_candidates";
-export const GAP_VALIDATOR_TOOL_NAME = "submit_filtered_test_gaps";
-export const TEST_AUDIT_TOOL_NAME = "submit_test_audit_findings";
+export const GAP_FINDER_REPORT_TOOL_NAME = "submit_test_gaps";
 export const SOLUTION_AUDIT_TOOL_NAME = "submit_solution_audit_findings";
 export const SOLVER_GAP_TOOL_NAME = "submit_solver_gaps";
 
@@ -69,140 +60,39 @@ export function createReportTool(capture: { report?: ReviewReport }): ToolDefini
   };
 }
 
-// ── Test-gap finder / filter tools ────────────────────────────────────
+// ── Gap-finder report tool ───────────────────────────────────────────
 
 const gapFinderToolParams = Type.Object({
-  statement: Type.String({ description: "One sentence from agent_prompt.md, copied verbatim." }),
   gaps: Type.Array(
     Type.Object({
       description: Type.String({ description: "A fair, publicly observable missing behavioral test." }),
-      risk: Type.String({
-        description: "Why an incorrect implementation could pass the current tests despite this missing behavior.",
-      }),
-    }),
-    {
-      description:
-        "All candidate positive and negative gaps for this sentence; there is no maximum or target count, so " +
-        "include every distinct evidence-backed gap and relevant edge case rather than stopping at 10; use an " +
-        "empty array only when exhaustive analysis finds none.",
-    },
-  ),
-});
-
-export function createGapFinderTool(capture: {
-  statements?: StatementGapReport[];
-}): ToolDefinition<typeof gapFinderToolParams> {
-  return {
-    name: GAP_FINDER_TOOL_NAME,
-    label: "Submit Candidate Test Gaps",
-    description:
-      "Submit one candidate-gap list for one prompt sentence. Call this after each sentence so the orchestrator can " +
-      "track the todo list; empty lists are required when that sentence has no gaps.",
-    parameters: gapFinderToolParams,
-    async execute(_toolCallId, params) {
-      const statements = capture.statements ?? [];
-      statements.push({ statement: params.statement, gaps: params.gaps ?? [] });
-      capture.statements = statements;
-      return {
-        content: [{ type: "text", text: `Recorded ${params.gaps?.length ?? 0} candidate gap(s)` }],
-        details: undefined,
-      };
-    },
-  };
-}
-
-const gapValidatorToolParams = Type.Object({
-  gaps: Type.Array(
-    Type.Object({
-      description: Type.String({
-        description:
-          "The confirmed, real, fair test gap (may be reworded for clarity). Keep POSITIVE:/NEGATIVE: prefix when " +
-          "applicable.",
-      }),
       justification: Type.String({
         description:
-          "Why this is genuinely grounded in agent_prompt.md or the repo, fair to test per the fairness " +
-          "methodology, and a real (non-duplicate) coverage hole in test.patch — for negative gaps, cite the " +
-          "prompt's prohibition/constraint and why no existing test catches the forbidden outcome.",
+          "Why the gap is grounded in agent_prompt.md or the repository and why a plausible incorrect implementation " +
+          "could pass the current tests despite missing this behavior.",
       }),
     }),
     {
       description:
-        "The filtered, final list of confirmed test gaps. Use an empty array if none of the candidates survive " +
-        "strict scrutiny.",
+        "The complete final list of distinct, evidence-backed positive and negative behavioral test gaps. Use an " +
+        "empty array only after exhaustive analysis finds none.",
     },
   ),
 });
 
-export function createGapValidatorTool(capture: {
-  gaps?: TestGapFinal[];
-}): ToolDefinition<typeof gapValidatorToolParams> {
+export function createGapFinderTool(capture: { gaps?: TestGapFinal[] }): ToolDefinition<typeof gapFinderToolParams> {
   return {
-    name: GAP_VALIDATOR_TOOL_NAME,
-    label: "Submit Filtered Test Gaps",
+    name: GAP_FINDER_REPORT_TOOL_NAME,
+    label: "Submit Test Gaps",
     description:
-      "Submit your final, strictly filtered list of confirmed test gaps. This is the ONLY way to report your " +
-      "result — call it exactly once, as your last action, after you have independently verified each candidate.",
-    parameters: gapValidatorToolParams,
+      "Submit the complete final list of fair behavioral test gaps. This is the ONLY way to report your result — " +
+      "call it exactly once, as your last action, after independently checking every candidate.",
+    parameters: gapFinderToolParams,
     async execute(_toolCallId, params) {
       const gaps = params.gaps ?? [];
       capture.gaps = gaps;
       return {
-        content: [{ type: "text", text: `Confirmed ${gaps.length} gap(s) after filtering` }],
-        details: undefined,
-      };
-    },
-  };
-}
-
-const testAuditFindingParams = Type.Object({
-  category: Type.Union(
-    [Type.Literal("unfair-assertion"), Type.Literal("prompt-ambiguity"), Type.Literal("broken-fixture")],
-    {
-      description: "The kind of actionable problem found in the current test or its setup.",
-    },
-  ),
-  testName: Type.String({
-    description: "The test name or short identifier that lets the caller find the affected assertion.",
-  }),
-  problem: Type.String({
-    description: "What is wrong with the test and why it is blocking or actionable.",
-  }),
-  evidence: Type.String({
-    description: "The prompt, public repository contract, test, or fixture evidence supporting the finding.",
-  }),
-  requiredBehavior: Type.String({
-    description: "The semantic behavior or gap that must remain covered after the test is repaired.",
-  }),
-  recommendation: Type.String({
-    description: "A fair repair, or a prompt clarification when the contract is genuinely ambiguous.",
-  }),
-});
-
-const testAuditFindingsParams = Type.Object({
-  findings: Type.Array(testAuditFindingParams, {
-    description:
-      "Only confirmed, actionable test-fairness, ambiguity, or fixture findings from the complete audit. " +
-      "Use an empty array when the current tests contain no confirmed unfairness.",
-  }),
-});
-
-export function createTestAuditTool(capture: {
-  findings?: TestAuditFinding[];
-}): ToolDefinition<typeof testAuditFindingsParams> {
-  return {
-    name: TEST_AUDIT_TOOL_NAME,
-    label: "Submit Test Audit Findings",
-    description:
-      "Submit the complete result from the single post-implementation test-fairness audit. This is the ONLY way " +
-      "to report your result — call it exactly once, as your last action. Use an empty list when no actionable issue " +
-      "is found.",
-    parameters: testAuditFindingsParams,
-    async execute(_toolCallId, params) {
-      const findings = params.findings ?? [];
-      capture.findings = findings;
-      return {
-        content: [{ type: "text", text: `Recorded ${findings.length} test-audit candidate(s)` }],
+        content: [{ type: "text", text: `Recorded ${gaps.length} test gap(s)` }],
         details: undefined,
       };
     },
@@ -254,7 +144,7 @@ export function createSolutionAuditTool(capture: {
 }): ToolDefinition<typeof solutionAuditFindingsParams> {
   return {
     name: SOLUTION_AUDIT_TOOL_NAME,
-    label: "Submit Solution Audit Findings",
+    label: "Submit Solution Precheck Findings",
     description:
       "Submit the complete result from the single post-implementation solution-quality audit. This is the ONLY " +
       "way to report your result — call it exactly once, as your last action. Use an empty list when no actionable " +
@@ -264,7 +154,7 @@ export function createSolutionAuditTool(capture: {
       const findings = params.findings ?? [];
       capture.findings = findings;
       return {
-        content: [{ type: "text", text: `Recorded ${findings.length} solution-audit finding(s)` }],
+        content: [{ type: "text", text: `Recorded ${findings.length} solution-precheck finding(s)` }],
         details: undefined,
       };
     },

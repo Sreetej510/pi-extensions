@@ -9,7 +9,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
-  AnalyzeAgentConfig,
   AnalyzeGapConfig,
   ChecksConfig,
   FargateConfig,
@@ -199,13 +198,13 @@ export function setAnalyzeProjectEnabled(cwd: string, enabled: boolean): void {
   );
 }
 
-/** Whether the agent-callable `analyze_task_tests` tool is enabled for a project. */
+/** Whether the agent-callable analysis tools are enabled for a project. */
 export function isAnalyzeToolEnabled(cwd?: string): boolean {
   if (cwd !== undefined) return isAnalyzeProjectEnabled(cwd);
   return loadChecksConfig()?.enableAnalyzeTool ?? ANALYZE_GAP_DEFAULT_ENABLED;
 }
 
-/** The gap-analysis model settings for the agent-callable analysis tool. */
+/** The shared model settings for the agent-callable gap-finder and solution-precheck tools. */
 export function loadAnalyzeGapConfig(): AnalyzeGapConfig | null {
   const analyzeGap = loadChecksConfig()?.analyzeGap;
   if (!analyzeGap?.provider || !analyzeGap.modelId || !analyzeGap.thinkingLevel) return null;
@@ -213,21 +212,6 @@ export function loadAnalyzeGapConfig(): AnalyzeGapConfig | null {
     ? Math.min(ANALYZE_TIMEOUT_MAX_MINUTES, Math.max(ANALYZE_TIMEOUT_MIN_MINUTES, analyzeGap.timeoutMinutes))
     : ANALYZE_DEFAULT_TIMEOUT_MINUTES;
   return { ...analyzeGap, timeoutMinutes };
-}
-
-/**
- * The shared Auditor model settings for test-audit and solution-audit. Older configs had only one analyze-tool model;
- * in that case the audit intentionally reuses the configured gap-finder model.
- */
-export function loadTestAuditConfig(): AnalyzeAgentConfig | null {
-  const analyzeGap = loadAnalyzeGapConfig();
-  if (!analyzeGap) return null;
-  return {
-    provider: analyzeGap.testAuditProvider ?? analyzeGap.provider,
-    modelId: analyzeGap.testAuditModelId ?? analyzeGap.modelId,
-    thinkingLevel: analyzeGap.testAuditThinkingLevel ?? analyzeGap.thinkingLevel,
-    timeoutMinutes: analyzeGap.timeoutMinutes,
-  };
 }
 
 export function loadEnabledModelRefs(): string[] {

@@ -14,7 +14,7 @@ import { Type } from "typebox";
 import { getShellExecutable } from "./config.js";
 import { formatDuration } from "./report.js";
 
-export const SUBMIT_SHIPD_TOOL_NAME = "submit_shipd";
+export const QUALITY_CHECK_TOOL_NAME = "quality-check";
 export const SHIPD_JOB_LINK_COMMAND = "shipd:link";
 export const SHIPD_JOB_LINK_ENTRY = "shipd_job_link";
 
@@ -514,12 +514,12 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         const authenticatedPage = await findAuthenticatedShipdPage(context);
         if (!authenticatedPage) {
           ctx.ui.notify(
-            `Shipd state was saved to ${storageStatePath}, but the signed-in page could not be verified. Try submit_shipd; if it reports an authentication error, run /shipd:auth again and wait for Shipd to return before confirming.`,
+            `Shipd state was saved to ${storageStatePath}, but the signed-in page could not be verified. Try quality-check; if it reports an authentication error, run /shipd:auth again and wait for Shipd to return before confirming.`,
             "warning",
           );
         } else {
           await context.storageState({ path: storageStatePath });
-          ctx.ui.notify(`Shipd authentication saved to ${storageStatePath}. submit_shipd is ready to use.`, "info");
+          ctx.ui.notify(`Shipd authentication saved to ${storageStatePath}. quality-check is ready to use.`, "info");
         }
       } catch (error) {
         ctx.ui.notify(
@@ -555,7 +555,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    name: SUBMIT_SHIPD_TOOL_NAME,
+    name: QUALITY_CHECK_TOOL_NAME,
     label: "Quality Checks",
     description:
       "Run create_patches.sh in the current working directory, read agent_prompt.md, test.patch, and solution.patch, " +
@@ -565,9 +565,9 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
       "tokens and does not click the final challenge-submit button.",
     promptSnippet: "Submit the working-directory patches to Shipd",
     promptGuidelines: [
-      "Use submit_shipd when the user explicitly asks to submit",
-      "submit_shipd has no parameters",
-      "submit_shipd starts Test Quality and then Solution Quality by another agent",
+      "Use quality-check when the user explicitly asks to submit or evaluate the current Shipd task.",
+      "quality-check has no parameters.",
+      "quality-check starts Test Quality and then Solution Quality in one browser tab, then waits using scheduled browser reopen checks.",
       "Read details.testQuality.coverageSuggestions and details.testQuality.tests for test-quality feedback.",
       "Read details.solutionQuality.evaluation for the complete solution-quality feedback.",
     ],

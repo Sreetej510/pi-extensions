@@ -22,47 +22,44 @@ For `/checks`:
    solver indexes.
 5. Posts a chat summary and merges solver results into `shipd_report.json` in your project root.
 
-The agent-callable `analyze_task_tests` tool provides the separate test-analysis workflow:
+The agent-callable `gap-finder` tool runs one exhaustive read-only agent over the prompt, repository, and tests. It
+reviews requirements sentence by sentence, performs its own evidence and fairness check, and returns confirmed
+behavioral test gaps in `details.testGaps`.
 
-- `mode: "gaps"` (default) finds and validates sentence-by-sentence behavioral coverage gaps.
-- `mode: "test-audit"` runs one exhaustive Auditor over implemented tests, using the
-  `# Fairness vs. unfairness` rules to classify unfair assertions, prompt ambiguity, and broken fixtures.
-- `mode: "solution-audit"` runs one exhaustive Auditor over the implementation, using the
-  `# Gaps in solution` rules and the same in-memory changed-code diff.
+The agent-callable `solution-precheck` tool runs one exhaustive read-only solution-quality agent and returns findings in
+`details.solutionAuditFindings`. It checks contract gaps, regressions, failure safety, architecture, dead code, and
+unrelated changes.
 
-The agent-callable `submit_shipd` tool runs `create_patches.sh` in the current working directory, reads
+The agent-callable `quality-check` tool runs `create_patches.sh` in the current working directory, reads
 `agent_prompt.md`, `test.patch`, and `solution.patch`, fills the authenticated Shipd draft fields, starts the Test
 Quality and then Solution Quality reruns in one browser tab, waits for both jobs, and returns only the useful report data:
 `details.testQuality.coverageSuggestions`, `details.testQuality.tests` filtered to items whose `fairness` is exactly
 `"Not fair"`, and the complete `details.solutionQuality.evaluation` block. Its compact UI is labeled `Quality Checks`,
 shows live elapsed time, and only displays unfair-test count, suggestion count, code-quality score, and
-comprehensiveness score. It takes no parameters. Set the session's
-job link with `/shipd:link <job-link>`; the link is stored in that chat session only. It uses one fresh headless
-browser tab at a time: it closes the browser after starting both jobs, checks after 5 minutes, then reopens every
-90 seconds until both jobs finish. Each browser context blocks images, fonts, and media to reduce memory use. It does not
-click the final orange challenge-submit button. Authentication comes from
-`SHIPD_STORAGE_STATE` or the saved state created by `/shipd:auth`. `/shipd:auth` launches the installed browser
-as a normal visible process and attaches over local CDP, which supports Google/SSO sign-in better than an automated
-browser launch.
+comprehensiveness score. It takes no parameters. It uses one fresh headless browser tab at a time: it closes the
+browser after starting both jobs, checks after 5 minutes, then reopens every 90 seconds until both jobs finish. Each
+browser context blocks images, fonts, and media to reduce memory use. It does not click the final orange
+challenge-submit button. Authentication comes from `SHIPD_STORAGE_STATE` or the saved state created by
+`/shipd:auth`. `/shipd:auth` launches the installed browser as a normal visible process and attaches over local CDP,
+which supports Google/SSO sign-in better than an automated browser launch.
 
-All analysis modes are read-only. Gap analysis uses two agents: a gap finder followed by a fairness reviewer.
-Each audit uses one agent to keep the tool affordable. Invoke analysis only when the user asks, never in
-parallel, and run repeated requests sequentially after applying each result. `submit_shipd` consumes Shipd tokens;
-do not run overlapping invocations for the same challenge.
+The analysis tools are read-only and each uses one agent. Invoke them only when the user asks, never in parallel, and
+run repeated requests sequentially after applying each result. `quality-check` consumes Shipd tokens; do not run
+overlapping invocations for the same challenge.
 
 ## Commands
 
-`--config` must be used alone; solver-gap-finder is the only `/checks` run mode. Test and solution audits run through `analyze_task_tests`.
+`--config` must be used alone; solver-gap-finder is the only `/checks` run mode. The gap-finder and solution-precheck tools are enabled per project with `/analyze:on`.
 
 | Command | Effect |
 |---|---|
 | `/checks` | Open a menu with config and solver-gap-finder options |
-| `/checks --config` | Configure reviewer, solver, gap-analysis, and Auditor models |
+| `/checks --config` | Configure reviewer, solver, and analysis models |
 | `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
 | `/shipd:auth` | Open a browser for first-time Shipd sign-in and save the session |
 | `/shipd:link <url>` | Save the Shipd job link for the current chat session |
-| `/analyze:on` | Enable the agent-callable test-analysis tool for the current project |
-| `/analyze:off` | Disable the agent-callable test-analysis tool for the current project |
+| `/analyze:on` | Enable the gap-finder and solution-precheck tools for the current project |
+| `/analyze:off` | Disable the gap-finder and solution-precheck tools for the current project |
 
 **Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run. Cancellation is propagated to active solver sessions and their spawned shell/test process trees; post-cancel verification, comparison, and artifact writing are skipped.
 
@@ -72,13 +69,10 @@ do not run overlapping invocations for the same challenge.
 
 - **Solver**: reviewer model and thinking level for the final solver-result reviewer, plus the
   solver model, thinking level, timeout, parallel solver count, and artifact-saving setting.
-- **Analyze Tool**: timeout plus separate models + thinking levels for the agent-callable gap-analysis
-  and Auditor modes. The Auditor settings apply to both test-audit and solution-audit. The timeout
-  applies to each read-only agent phase. The Auditor model defaults to the gap-analysis model until
-  explicitly changed. These are stored under `analyzeGap.timeoutMinutes`,
-  `analyzeGap.testAuditProvider`, `analyzeGap.testAuditModelId`, and
-  `analyzeGap.testAuditThinkingLevel`. Fargate resources are selected automatically and are not
-  configured in this menu.
+- **Analysis Tools**: timeout, model, and thinking level shared by the agent-callable gap-finder and
+  solution-precheck tools. The timeout applies to each read-only agent. These are stored under
+  `analyzeGap.timeoutMinutes`, `analyzeGap.provider`, `analyzeGap.modelId`, and
+  `analyzeGap.thinkingLevel`. Fargate resources are selected automatically and are not configurable in this menu.
 
 AWS credentials stay local. Configure the AWS CLI profile, then set `AWS_PROFILE`/`AWS_REGION` (or add
 `fargate.awsProfile`/`fargate.region` to `checks-config.json`). The runner discovers the default
@@ -157,13 +151,12 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
    `/checks --solver-gap-finder`. Projects need `Dockerfile`, `agent_prompt.md`,
    `solution.patch`, `test.patch`, and `test.sh`.
 
-Use `/analyze:on` and `/analyze:off` to control the tool per project, like HPC. The enabled project
-list is stored alongside the other settings in `~/.pi/agent/checks-config.json`.
+Use `/analyze:on` and `/analyze:off` to control the gap-finder and solution-precheck tools per project, like HPC. The
+enabled project list is stored alongside the other settings in `~/.pi/agent/checks-config.json`.
 
-The agent-callable tool accepts `mode: "gaps"` (default), `mode: "test-audit"`, or
-`mode: "solution-audit"`. Invoke it only when the user asks, never in parallel, and run repeated
-requests sequentially after applying each result. Audits are read-only and return repair
-recommendations; the caller changes the tests, prompt, or solution.
+The `gap-finder` and `solution-precheck` tools are read-only and return repair recommendations; the caller changes the
+tests, prompt, or solution. Invoke them only when the user asks, never in parallel, and run repeated requests
+sequentially after applying each result.
 
 
 ```json
@@ -203,9 +196,9 @@ Or, for local development, point at the entry point directly:
 | File | Responsibility |
 |---|---|
 | `src/index.ts` | Extension entry point: message renderer, cancel shortcut, command registration |
-| `src/submit.ts` | `submit_shipd`: Playwright draft filling, sequential quality checks, polling, and report extraction |
+| `src/submit.ts` | `quality-check`: Playwright draft filling, sequential quality checks, scheduled polling, and report extraction |
 | `src/command.ts` | The `/checks` command: argument parsing, `--config` flow, run orchestration |
-| `src/agents.ts` | Spawns and races the gap-finder/reviewer/solver agent sessions |
+| `src/agents.ts` | Spawns and races the gap-finder, solution-precheck, reviewer, and solver agent sessions |
 | `src/solvergap.ts` | Local solver result persistence and comparison artifacts |
 | `src/fargate-docker.ts` | Supported Dockerfile parsing for remote solver setup |
 | `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration, retries, cleanup, and task telemetry |
