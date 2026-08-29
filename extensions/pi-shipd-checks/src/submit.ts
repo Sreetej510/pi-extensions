@@ -326,10 +326,10 @@ async function clickAndConfirm(page: Page, quality: QualityName, signal?: AbortS
   const initialText = clean(await row.innerText());
   if (isBusy(initialText)) return { quality, status: "already-running", rowTextAfterConfirm: initialText };
 
-  const rerun = row.locator('button[title^="Re-run"]');
+  const rerun = row.locator('button[title^="Re-run"]').or(row.locator('button[title^="Run"]'));
   const count = await rerun.count();
-  if (count !== 1) throw new Error(`${quality}: expected one Re-run button, found ${count}`);
-  if (!(await rerun.isEnabled())) throw new Error(`${quality}: Re-run button is disabled.`);
+  if (count !== 1) throw new Error(`${quality}: expected one Run button, found ${count}`);
+  if (!(await rerun.isEnabled())) throw new Error(`${quality}: Run button is disabled.`);
   const title = await rerun.getAttribute("title");
 
   await rerun.click();
