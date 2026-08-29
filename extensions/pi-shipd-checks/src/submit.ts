@@ -347,6 +347,7 @@ interface QualityStatus {
   quality: QualityName;
   rowText: string;
   busy: boolean;
+  shouldRun: boolean;
 }
 
 async function readQualityStatuses(
@@ -360,8 +361,10 @@ async function readQualityStatuses(
     const label = qualityLabel(page, quality);
     if ((await label.count()) !== 1) throw new Error(`${quality}: quality status row was not found.`);
     await label.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
-    const rowText = clean(await label.locator("..").innerText());
-    statuses.push({ quality, rowText, busy: isBusy(rowText) });
+    const row = label.locator("..");
+    const rowText = clean(await row.innerText());
+    const hasRunButton = (await row.locator('button[title^="Run"]').count()) > 0;
+    statuses.push({ quality, rowText, busy: isBusy(rowText), shouldRun: hasRunButton || isStale(rowText) });
   }
   return statuses;
 }
@@ -585,15 +588,16 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
     label: "Quality Checks",
     description:
       "Run create_patches.sh in the current working directory, read agent_prompt.md, test.patch, and solution.patch, " +
-      "fill the Shipd challenge draft fields, rerun only quality checks whose status is Stale, and start Test Quality " +
-      "then Solution Quality in one browser tab. Wait for any started jobs and return agent-focused JSON. details.testQuality contains coverageSuggestions and only tests whose " +
+      "fill the Shipd challenge draft fields, run fresh checks with a Run button, rerun checks marked Stale, and skip " +
+      "current checks. Start Test Quality then Solution Quality in one browser tab. Wait for any started jobs and return " +
+      "agent-focused JSON. details.testQuality contains coverageSuggestions and only tests whose " +
       'fairness is exactly "Not fair"; details.solutionQuality contains the complete evaluation block. This consumes Shipd ' +
       "tokens and does not click the final challenge-submit button.",
     promptSnippet: "Submit the working-directory patches to Shipd",
     promptGuidelines: [
       "Use quality-check when the user explicitly asks to submit or evaluate the current Shipd task.",
       "quality-check has no parameters.",
-      "quality-check reruns only checks marked Stale after the draft update, then waits using scheduled browser reopen checks.",
+      "quality-check runs fresh checks with a Run button, reruns checks marked Stale after the draft update, skips current checks, then waits using scheduled browser reopen checks.",
       "Read details.testQuality.coverageSuggestions and details.testQuality.tests for test-quality feedback.",
       "Read details.solutionQuality.evaluation for the complete solution-quality feedback.",
     ],
@@ -685,13 +689,13 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         });
         const initialStatuses = await readQualityStatuses(page, signal);
         const qualitiesToMonitor = initialStatuses
-          .filter((status) => status.busy || isStale(status.rowText))
+          .filter((status) => status.busy || status.shouldRun)
           .map((status) => status.quality);
         const started: JsonRecord[] = [];
         for (const quality of QUALITY_NAMES) {
           const status = initialStatuses.find((item) => item.quality === quality);
           if (!status) throw new Error(`${quality}: quality status was not available after updating the draft.`);
-          if (isStale(status.rowText)) {
+          if (status.shouldRun) {
             started.push(await clickAndConfirm(page, quality, signal));
           } else if (status.busy) {
             started.push({ quality, status: "already-running", rowTextAfterConfirm: status.rowText });
