@@ -38,7 +38,7 @@ The agent-callable `quality-check` tool runs `create_patches.sh` in the current 
 shows live elapsed time, and only displays unfair-test count, suggestion count, code-quality score, and
 comprehensiveness score. It takes no parameters. It uses one fresh headless browser tab at a time: it closes the
 browser after starting the stale jobs, checks after 5 minutes, then reopens every 90 seconds until those jobs finish. If
-no check is stale, it uses the existing reports without starting a job. Each
+no check is stale, it uses existing reports without starting a job; a fresh `Run` row is reported as skipped. Each
 browser context blocks images, fonts, and media to reduce memory use. It does not click the final orange
 challenge-submit button. Authentication comes from `SHIPD_STORAGE_STATE` or the saved state created by
 `/shipd:auth`. `/shipd:auth` launches the installed browser as a normal visible process and attaches over local CDP,

@@ -366,6 +366,13 @@ async function readQualityStatuses(
   return statuses;
 }
 
+async function hasQualityReport(page: Page, quality: QualityName): Promise<boolean> {
+  const row = qualityRow(page, quality);
+  // A fresh challenge uses a Run button and has no report popover yet. A completed
+  // check uses Re-run and exposes the report through the hover popover.
+  return (await row.locator('button[title^="Re-run"]').count()) > 0;
+}
+
 async function getQualityExpander(page: Page, quality: QualityName): Promise<Locator> {
   await qualityRow(page, quality).hover();
   const popover = qualityPopover(page, quality);
@@ -414,22 +421,27 @@ async function extractQualityReport(page: Page, quality: QualityName, signal?: A
   return { quality, parsed };
 }
 
-function buildAgentResult(testReport: QualityReport, solutionReport: QualityReport): JsonRecord {
-  const coverageSuggestions = Array.isArray(testReport.coverageSuggestions) ? testReport.coverageSuggestions : [];
-  const unfairTests = Array.isArray(testReport.tests)
+function buildAgentResult(
+  testReport: QualityReport | undefined,
+  solutionReport: QualityReport | undefined,
+): JsonRecord {
+  const coverageSuggestions = Array.isArray(testReport?.coverageSuggestions) ? testReport.coverageSuggestions : [];
+  const unfairTests = Array.isArray(testReport?.tests)
     ? testReport.tests.filter((item): item is JsonRecord => isRecord(item) && item.fairness === "Not fair")
     : [];
   return {
     testQuality: {
-      verdict: testReport.verdict,
-      completed: testReport.completed,
+      verdict: testReport?.verdict ?? null,
+      completed: testReport?.completed ?? false,
+      skipped: !testReport,
       coverageSuggestions,
       tests: unfairTests,
     },
     solutionQuality: {
-      verdict: solutionReport.verdict,
-      completed: solutionReport.completed,
-      evaluation: solutionReport.evaluation ?? null,
+      verdict: solutionReport?.verdict ?? null,
+      completed: solutionReport?.completed ?? false,
+      skipped: !solutionReport,
+      evaluation: solutionReport?.evaluation ?? null,
     },
   };
 }
@@ -448,9 +460,15 @@ function qualitySummaryText(details: unknown, theme: Theme): string[] {
   const unfairCount = Array.isArray(testQuality.tests) ? testQuality.tests.length : 0;
   const suggestionCount = Array.isArray(testQuality.coverageSuggestions) ? testQuality.coverageSuggestions.length : 0;
   const evaluation = solutionQuality.evaluation;
+  const testSummary =
+    testQuality.skipped === true ? "skipped" : `${unfairCount} unfair · ${suggestionCount} suggestions`;
+  const solutionSummary =
+    solutionQuality.skipped === true
+      ? "skipped"
+      : `quality ${scoreText(evaluation, "code_quality")} · comprehensiveness ${scoreText(evaluation, "solution_comprehensiveness")}`;
   return [
-    `  ${theme.fg("accent", "Test Quality")}  ${theme.fg("muted", `${unfairCount} unfair · ${suggestionCount} suggestions`)}`,
-    `  ${theme.fg("accent", "Solution Quality")}  ${theme.fg("muted", `quality ${scoreText(evaluation, "code_quality")} · comprehensiveness ${scoreText(evaluation, "solution_comprehensiveness")}`)}`,
+    `  ${theme.fg("accent", "Test Quality")}  ${theme.fg("muted", testSummary)}`,
+    `  ${theme.fg("accent", "Solution Quality")}  ${theme.fg("muted", solutionSummary)}`,
   ];
 }
 
@@ -753,17 +771,20 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         if (!page) throw new Error("Shipd quality status page was closed before report extraction.");
         onUpdate?.({ content: [{ type: "text", text: "Extracting quality reports..." }], details: undefined });
         const reports: ExtractedReport[] = [];
+        const skipped: QualityName[] = [];
         for (const quality of QUALITY_NAMES) {
+          if (!(await hasQualityReport(page, quality))) {
+            skipped.push(quality);
+            continue;
+          }
           reports.push(await extractQualityReport(page, quality, signal));
         }
         const testReport = reports.find((report) => report.quality === "Test Quality")?.parsed;
         const solutionReport = reports.find((report) => report.quality === "Solution Quality")?.parsed;
-        if (!testReport || !solutionReport) throw new Error("Shipd did not return both quality reports.");
-
         const result = buildAgentResult(testReport, solutionReport);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          details: { ...result, started, completed },
+          details: { ...result, started, completed, skipped },
         };
       } catch (error) {
         if (signal?.aborted) throw new Error("Cancelled by user.");
