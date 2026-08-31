@@ -20,6 +20,7 @@ const result = await esbuild.build({
   // also reaches the copy used by pi-coding-agent.
   alias: {
     "@earendil-works/pi-ai": join(packageDir, "../../node_modules/@earendil-works/pi-ai/dist"),
+    "pi-commandcode-provider": join(packageDir, "../../node_modules/pi-commandcode-provider/index.ts"),
   },
   legalComments: "none",
   banner: {

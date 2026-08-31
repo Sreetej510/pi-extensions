@@ -5,7 +5,11 @@
     "moduleResolution": "NodeNext",
     "strict": true,
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "pi-commandcode-provider": ["src/commandcode-provider.d.ts"]
+    }
   },
   "include": ["src/**/*.ts"]
 }

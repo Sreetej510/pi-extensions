@@ -4,8 +4,12 @@ import { join, posix as posixPath } from "node:path";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
-import { getModel } from "@earendil-works/pi-ai/compat";
-import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import {
+  createAgentSessionFromServices,
+  createAgentSessionServices,
+  SessionManager,
+} from "@earendil-works/pi-coding-agent";
+import commandCodeProvider from "pi-commandcode-provider";
 import { buildSolverPrompt } from "./prompts.js";
 import { TaskResourceUsageSampler } from "./resource-usage.js";
 import type {
@@ -46,6 +50,10 @@ registerBunOAuthFlows();
 const AGENT_DIR = "/opt/shipd-agent";
 const SOLVERS_DIR = "/work/solvers";
 const TAIL_CHARS = 4000;
+
+// Command Code is a pi provider extension, not a CLI dependency. It is bundled
+// into this standalone worker and registered only when a solver selects it.
+const COMMAND_CODE_PROVIDER = "commandcode";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -642,34 +650,48 @@ async function runSolver(
   const modelId = requiredEnv("SHIPD_MODEL_ID");
   const thinkingLevel = requiredEnv("SHIPD_THINKING_LEVEL") as ThinkingLevel;
   const timeoutMinutes = Number.parseInt(requiredEnv("SHIPD_TIMEOUT_MINUTES"), 10);
-  const model = getModel(provider as never, modelId);
-  if (!model) {
-    return {
-      index,
-      status: "error",
-      passed: false,
-      diff: "",
-      testOutputTail: `Could not resolve model ${provider}/${modelId}.`,
-      error: `Could not resolve model ${provider}/${modelId}.`,
-      durationMs: Date.now() - started,
-      totalTests: null,
-      failedTests: null,
-    };
-  }
 
   let outcome: "done" | "timedOut" | "cancelled" | "error" = "error";
   let trajectory: unknown[] = [];
   try {
     const sessionManager = SessionManager.inMemory();
-    let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+    let session: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
     try {
-      ({ session } = await createAgentSession({
+      const services = await createAgentSessionServices({
         cwd: workspace.solverDir,
         agentDir: AGENT_DIR,
+        resourceLoaderOptions:
+          provider === COMMAND_CODE_PROVIDER
+            ? {
+                extensionFactories: [
+                  {
+                    name: "pi-commandcode-provider",
+                    factory: commandCodeProvider,
+                    hidden: true,
+                  },
+                ],
+              }
+            : undefined,
+      });
+      const model = services.modelRuntime.getModel(provider, modelId);
+      if (!model) {
+        const extensionErrors = services.resourceLoader
+          .getExtensions()
+          .errors.map(({ path, error }) => `${path}: ${error}`)
+          .join(" | ");
+        const diagnostics = services.diagnostics.map(({ type, message }) => `${type}: ${message}`).join(" | ");
+        const registeredProviders = services.modelRuntime.getRegisteredProviderIds().join(", ") || "none";
+        throw new Error(
+          `Could not resolve model ${provider}/${modelId} (registered providers: ${registeredProviders}; ` +
+            `diagnostics: ${diagnostics || "none"}; extension errors: ${extensionErrors || "none"}).`,
+        );
+      }
+      ({ session } = await createAgentSessionFromServices({
+        services,
+        sessionManager,
         model,
         thinkingLevel: thinkingLevel === "off" ? undefined : (thinkingLevel as never),
         tools: ["read", "grep", "find", "ls", "write", "edit", "bash"],
-        sessionManager,
       }));
       const prompt = session.prompt(buildSolverPrompt());
       void prompt.catch(() => undefined);
@@ -766,6 +788,9 @@ function readTestCounts(path: string): { totalTests: number | null; failedTests:
 
 async function run(): Promise<void> {
   const mode = loadBootstrap();
+  // pi-commandcode-provider uses pi's agent-dir override for its model cache;
+  // keep that cache beside the auth/settings files downloaded for this task.
+  if (mode === "solver") process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
   const resultUrl = process.env.SHIPD_RESULT_PUT_URL ?? "";
   const resultGetUrl = process.env.SHIPD_RESULT_GET_URL ?? "";
   const resourceProfile = requiredEnv("SHIPD_RESOURCE_PROFILE") as FargateResourceProfile;
