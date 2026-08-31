@@ -1,8 +1,9 @@
 /** Shipd submission tool: build patches, fill a challenge draft, run quality checks, and return focused results. */
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,14 +12,18 @@ import { Text } from "@earendil-works/pi-tui";
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { Type } from "typebox";
-import { getShellExecutable } from "./config.js";
+import { getShellExecutable, loadFargateConfig } from "./config.js";
+import { runFargatePatchPrecheck } from "./fargate-runner.js";
+import { snapshotGitHead } from "./git.js";
 import { formatDuration } from "./report.js";
+import type { PatchPrecheckResult } from "./types.js";
 
 export const QUALITY_CHECK_TOOL_NAME = "quality-check";
 export const SHIPD_JOB_LINK_COMMAND = "shipd:link";
 export const SHIPD_JOB_LINK_ENTRY = "shipd_job_link";
 
 const DEFAULT_STORAGE_STATE_PATH = join(homedir(), ".pi", "agent", "shipd-auth", "shipd.ai.json");
+const PATCH_PRECHECK_TIMEOUT_MINUTES = 10;
 const SHIPD_AUTH_URL = "https://shipd.ai/";
 const DEFAULT_TIMEOUT_MS = 900_000;
 const MAX_TIMEOUT_MS = 1_800_000;
@@ -480,6 +485,13 @@ function compactToolError(result: { content?: Array<{ type: string; text?: strin
   return clean(text).slice(0, 300) || "Quality checks failed";
 }
 
+function patchPrecheckError(result: PatchPrecheckResult): string {
+  const prefix = `Fargate patch precheck failed:\nplatform: ${result.platform}`;
+  if (result.error) return `${prefix}\n${result.error}`;
+  const failed = result.phases.find((phase) => !phase.passed);
+  return `${prefix}${failed ? `\nphase: ${failed.phase}` : ""}.`;
+}
+
 export function registerSubmitShipdTool(pi: ExtensionAPI): void {
   let jobLink: string | undefined;
 
@@ -588,16 +600,16 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
     label: "Quality Checks",
     description:
       "Run create_patches.sh in the current working directory, read agent_prompt.md, test.patch, and solution.patch, " +
-      "fill the Shipd challenge draft fields, run fresh checks with a Run button, rerun checks marked Stale, and skip " +
-      "current checks. Start Test Quality then Solution Quality in one browser tab. Wait for any started jobs and return " +
-      "agent-focused JSON. details.testQuality contains coverageSuggestions and only tests whose " +
+      "run the Fargate patch precheck, then fill the Shipd challenge draft fields, run fresh checks with a Run button, " +
+      "rerun checks marked Stale, and skip current checks. Start Test Quality then Solution Quality in one browser tab. " +
+      "Wait for any started jobs and return agent-focused JSON. details.testQuality contains coverageSuggestions and only tests whose " +
       'fairness is exactly "Not fair"; details.solutionQuality contains the complete evaluation block. This consumes Shipd ' +
       "tokens and does not click the final challenge-submit button.",
     promptSnippet: "Submit the working-directory patches to Shipd",
     promptGuidelines: [
       "Use quality-check when the user explicitly asks to submit or evaluate the current Shipd task.",
       "quality-check has no parameters.",
-      "quality-check runs fresh checks with a Run button, reruns checks marked Stale after the draft update, skips current checks, then waits using scheduled browser reopen checks.",
+      "quality-check first runs the Fargate patch precheck; only after all four test phases meet their expectations does it upload the draft to Shipd. It runs fresh checks with a Run button, reruns checks marked Stale after the draft update, skips current checks, then waits using scheduled browser reopen checks.",
       "Read details.testQuality.coverageSuggestions and details.testQuality.tests for test-quality feedback.",
       "Read details.solutionQuality.evaluation for the complete solution-quality feedback.",
     ],
@@ -663,6 +675,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
       const deadline = Date.now() + timeoutMs;
       let browser: Browser | undefined;
       let page: Page | undefined;
+      let precheckDir: string | undefined;
       const closeOnAbort = () => {
         void browser?.close().catch(() => undefined);
       };
@@ -675,9 +688,46 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         checkCancelled(signal);
 
         onUpdate?.({
-          content: [{ type: "text", text: "Opening Shipd and filling draft fields..." }],
+          content: [{ type: "text", text: "Running Fargate patch prechecks before opening Shipd..." }],
           details: undefined,
         });
+        precheckDir = await mkdtemp(join(tmpdir(), "shipd-patch-precheck-"));
+        const snapshot = await snapshotGitHead(pi, ctx.cwd, precheckDir, signal);
+        if (snapshot.status === "error")
+          throw new Error(`Fargate patch precheck snapshot failed on linux: ${snapshot.error}`);
+        await Promise.all([
+          writeFile(join(precheckDir, "test.patch"), files.testPatch, "utf8"),
+          writeFile(join(precheckDir, "solution.patch"), files.solutionPatch, "utf8"),
+        ]);
+        const precheck = await runFargatePatchPrecheck({
+          pi,
+          repoDir: ctx.cwd,
+          snapshotDir: precheckDir,
+          config: {
+            provider: "patch-precheck",
+            modelId: "patch-precheck",
+            thinkingLevel: "off",
+            fargate: loadFargateConfig(),
+          },
+          cancelSignal: signal ?? new AbortController().signal,
+          runId: `quality-precheck-${randomUUID()}`,
+          precheckTimeoutMinutes: PATCH_PRECHECK_TIMEOUT_MINUTES,
+          onPhase: (phase) =>
+            onUpdate?.({
+              content: [{ type: "text", text: `Fargate patch precheck: ${phase}...` }],
+              details: undefined,
+            }),
+        });
+        if (!precheck.passed) throw new Error(patchPrecheckError(precheck));
+        await rm(precheckDir, { recursive: true, force: true });
+        precheckDir = undefined;
+        onUpdate?.({
+          content: [
+            { type: "text", text: "Fargate patch prechecks passed; opening Shipd and filling draft fields..." },
+          ],
+          details: undefined,
+        });
+        checkCancelled(signal);
         const initial = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
         browser = initial.browser;
         page = initial.page;
@@ -767,7 +817,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           }
         } else {
           onUpdate?.({
-            content: [{ type: "text", text: "No stale quality checks found; using the current reports." }],
+            content: [{ type: "text", text: "No quality checks need to run; using the current reports." }],
             details: undefined,
           });
         }
@@ -788,7 +838,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         const result = buildAgentResult(testReport, solutionReport);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          details: { ...result, started, completed, skipped },
+          details: { ...result, started, completed, skipped, precheck },
         };
       } catch (error) {
         if (signal?.aborted) throw new Error("Cancelled by user.");
@@ -796,6 +846,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
       } finally {
         signal?.removeEventListener("abort", closeOnAbort);
         await browser?.close().catch(() => undefined);
+        if (precheckDir) await rm(precheckDir, { recursive: true, force: true }).catch(() => undefined);
       }
     },
   });

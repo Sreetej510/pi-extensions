@@ -31,9 +31,9 @@ The agent-callable `solution-precheck` tool runs one exhaustive read-only soluti
 unrelated changes.
 
 The agent-callable `quality-check` tool runs `create_patches.sh` in the current working directory, reads
-`agent_prompt.md`, `test.patch`, and `solution.patch`, fills the authenticated Shipd draft fields, runs fresh checks with a
-`Run` button, reruns checks marked `Stale`, skips current checks, starts Test Quality before Solution Quality in one
-browser tab, waits for any started jobs, and returns only the useful report data:
+`agent_prompt.md`, `test.patch`, and `solution.patch`, first runs a Fargate patch precheck against a clean `HEAD`, then
+fills the authenticated Shipd draft fields, runs fresh checks with a `Run` button, reruns checks marked `Stale`, skips
+current checks, starts Test Quality before Solution Quality in one browser tab, waits for any started jobs, and returns only the useful report data:
 `details.testQuality.coverageSuggestions`, `details.testQuality.tests` filtered to items whose `fairness` is exactly
 `"Not fair"`, and the complete `details.solutionQuality.evaluation` block. Its compact UI is labeled `Quality Checks`,
 shows live elapsed time, and only displays unfair-test count, suggestion count, code-quality score, and
@@ -156,6 +156,11 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
 Use `/analyze:on` and `/analyze:off` to control the gap-finder and solution-precheck tools per project, like HPC. The
 enabled project list is stored alongside the other settings in `~/.pi/agent/checks-config.json`.
 
+The patch precheck applies `test.patch`, requires `./test.sh base` to pass, requires every `./test.sh new` testcase to
+fail or error individually (with no suite-level error) before `solution.patch`, then requires both base and new suites to
+pass after the solution patch. A failed precheck aborts before Shipd is opened and includes the Linux platform, phase, exit code,
+JUnit counts, and failed/errored test names in the tool error.
+
 The `gap-finder` and `solution-precheck` tools are read-only and return repair recommendations; the caller changes the
 tests, prompt, or solution. Invoke them only when the user asks, never in parallel, and run repeated requests
 sequentially after applying each result.
@@ -203,8 +208,8 @@ Or, for local development, point at the entry point directly:
 | `src/agents.ts` | Spawns and races the gap-finder, solution-precheck, reviewer, and solver agent sessions |
 | `src/solvergap.ts` | Local solver result persistence and comparison artifacts |
 | `src/fargate-docker.ts` | Supported Dockerfile parsing for remote solver setup |
-| `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration, retries, cleanup, and task telemetry |
-| `src/fargate-worker.ts` | ESM worker that runs concurrent solver workspaces in the shared task |
+| `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration for solver and patch-precheck tasks, retries, cleanup, and telemetry |
+| `src/fargate-worker.ts` | ESM worker that runs solver workspaces or patch prechecks in the shared task |
 | `src/resource-usage.ts` | Container CPU sampling for adaptive profile selection |
 | `src/prompts.ts` | All prompt text sent to those agents |
 | `src/tools.ts` | Custom tools the agents call to submit their structured results |

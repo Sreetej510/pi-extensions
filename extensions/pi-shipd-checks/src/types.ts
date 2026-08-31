@@ -11,6 +11,39 @@ export type Verdict = "PASS" | "FAIL";
 /** Model/thinking-level settings for the solver-gap-finder's solver agents (they write code + run shell, a heavier job than the read-only reviewers), plus their own timeout/parallelism knobs. Kept nested under `solverGap` in the same config file rather than a separate one. */
 export type FargateResourceProfile = "small" | "medium" | "large";
 
+export type PatchPrecheckPhase =
+  | "base-before-solution"
+  | "new-before-solution"
+  | "base-after-solution"
+  | "new-after-solution";
+
+export interface PatchTestRunResult {
+  phase: PatchPrecheckPhase;
+  command: string;
+  exitCode: number;
+  tests: number | null;
+  testcases: number | null;
+  failures: number | null;
+  failedTestcases: number | null;
+  errors: number | null;
+  erroredTestcases: number | null;
+  suiteErrors: number | null;
+  skipped: number | null;
+  skippedTestcases: number | null;
+  failedTestNames: string[];
+  erroredTestNames: string[];
+  passed: boolean;
+}
+
+export interface PatchPrecheckResult {
+  platform: "linux";
+  status: "ok" | "failed" | "error" | "cancelled" | "timedOut";
+  passed: boolean;
+  phases: PatchTestRunResult[];
+  durationMs: number;
+  error?: string;
+}
+
 /** Task-level resource telemetry captured inside the worker and persisted locally after a run. */
 export interface FargateResourceUsage {
   profile: FargateResourceProfile;
