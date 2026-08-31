@@ -8,7 +8,15 @@ import { getModel } from "@earendil-works/pi-ai/compat";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { buildSolverPrompt } from "./prompts.js";
 import { TaskResourceUsageSampler } from "./resource-usage.js";
-import type { FargateResourceProfile, FargateResourceUsage, SolverRunResult, ThinkingLevel } from "./types.js";
+import type {
+  FargateResourceProfile,
+  FargateResourceUsage,
+  PatchPrecheckPhase,
+  PatchPrecheckResult,
+  PatchTestRunResult,
+  SolverRunResult,
+  ThinkingLevel,
+} from "./types.js";
 
 type DockerPlan = {
   baseImage: string;
@@ -19,9 +27,12 @@ type DockerPlan = {
 
 type WorkerSolverResult = SolverRunResult & { trajectory?: unknown[] };
 
+type WorkerMode = "solver" | "patch-precheck";
+
 type WorkerPayload = {
   complete: boolean;
   results: WorkerSolverResult[];
+  precheck?: PatchPrecheckResult;
   resourceUsage?: FargateResourceUsage;
   error?: string;
 };
@@ -46,12 +57,22 @@ function tail(text: string): string {
   return text.length > TAIL_CHARS ? text.slice(text.length - TAIL_CHARS) : text;
 }
 
-function loadBootstrap(): void {
+function loadBootstrap(): WorkerMode {
   const bootstrap = JSON.parse(readFileSync("/tmp/shipd-bootstrap.json", "utf-8")) as Record<string, unknown>;
-  const directS3 = ["bucket", "region", "sourceKey", "authKey", "resultKey"].every(
-    (key) => typeof bootstrap[key] === "string" && bootstrap[key],
-  );
-  const stringValues = ["planB64", "provider", "modelId", "thinkingLevel", "resourceProfile"];
+  const mode = bootstrap.mode;
+  if (mode !== "solver" && mode !== "patch-precheck") throw new Error("Invalid Fargate bootstrap mode.");
+  process.env.SHIPD_MODE = mode;
+
+  const directKeys =
+    mode === "solver"
+      ? ["bucket", "region", "sourceKey", "authKey", "resultKey"]
+      : ["bucket", "region", "sourceKey", "resultKey"];
+  const directS3 = directKeys.every((key) => typeof bootstrap[key] === "string" && bootstrap[key]);
+  const stringValues = [
+    "planB64",
+    "resourceProfile",
+    ...(mode === "solver" ? ["provider", "modelId", "thinkingLevel"] : []),
+  ];
   const envNames: Record<string, string> = {
     planB64: "SHIPD_PLAN_B64",
     provider: "SHIPD_PROVIDER",
@@ -60,24 +81,26 @@ function loadBootstrap(): void {
     resourceProfile: "SHIPD_RESOURCE_PROFILE",
   };
   if (directS3) {
-    for (const [key, envName] of [
+    const directFields = [
       ["bucket", "SHIPD_S3_BUCKET"],
       ["region", "SHIPD_S3_REGION"],
       ["sourceKey", "SHIPD_S3_SOURCE_KEY"],
-      ["authKey", "SHIPD_S3_AUTH_KEY"],
+      ...(mode === "solver" ? [["authKey", "SHIPD_S3_AUTH_KEY"]] : []),
       ["resultKey", "SHIPD_S3_RESULT_KEY"],
-    ] as const) {
+    ] as const;
+    for (const [key, envName] of directFields) {
       const value = bootstrap[key];
       if (typeof value !== "string" || value.length === 0) throw new Error(`Invalid Fargate bootstrap field: ${key}.`);
       process.env[envName] = value;
     }
   } else {
-    for (const [key, envName] of [
+    const transportFields = [
       ["sourceUrl", "SHIPD_SOURCE_URL"],
-      ["authUrl", "SHIPD_AUTH_URL"],
+      ...(mode === "solver" ? [["authUrl", "SHIPD_AUTH_URL"]] : []),
       ["resultPutUrl", "SHIPD_RESULT_PUT_URL"],
       ["resultGetUrl", "SHIPD_RESULT_GET_URL"],
-    ] as const) {
+    ] as const;
+    for (const [key, envName] of transportFields) {
       const value = bootstrap[key];
       if (typeof value !== "string" || value.length === 0) throw new Error(`Invalid Fargate bootstrap field: ${key}.`);
       process.env[envName] = value;
@@ -86,17 +109,19 @@ function loadBootstrap(): void {
   for (const key of stringValues) {
     const value = bootstrap[key];
     if (typeof value !== "string" || value.length === 0) throw new Error(`Invalid Fargate bootstrap field: ${key}.`);
-    process.env[envNames[key]] = value;
+    process.env[envNames[key] as string] = value;
   }
-  for (const [key, envName] of [
+  const numericFields = [
     ["timeoutMinutes", "SHIPD_TIMEOUT_MINUTES"],
-    ["solverCount", "SHIPD_SOLVER_COUNT"],
-  ] as const) {
+    ...(mode === "solver" ? [["solverCount", "SHIPD_SOLVER_COUNT"]] : []),
+  ] as const;
+  for (const [key, envName] of numericFields) {
     const value = bootstrap[key];
     if (typeof value !== "number" || !Number.isFinite(value))
       throw new Error(`Invalid Fargate bootstrap field: ${key}.`);
     process.env[envName] = String(value);
   }
+  return mode;
 }
 
 function planFromEnv(): DockerPlan {
@@ -224,6 +249,265 @@ async function requiredCommand(
     );
   }
   return result;
+}
+
+interface JUnitCounts {
+  tests: number | null;
+  testcases: number | null;
+  failures: number | null;
+  failedTestcases: number | null;
+  errors: number | null;
+  erroredTestcases: number | null;
+  suiteErrors: number | null;
+  skipped: number | null;
+  skippedTestcases: number | null;
+  failedTestNames: string[];
+  erroredTestNames: string[];
+}
+
+function xmlNumber(tag: string | undefined, name: string): number | null {
+  if (!tag) return null;
+  const value = tag.match(new RegExp(`\\b${name}=["']([0-9]+(?:\\.[0-9]+)?)["']`, "i"))?.[1];
+  if (value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function xmlString(tag: string, name: string): string | undefined {
+  return tag.match(new RegExp(`\\b${name}=["']([^"']*)["']`, "i"))?.[1];
+}
+
+function testCaseName(caseXml: string, index: number): string {
+  const name = xmlString(caseXml, "name") ?? `testcase-${index + 1}`;
+  const classname = xmlString(caseXml, "classname");
+  return classname ? `${classname}::${name}` : name;
+}
+
+function readJUnitCounts(path: string): JUnitCounts {
+  try {
+    const xml = readFileSync(path, "utf-8");
+    const root = xml.match(/<testsuites\b[^>]*>/i)?.[0];
+    const suites = [...xml.matchAll(/<testsuite\b[^>]*>/gi)].map((match) => match[0]);
+    const testcases = [...xml.matchAll(/<testcase\b[^>]*(?:\/>|>[\s\S]*?<\/testcase\s*>)/gi)].map((match) => match[0]);
+    const testcaseCount = testcases.length;
+    const failedTestNames = testcases.flatMap((caseXml, index) =>
+      /<failure\b/i.test(caseXml) ? [testCaseName(caseXml, index)] : [],
+    );
+    const erroredTestNames = testcases.flatMap((caseXml, index) =>
+      /<error\b/i.test(caseXml) ? [testCaseName(caseXml, index)] : [],
+    );
+    const failedCases = failedTestNames.length;
+    const errorCases = erroredTestNames.length;
+    const skippedCases = testcases.filter((caseXml) => /<skipped\b/i.test(caseXml)).length;
+    const failureTags = [...xml.matchAll(/<failure\b/gi)].length;
+    const errorTags = [...xml.matchAll(/<error\b/gi)].length;
+    const testcaseErrorTags = testcases.reduce(
+      (count, caseXml) => count + [...caseXml.matchAll(/<error\b/gi)].length,
+      0,
+    );
+    const skippedTags = [...xml.matchAll(/<skipped\b/gi)].length;
+    const sumSuite = (name: string, fallback: number) => {
+      const values = suites.map((suite) => xmlNumber(suite, name)).filter((value): value is number => value !== null);
+      return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : fallback;
+    };
+    const aggregate = (name: string, tags: number, fallback: number) =>
+      Math.max(xmlNumber(root, name) ?? sumSuite(name, fallback), tags);
+    return {
+      tests: xmlNumber(root, "tests") ?? sumSuite("tests", testcaseCount),
+      testcases: testcaseCount,
+      failures: aggregate("failures", failureTags, failedCases),
+      failedTestcases: failedCases,
+      errors: aggregate("errors", errorTags, errorCases),
+      erroredTestcases: errorCases,
+      suiteErrors: Math.max(0, errorTags - testcaseErrorTags),
+      skipped: aggregate("skipped", skippedTags, skippedCases),
+      skippedTestcases: skippedCases,
+      failedTestNames,
+      erroredTestNames,
+    };
+  } catch {
+    return {
+      tests: null,
+      testcases: null,
+      failures: null,
+      failedTestcases: null,
+      errors: null,
+      erroredTestcases: null,
+      suiteErrors: null,
+      skipped: null,
+      skippedTestcases: null,
+      failedTestNames: [],
+      erroredTestNames: [],
+    };
+  }
+}
+
+function patchTestPassed(result: { code: number }, counts: JUnitCounts, expectation: "all-pass" | "all-fail"): boolean {
+  if (
+    counts.tests === null ||
+    counts.testcases === null ||
+    counts.failures === null ||
+    counts.failedTestcases === null ||
+    counts.errors === null ||
+    counts.erroredTestcases === null ||
+    counts.suiteErrors === null ||
+    counts.skipped === null ||
+    counts.skippedTestcases === null ||
+    counts.tests <= 0 ||
+    counts.testcases <= 0 ||
+    counts.testcases !== counts.tests ||
+    counts.skipped !== 0 ||
+    counts.skippedTestcases !== 0
+  ) {
+    return false;
+  }
+  if (expectation === "all-pass") {
+    return (
+      result.code === 0 &&
+      counts.failures === 0 &&
+      counts.failedTestcases === 0 &&
+      counts.errors === 0 &&
+      counts.erroredTestcases === 0 &&
+      counts.suiteErrors === 0
+    );
+  }
+  return (
+    result.code !== 0 &&
+    counts.suiteErrors === 0 &&
+    counts.failedTestcases + counts.erroredTestcases === counts.testcases
+  );
+}
+
+async function runPatchTest(
+  phase: PatchPrecheckPhase,
+  mode: "base" | "new",
+  expectation: "all-pass" | "all-fail",
+  workdir: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+): Promise<PatchTestRunResult> {
+  const outputPath = `/tmp/shipd-${phase}.xml`;
+  const command = `./test.sh --output_path ${quote(outputPath)} ${mode}`;
+  await runCommand(`rm -f ${quote(outputPath)}`, workdir, env, 30_000);
+  const result = await runCommand(command, workdir, env, timeoutMs);
+  const counts = readJUnitCounts(outputPath);
+  return {
+    phase,
+    command,
+    exitCode: result.code,
+    tests: counts.tests,
+    testcases: counts.testcases,
+    failures: counts.failures,
+    failedTestcases: counts.failedTestcases,
+    errors: counts.errors,
+    erroredTestcases: counts.erroredTestcases,
+    suiteErrors: counts.suiteErrors,
+    skipped: counts.skipped,
+    skippedTestcases: counts.skippedTestcases,
+    failedTestNames: counts.failedTestNames,
+    erroredTestNames: counts.erroredTestNames,
+    passed: patchTestPassed(result, counts, expectation),
+  };
+}
+
+function patchPrecheckFailure(result: PatchTestRunResult): string {
+  return [
+    `${result.phase} did not meet its expectation.`,
+    `command: ${result.command}`,
+    `exit code: ${result.exitCode}`,
+    `tests: ${result.tests ?? "unknown"}, testcases: ${result.testcases ?? "unknown"}, failures: ${result.failures ?? "unknown"} (${result.failedTestcases ?? "unknown"} testcase failures), errors: ${result.errors ?? "unknown"} (${result.erroredTestcases ?? "unknown"} testcase errors, ${result.suiteErrors ?? "unknown"} suite-level), skipped: ${result.skipped ?? "unknown"} (${result.skippedTestcases ?? "unknown"} testcases)`,
+    `failed tests: ${result.failedTestNames.length > 0 ? result.failedTestNames.join(", ") : "none"}`,
+    `errored tests: ${result.erroredTestNames.length > 0 ? result.erroredTestNames.join(", ") : "none"}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function runPatchPrecheck(
+  plan: DockerPlan,
+  env: NodeJS.ProcessEnv,
+  timeoutMinutes: number,
+): Promise<PatchPrecheckResult> {
+  const started = Date.now();
+  const phases: PatchTestRunResult[] = [];
+  const workdir = plan.workdir;
+  const testPatch = join(workdir, "test.patch");
+  const solutionPatch = join(workdir, "solution.patch");
+  const testTimeoutMs = Math.max(60_000, timeoutMinutes * 60_000);
+  try {
+    await requiredCommand(`git -C ${quote(workdir)} apply --recount ${quote(testPatch)}`, "/work", env, 15 * 60_000);
+    await requiredCommand(`chmod +x ${quote(join(workdir, "test.sh"))}`, "/work", env, 30_000);
+
+    const beforeBase = await runPatchTest("base-before-solution", "base", "all-pass", workdir, env, testTimeoutMs);
+    phases.push(beforeBase);
+    if (!beforeBase.passed) {
+      return {
+        platform: "linux",
+        status: "failed",
+        passed: false,
+        phases,
+        durationMs: Date.now() - started,
+        error: patchPrecheckFailure(beforeBase),
+      };
+    }
+
+    const beforeNew = await runPatchTest("new-before-solution", "new", "all-fail", workdir, env, testTimeoutMs);
+    phases.push(beforeNew);
+    if (!beforeNew.passed) {
+      return {
+        platform: "linux",
+        status: "failed",
+        passed: false,
+        phases,
+        durationMs: Date.now() - started,
+        error: patchPrecheckFailure(beforeNew),
+      };
+    }
+
+    await requiredCommand(
+      `git -C ${quote(workdir)} apply --recount ${quote(solutionPatch)}`,
+      "/work",
+      env,
+      15 * 60_000,
+    );
+
+    const afterBase = await runPatchTest("base-after-solution", "base", "all-pass", workdir, env, testTimeoutMs);
+    phases.push(afterBase);
+    if (!afterBase.passed) {
+      return {
+        platform: "linux",
+        status: "failed",
+        passed: false,
+        phases,
+        durationMs: Date.now() - started,
+        error: patchPrecheckFailure(afterBase),
+      };
+    }
+
+    const afterNew = await runPatchTest("new-after-solution", "new", "all-pass", workdir, env, testTimeoutMs);
+    phases.push(afterNew);
+    if (!afterNew.passed) {
+      return {
+        platform: "linux",
+        status: "failed",
+        passed: false,
+        phases,
+        durationMs: Date.now() - started,
+        error: patchPrecheckFailure(afterNew),
+      };
+    }
+
+    return { platform: "linux", status: "ok", passed: true, phases, durationMs: Date.now() - started };
+  } catch (error) {
+    return {
+      platform: "linux",
+      status: "error",
+      passed: false,
+      phases,
+      durationMs: Date.now() - started,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function isTestScriptChmod(command: string): boolean {
@@ -442,7 +726,7 @@ function readTestCounts(path: string): { totalTests: number | null; failedTests:
 }
 
 async function run(): Promise<void> {
-  loadBootstrap();
+  const mode = loadBootstrap();
   const resultUrl = process.env.SHIPD_RESULT_PUT_URL ?? "";
   const resultGetUrl = process.env.SHIPD_RESULT_GET_URL ?? "";
   const resourceProfile = requiredEnv("SHIPD_RESOURCE_PROFILE") as FargateResourceProfile;
@@ -452,23 +736,36 @@ async function run(): Promise<void> {
   const completed = new Map((existing?.results ?? []).map((result) => [result.index, result]));
   const plan = planFromEnv();
   const env = resolvedEnvironment(plan);
-  mkdirSync(AGENT_DIR, { recursive: true });
-  if (directS3Enabled()) {
-    await downloadObject(
-      requiredEnv("SHIPD_S3_BUCKET"),
-      requiredEnv("SHIPD_S3_AUTH_KEY"),
-      join(AGENT_DIR, "auth.json"),
-    );
-  } else {
-    await download(requiredEnv("SHIPD_AUTH_URL"), join(AGENT_DIR, "auth.json"));
+  if (mode === "solver") {
+    mkdirSync(AGENT_DIR, { recursive: true });
+    if (directS3Enabled()) {
+      await downloadObject(
+        requiredEnv("SHIPD_S3_BUCKET"),
+        requiredEnv("SHIPD_S3_AUTH_KEY"),
+        join(AGENT_DIR, "auth.json"),
+      );
+    } else {
+      await download(requiredEnv("SHIPD_AUTH_URL"), join(AGENT_DIR, "auth.json"));
+    }
+    // The host settings may point at a Windows shell. Force the Linux shell
+    // used by the Fargate task without changing the user's local settings.
+    writeFileSync(join(AGENT_DIR, "settings.json"), JSON.stringify({ shellPath: "/bin/bash" }), "utf-8");
   }
-  // The host settings may point at a Windows shell. Force the Linux shell
-  // used by the Fargate task without changing the user's local settings.
-  writeFileSync(join(AGENT_DIR, "settings.json"), JSON.stringify({ shellPath: "/bin/bash" }), "utf-8");
   mkdirSync("/work", { recursive: true });
   await initializeSource(plan, env);
   const sourcePatchPath = join(plan.workdir, "test.patch");
+  const solutionPatchPath = join(plan.workdir, "solution.patch");
   if (existsSync(sourcePatchPath)) dos2unix(sourcePatchPath);
+  if (existsSync(solutionPatchPath)) dos2unix(solutionPatchPath);
+
+  if (mode === "patch-precheck") {
+    const timeoutMinutes = Number.parseInt(requiredEnv("SHIPD_TIMEOUT_MINUTES"), 10);
+    const precheck = await runPatchPrecheck(plan, env, timeoutMinutes);
+    const resourceUsage = activeResourceUsage.stop();
+    await upload(resultUrl, { complete: true, results: [], precheck, resourceUsage });
+    return;
+  }
+
   const solverCount = Math.max(1, Number.parseInt(requiredEnv("SHIPD_SOLVER_COUNT"), 10));
   mkdirSync(SOLVERS_DIR, { recursive: true });
   const pendingIndexes = Array.from({ length: solverCount }, (_, index) => index + 1).filter(

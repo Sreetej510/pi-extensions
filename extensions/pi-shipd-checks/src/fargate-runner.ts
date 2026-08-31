@@ -36,7 +36,14 @@ import { CONFIG_PATH, resolveFargateResources } from "./config.js";
 import { type FargateDockerPlan, parseFargateDockerfile } from "./fargate-docker.js";
 import { bashQuote, toSlashPath } from "./git.js";
 import { SOLVER_ARTIFACTS_DIRNAME } from "./solvergap.js";
-import type { ChecksConfig, FargateConfig, FargateResourceUsage, SolverGapConfig, SolverRunResult } from "./types.js";
+import type {
+  ChecksConfig,
+  FargateConfig,
+  FargateResourceUsage,
+  PatchPrecheckResult,
+  SolverGapConfig,
+  SolverRunResult,
+} from "./types.js";
 
 const TASK_CONTAINER_NAME = "shipd-worker";
 const WORKER_S3_NAME = "fargate-worker.mjs";
@@ -47,9 +54,12 @@ interface WorkerSolverResult extends SolverRunResult {
   trajectory?: unknown[];
 }
 
+type WorkerMode = "solver" | "patch-precheck";
+
 interface WorkerPayload {
   complete: boolean;
   results: WorkerSolverResult[];
+  precheck?: PatchPrecheckResult;
   resourceUsage?: FargateResourceUsage;
   error?: string;
 }
@@ -77,24 +87,28 @@ function awsClients(region: string, profile?: string) {
   };
 }
 
-export async function runFargateSolverGapFinder(opts: {
+async function runFargateWorker(opts: {
   pi: ExtensionAPI;
   repoDir: string;
   snapshotDir: string;
   config: ChecksConfig;
-  solverConfig: SolverGapConfig;
+  mode: WorkerMode;
+  solverConfig?: SolverGapConfig;
+  precheckTimeoutMinutes?: number;
   cancelSignal: AbortSignal;
   runId: string;
   onSolverCompleted?: (result: SolverRunResult) => void;
   onSolverProgress?: (results: SolverRunResult[]) => void;
   onResourceUsage?: (usage: FargateResourceUsage) => void;
   onPhase?: (phase: string) => void;
-}): Promise<SolverRunResult[]> {
+}): Promise<WorkerPayload> {
   if (opts.cancelSignal.aborted) throw new Error("Cancelled by user.");
   opts.onPhase?.("preparing image");
   const dockerfilePath = join(opts.repoDir, "Dockerfile");
   if (!existsSync(dockerfilePath))
-    throw new Error("Fargate solver gap finder requires Dockerfile in the project root.");
+    throw new Error(
+      `Fargate ${opts.mode === "solver" ? "solver gap finder" : "patch precheck"} requires Dockerfile in the project root.`,
+    );
   const plan = parseFargateDockerfile(readFileSync(dockerfilePath, "utf-8"));
   const fargateConfig = loadFargateConfigFromChecks(opts.config, opts.repoDir);
   const region = process.env.AWS_REGION ?? fargateConfig.region ?? "us-east-1";
@@ -102,8 +116,8 @@ export async function runFargateSolverGapFinder(opts: {
   const resources = resolveFargateResources(opts.repoDir, fargateConfig);
   const archivePath = join(tmpdir(), `.shipd-fargate-source-${randomUUID()}.tar.gz`);
   const workerPath = findWorkerPath();
-  const authPath = join(dirnameOfConfig(), "auth.json");
-  if (!existsSync(authPath)) throw new Error(`Missing Pi auth file: ${authPath}`);
+  const authPath = opts.mode === "solver" ? join(dirnameOfConfig(), "auth.json") : undefined;
+  if (authPath && !existsSync(authPath)) throw new Error(`Missing Pi auth file: ${authPath}`);
 
   let taskArn: string | undefined;
   let taskCluster: string | undefined;
@@ -131,10 +145,10 @@ export async function runFargateSolverGapFinder(opts: {
     const context = await resolveAwsContext(clients, fargateConfig, region);
     cleanupBucket = context.bucket;
     taskCluster = context.cluster;
-    await createSourceArchive(opts.pi, opts.snapshotDir, archivePath, opts.cancelSignal);
+    await createSourceArchive(opts.pi, opts.snapshotDir, archivePath, opts.cancelSignal, opts.mode === "solver");
     await putFile(clients.s3, context.bucket, keys.source, archivePath, "application/gzip");
     await putFile(clients.s3, context.bucket, keys.worker, workerPath, "text/javascript");
-    await putFile(clients.s3, context.bucket, keys.auth, authPath, "application/json");
+    if (authPath) await putFile(clients.s3, context.bucket, keys.auth, authPath, "application/json");
 
     bootstrapPath = join(tmpdir(), `.shipd-fargate-bootstrap-${randomUUID()}.json`);
     const taskDefinition = await registerTaskDefinition(
@@ -145,7 +159,13 @@ export async function runFargateSolverGapFinder(opts: {
       region,
       fargateConfig,
     );
-    const solverCount = Math.max(1, Math.floor(opts.solverConfig.solverCount));
+    const solverConfig = opts.solverConfig;
+    if (opts.mode === "solver" && !solverConfig) throw new Error("Fargate solver configuration is missing.");
+    const timeoutMinutes =
+      opts.mode === "solver"
+        ? Math.max(1, Math.floor(solverConfig?.timeoutMinutes ?? 1))
+        : Math.max(1, Math.floor(opts.precheckTimeoutMinutes ?? 20));
+    const solverCount = opts.mode === "solver" ? Math.max(1, Math.floor(solverConfig?.solverCount ?? 1)) : 0;
     const directS3 = Boolean(fargateConfig.taskRoleArn);
     const maxRetries = Math.min(3, Math.max(0, Math.floor(fargateConfig.maxRetries ?? 1)));
     let lastFailure = "Fargate task did not produce a result.";
@@ -167,11 +187,12 @@ export async function runFargateSolverGapFinder(opts: {
         : await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: context.bucket, Key: keys.source }), {
             expiresIn: URL_EXPIRY_SECONDS,
           });
-      const authUrl = directS3
-        ? undefined
-        : await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: context.bucket, Key: keys.auth }), {
-            expiresIn: URL_EXPIRY_SECONDS,
-          });
+      const authUrl =
+        directS3 || !authPath
+          ? undefined
+          : await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: context.bucket, Key: keys.auth }), {
+              expiresIn: URL_EXPIRY_SECONDS,
+            });
       const resultPutUrl = directS3
         ? undefined
         : await getSignedUrl(
@@ -197,16 +218,21 @@ export async function runFargateSolverGapFinder(opts: {
                 bucket: context.bucket,
                 region,
                 sourceKey: keys.source,
-                authKey: keys.auth,
+                ...(authPath ? { authKey: keys.auth } : {}),
                 resultKey: keys.result,
               }
             : {}),
+          mode: opts.mode,
           planB64: Buffer.from(JSON.stringify(plan), "utf-8").toString("base64url"),
-          provider: opts.solverConfig.provider,
-          modelId: opts.solverConfig.modelId,
-          thinkingLevel: opts.solverConfig.thinkingLevel,
-          timeoutMinutes: opts.solverConfig.timeoutMinutes,
-          solverCount,
+          ...(solverConfig
+            ? {
+                provider: solverConfig.provider,
+                modelId: solverConfig.modelId,
+                thinkingLevel: solverConfig.thinkingLevel,
+              }
+            : {}),
+          timeoutMinutes,
+          ...(opts.mode === "solver" ? { solverCount } : {}),
           resourceProfile: resources.profile,
         })}\n`,
         "utf-8",
@@ -251,37 +277,42 @@ export async function runFargateSolverGapFinder(opts: {
         context.cluster,
         taskArn,
         () => readResultObject(clients.s3, context.bucket, keys.result),
-        opts.solverConfig.timeoutMinutes,
+        timeoutMinutes,
         opts.cancelSignal,
         (results, resourceUsage) => {
-          opts.onSolverProgress?.(results);
+          if (opts.mode === "solver") opts.onSolverProgress?.(results);
           if (resourceUsage) opts.onResourceUsage?.(resourceUsage);
         },
-        () => opts.onPhase?.("running agents"),
+        () => opts.onPhase?.(opts.mode === "solver" ? "running agents" : "running patch prechecks"),
         () => {
           stoppedByUs = true;
         },
       );
       taskArn = undefined;
-      recoveredResults = mergeSolverResults(recoveredResults, payload?.results ?? []);
-      opts.onSolverProgress?.(recoveredResults);
       if (payload?.resourceUsage) opts.onResourceUsage?.(payload.resourceUsage);
-      if (payload?.complete && !payload.error && recoveredResults.length >= solverCount) {
-        opts.onPhase?.("finalizing");
-        const results = await persistResults(opts, recoveredResults, opts.solverConfig.saveArtifacts);
-        for (const result of results) opts.onSolverCompleted?.(result);
-        return results;
+      if (opts.mode === "patch-precheck") {
+        if (payload?.complete && !payload.error && payload.precheck) {
+          opts.onPhase?.("finalizing");
+          return payload;
+        }
+        lastFailure = payload?.error ?? lastFailure;
+      } else {
+        recoveredResults = mergeSolverResults(recoveredResults, payload?.results ?? []);
+        opts.onSolverProgress?.(recoveredResults);
+        if (payload?.complete && !payload.error && recoveredResults.length >= solverCount) {
+          opts.onPhase?.("finalizing");
+          return { ...payload, results: recoveredResults };
+        }
+        lastFailure = payload?.error ?? lastFailure;
       }
-      lastFailure = payload?.error ?? lastFailure;
       if (opts.cancelSignal.aborted) throw new Error("Cancelled by user.");
     }
-    const results = await persistResults(
-      opts,
-      fillMissingSolverResults(solverCount, recoveredResults, lastFailure),
-      opts.solverConfig.saveArtifacts,
-    );
-    for (const result of results) opts.onSolverCompleted?.(result);
-    return results;
+    if (opts.mode === "patch-precheck") return { complete: false, results: [], error: lastFailure };
+    return {
+      complete: false,
+      results: fillMissingSolverResults(solverCount, recoveredResults, lastFailure),
+      error: lastFailure,
+    };
   } finally {
     opts.cancelSignal.removeEventListener("abort", onAbort);
     if (taskArn) {
@@ -305,6 +336,47 @@ export async function runFargateSolverGapFinder(opts: {
     } catch {
       // Best effort cleanup.
     }
+  }
+}
+
+export async function runFargateSolverGapFinder(opts: {
+  pi: ExtensionAPI;
+  repoDir: string;
+  snapshotDir: string;
+  config: ChecksConfig;
+  solverConfig: SolverGapConfig;
+  cancelSignal: AbortSignal;
+  runId: string;
+  onSolverCompleted?: (result: SolverRunResult) => void;
+  onSolverProgress?: (results: SolverRunResult[]) => void;
+  onResourceUsage?: (usage: FargateResourceUsage) => void;
+  onPhase?: (phase: string) => void;
+}): Promise<SolverRunResult[]> {
+  const payload = await runFargateWorker({ ...opts, mode: "solver" });
+  const results = await persistResults(opts, payload.results, opts.solverConfig.saveArtifacts);
+  for (const result of results) opts.onSolverCompleted?.(result);
+  return results;
+}
+
+export async function runFargatePatchPrecheck(opts: {
+  pi: ExtensionAPI;
+  repoDir: string;
+  snapshotDir: string;
+  config: ChecksConfig;
+  cancelSignal: AbortSignal;
+  runId: string;
+  precheckTimeoutMinutes?: number;
+  onResourceUsage?: (usage: FargateResourceUsage) => void;
+  onPhase?: (phase: string) => void;
+}): Promise<PatchPrecheckResult> {
+  try {
+    const payload = await runFargateWorker({ ...opts, mode: "patch-precheck" });
+    if (!payload.precheck) throw new Error(payload.error ?? "no result was returned");
+    return payload.precheck;
+  } catch (error) {
+    throw new Error(
+      `Fargate patch precheck task failed.\nplatform: linux\n${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -335,9 +407,11 @@ async function createSourceArchive(
   sourceDir: string,
   archivePath: string,
   cancelSignal: AbortSignal,
+  excludeSolutionPatch: boolean,
 ): Promise<void> {
   const forceLocal = process.platform === "win32" ? "--force-local " : "";
-  const command = `tar ${forceLocal}--exclude=./solution.patch -czf ${bashQuote(toSlashPath(archivePath))} -C ${bashQuote(toSlashPath(sourceDir))} .`;
+  const solutionExclusion = excludeSolutionPatch ? "--exclude=./solution.patch " : "";
+  const command = `tar ${forceLocal}${solutionExclusion}-czf ${bashQuote(toSlashPath(archivePath))} -C ${bashQuote(toSlashPath(sourceDir))} .`;
   const shell = process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash";
   const result = await pi.exec(shell, ["-c", command], { cwd: sourceDir, timeout: 120_000, signal: cancelSignal });
   if (cancelSignal.aborted) throw new Error("Cancelled by user.");
