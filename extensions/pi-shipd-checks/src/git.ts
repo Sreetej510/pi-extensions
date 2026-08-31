@@ -142,7 +142,9 @@ export async function snapshotGitHead(
     return { status: "error", error: "Not a git repository, or it has no commits yet." };
   }
 
-  const cmd = `git archive HEAD | tar -x -C ${bashQuote(toSlashPath(tempDir))}`;
+  // Git for Windows can apply core.autocrlf while streaming an archive, which
+  // makes patches generated from Git blobs fail to apply in the Linux worker.
+  const cmd = `git -c core.autocrlf=false archive HEAD | tar -x -C ${bashQuote(toSlashPath(tempDir))}`;
   const result = await pi.exec(getShellExecutable(), ["-c", cmd], {
     cwd: repoDir,
     timeout: 60_000,
