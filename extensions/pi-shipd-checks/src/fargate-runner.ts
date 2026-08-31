@@ -535,6 +535,7 @@ async function registerTaskDefinition(
           name: TASK_CONTAINER_NAME,
           image: plan.baseImage,
           essential: true,
+          linuxParameters: { initProcessEnabled: true },
           command: [
             "bash",
             "-lc",
