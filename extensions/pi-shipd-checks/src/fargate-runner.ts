@@ -116,8 +116,9 @@ async function runFargateWorker(opts: {
   const resources = resolveFargateResources(opts.repoDir, fargateConfig);
   const archivePath = join(tmpdir(), `.shipd-fargate-source-${randomUUID()}.tar.gz`);
   const workerPath = findWorkerPath();
+  const solverConfig = opts.solverConfig;
   const authPath = opts.mode === "solver" ? join(dirnameOfConfig(), "auth.json") : undefined;
-  if (authPath && !existsSync(authPath)) throw new Error(`Missing Pi auth file: ${authPath}`);
+  const workerAuthPath = authPath ? join(tmpdir(), `.shipd-fargate-auth-${randomUUID()}.json`) : undefined;
 
   let taskArn: string | undefined;
   let taskCluster: string | undefined;
@@ -142,13 +143,18 @@ async function runFargateWorker(opts: {
     result: `runs/${opts.runId}/result.json`,
   };
   try {
+    if (opts.mode === "solver" && !solverConfig) throw new Error("Fargate solver configuration is missing.");
+    if (authPath && !existsSync(authPath)) throw new Error(`Missing Pi auth file: ${authPath}`);
     const context = await resolveAwsContext(clients, fargateConfig, region);
     cleanupBucket = context.bucket;
     taskCluster = context.cluster;
     await createSourceArchive(opts.pi, opts.snapshotDir, archivePath, opts.cancelSignal, opts.mode === "solver");
     await putFile(clients.s3, context.bucket, keys.source, archivePath, "application/gzip");
     await putFile(clients.s3, context.bucket, keys.worker, workerPath, "text/javascript");
-    if (authPath) await putFile(clients.s3, context.bucket, keys.auth, authPath, "application/json");
+    if (authPath && workerAuthPath && solverConfig) {
+      createWorkerAuthFile(authPath, solverConfig.provider, workerAuthPath);
+      await putFile(clients.s3, context.bucket, keys.auth, workerAuthPath, "application/json");
+    }
 
     bootstrapPath = join(tmpdir(), `.shipd-fargate-bootstrap-${randomUUID()}.json`);
     const taskDefinition = await registerTaskDefinition(
@@ -159,8 +165,6 @@ async function runFargateWorker(opts: {
       region,
       fargateConfig,
     );
-    const solverConfig = opts.solverConfig;
-    if (opts.mode === "solver" && !solverConfig) throw new Error("Fargate solver configuration is missing.");
     const timeoutMinutes =
       opts.mode === "solver"
         ? Math.max(1, Math.floor(solverConfig?.timeoutMinutes ?? 1))
@@ -333,6 +337,7 @@ async function runFargateWorker(opts: {
     try {
       rmSync(archivePath, { force: true });
       if (bootstrapPath) rmSync(bootstrapPath, { force: true });
+      if (workerAuthPath) rmSync(workerAuthPath, { force: true });
     } catch {
       // Best effort cleanup.
     }
@@ -416,6 +421,47 @@ async function createSourceArchive(
   const result = await pi.exec(shell, ["-c", command], { cwd: sourceDir, timeout: 120_000, signal: cancelSignal });
   if (cancelSignal.aborted) throw new Error("Cancelled by user.");
   if (result.code !== 0) throw new Error(result.stderr?.trim() || "Could not create the Fargate source archive.");
+}
+
+function createWorkerAuthFile(sourcePath: string, provider: string, destinationPath: string): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(sourcePath, "utf-8"));
+  } catch (error) {
+    throw new Error(`Could not read Pi auth file: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Could not prepare Fargate auth: auth.json must contain an object.");
+  }
+
+  const auth = parsed as Record<string, unknown>;
+  let credential = auth[provider];
+  if (provider === "commandcode") {
+    if (typeof credential === "string") credential = { type: "api_key", key: credential };
+    if (credential === undefined) credential = auth["command-code"];
+    if (typeof credential === "string") credential = { type: "api_key", key: credential };
+    if (credential === undefined && typeof auth.apiKey === "string") {
+      credential = { type: "api_key", key: auth.apiKey };
+    }
+  }
+  if (credential === undefined) {
+    writeFileSync(destinationPath, "{}\n", { encoding: "utf-8", mode: 0o600 });
+    return;
+  }
+  if (typeof credential !== "object" || credential === null || Array.isArray(credential)) {
+    throw new Error(`Invalid credential for provider "${provider}" in ${sourcePath}.`);
+  }
+  if (provider === "commandcode") {
+    const commandCodeCredential = credential as Record<string, unknown>;
+    if (commandCodeCredential.type === "api") {
+      credential = { ...commandCodeCredential, type: "api_key" };
+    }
+  }
+
+  writeFileSync(destinationPath, JSON.stringify({ [provider]: credential }, null, 2), {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
 }
 
 async function putFile(s3: S3Client, bucket: string, key: string, path: string, contentType: string): Promise<void> {
