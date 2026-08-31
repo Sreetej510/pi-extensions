@@ -142,11 +142,13 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
    ```
 
    `cluster`, `subnetIds`, and `securityGroupId` are optional when a default VPC is available.
-   With `adaptiveResourceProfile: true`, the first run uses `resourceProfile`; later runs upgrade
-   when normalized CPU is at least 95% for more than seven minutes, downgrade when CPU is at
-   least 95% for under two minutes, and otherwise retain the profile. Only the selected next
-   profile is written to `projectProfiles`; CPU telemetry is included in `shipd_report.json` but
-   no telemetry history is retained. Set `projectProfiles` to override resources per repository:
+   With `adaptiveResourceProfile: true`, the first solver-gap or quality patch-precheck run for
+   a repository uses `resourceProfile` (unless `projectProfiles` already overrides it); later runs
+   upgrade when normalized CPU is at least 95% for more than seven
+   minutes, downgrade when CPU is at least 95% for under two minutes, and otherwise retain the
+   profile. Only the selected next profile is written to `projectProfiles`; CPU telemetry is
+   included in `shipd_report.json` for solver-gap runs, but no telemetry history is retained. Set
+   `projectProfiles` to override resources per repository:
    `{"C:/path/to/repo":"large"}`.
 
 5. Restart pi, use `/checks --config` to select the solver and reviewer models, then run
@@ -156,10 +158,11 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
 Use `/analyze:on` and `/analyze:off` to control the gap-finder and solution-precheck tools per project, like HPC. The
 enabled project list is stored alongside the other settings in `~/.pi/agent/checks-config.json`.
 
-The patch precheck applies `test.patch`, requires `./test.sh base` to pass, requires every `./test.sh new` testcase to
-fail or error individually (with no suite-level error) before `solution.patch`, then requires both base and new suites to
-pass after the solution patch. A failed precheck aborts before Shipd is opened and includes the Linux platform, a human-readable phase,
-and failed/errored test names in the tool error.
+The patch precheck applies `test.patch`, creates isolated workspaces with and without `solution.patch`, and runs the
+base suites concurrently in both workspaces followed by the new suites concurrently in both workspaces. It requires
+`./test.sh base` to pass, requires every `./test.sh new` testcase to fail or error individually (with no suite-level error)
+before `solution.patch`, then requires both base and new suites to pass after the solution patch. A failed precheck aborts
+before Shipd is opened and includes the Linux platform, a human-readable phase, and failed/errored test names in the tool error.
 
 The `gap-finder` and `solution-precheck` tools are read-only and return repair recommendations; the caller changes the
 tests, prompt, or solution. Invoke them only when the user asks, never in parallel, and run repeated requests

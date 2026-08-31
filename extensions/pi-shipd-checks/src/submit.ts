@@ -12,11 +12,11 @@ import { Text } from "@earendil-works/pi-tui";
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { Type } from "typebox";
-import { getShellExecutable, loadFargateConfig } from "./config.js";
+import { getShellExecutable, loadFargateConfig, persistFargateResourceUsage } from "./config.js";
 import { runFargatePatchPrecheck } from "./fargate-runner.js";
 import { snapshotGitHead } from "./git.js";
 import { formatDuration } from "./report.js";
-import type { PatchPrecheckResult } from "./types.js";
+import type { FargateResourceUsage, PatchPrecheckResult } from "./types.js";
 
 export const QUALITY_CHECK_TOOL_NAME = "quality-check";
 export const SHIPD_JOB_LINK_COMMAND = "shipd:link";
@@ -699,6 +699,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           writeFile(join(precheckDir, "test.patch"), files.testPatch, "utf8"),
           writeFile(join(precheckDir, "solution.patch"), files.solutionPatch, "utf8"),
         ]);
+        let precheckResourceUsage: FargateResourceUsage | undefined;
         const precheck = await runFargatePatchPrecheck({
           pi,
           repoDir: ctx.cwd,
@@ -712,12 +713,16 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           cancelSignal: signal ?? new AbortController().signal,
           runId: `quality-precheck-${randomUUID()}`,
           precheckTimeoutMinutes: PATCH_PRECHECK_TIMEOUT_MINUTES,
+          onResourceUsage: (usage) => {
+            precheckResourceUsage = usage;
+          },
           onPhase: (phase) =>
             onUpdate?.({
               content: [{ type: "text", text: `Fargate patch precheck: ${phase}...` }],
               details: undefined,
             }),
         });
+        if (precheckResourceUsage) persistFargateResourceUsage(ctx.cwd, precheckResourceUsage);
         if (!precheck.passed) throw new Error(patchPrecheckError(precheck));
         await rm(precheckDir, { recursive: true, force: true });
         precheckDir = undefined;
