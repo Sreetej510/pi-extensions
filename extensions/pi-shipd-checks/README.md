@@ -158,8 +158,8 @@ enabled project list is stored alongside the other settings in `~/.pi/agent/chec
 
 The patch precheck applies `test.patch`, requires `./test.sh base` to pass, requires every `./test.sh new` testcase to
 fail or error individually (with no suite-level error) before `solution.patch`, then requires both base and new suites to
-pass after the solution patch. A failed precheck aborts before Shipd is opened and includes the Linux platform, phase, exit code,
-JUnit counts, and failed/errored test names in the tool error.
+pass after the solution patch. A failed precheck aborts before Shipd is opened and includes the Linux platform, a human-readable phase,
+and failed/errored test names in the tool error.
 
 The `gap-finder` and `solution-precheck` tools are read-only and return repair recommendations; the caller changes the
 tests, prompt, or solution. Invoke them only when the user asks, never in parallel, and run repeated requests
