@@ -443,6 +443,38 @@ async function applyPrecheckPatch(
   }
 }
 
+async function runPatchTestsInParallel(
+  first: Promise<PatchTestRunResult>,
+  second: Promise<PatchTestRunResult>,
+): Promise<[PatchTestRunResult, PatchTestRunResult]> {
+  const results = await Promise.allSettled([first, second]);
+  const firstResult = results[0];
+  const secondResult = results[1];
+  if (firstResult.status === "rejected") throw firstResult.reason;
+  if (secondResult.status === "rejected") throw secondResult.reason;
+  return [firstResult.value, secondResult.value];
+}
+
+async function clonePrecheckWorkspace(
+  sourceWorkdir: string,
+  destination: string,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  await requiredCommand(
+    [
+      "set -euo pipefail",
+      `rm -rf ${quote(destination)}`,
+      `mkdir -p ${quote(destination)}`,
+      `tar -cf - -C ${quote(sourceWorkdir)} . | tar --no-same-owner -xf - -C ${quote(destination)}`,
+      `git config --global --add safe.directory ${quote(destination)}`,
+      `chmod +x ${quote(join(destination, "test.sh"))}`,
+    ].join("\n"),
+    "/work",
+    env,
+    15 * 60_000,
+  );
+}
+
 async function runPatchPrecheck(
   plan: DockerPlan,
   env: NodeJS.ProcessEnv,
@@ -452,65 +484,43 @@ async function runPatchPrecheck(
   const phases: PatchTestRunResult[] = [];
   const workdir = plan.workdir;
   const testPatch = join(workdir, "test.patch");
-  const solutionPatch = join(workdir, "solution.patch");
+  const withoutSolutionWorkdir = "/tmp/shipd-precheck-without-solution";
+  const withSolutionWorkdir = "/tmp/shipd-precheck-with-solution";
   const testTimeoutMs = Math.max(60_000, timeoutMinutes * 60_000);
+  const failedResult = (failed: PatchTestRunResult, phases: PatchTestRunResult[]): PatchPrecheckResult => ({
+    platform: "linux",
+    status: "failed",
+    passed: false,
+    phases,
+    durationMs: Date.now() - started,
+    error: patchPrecheckFailure(failed),
+  });
+
   try {
     await applyPrecheckPatch(testPatch, "test", workdir, env);
     await requiredCommand(`chmod +x ${quote(join(workdir, "test.sh"))}`, "/work", env, 30_000);
+    await clonePrecheckWorkspace(workdir, withoutSolutionWorkdir, env);
+    await clonePrecheckWorkspace(workdir, withSolutionWorkdir, env);
+    await applyPrecheckPatch(join(withSolutionWorkdir, "solution.patch"), "solution", withSolutionWorkdir, env);
 
-    const beforeBase = await runPatchTest("base-before-solution", "base", "all-pass", workdir, env, testTimeoutMs);
-    phases.push(beforeBase);
-    if (!beforeBase.passed) {
-      return {
-        platform: "linux",
-        status: "failed",
-        passed: false,
-        phases,
-        durationMs: Date.now() - started,
-        error: patchPrecheckFailure(beforeBase),
-      };
-    }
+    // Keep the two repository states isolated: base and new are run in the
+    // same state-specific directory, while the two states run concurrently.
+    const [beforeBase, afterBase] = await runPatchTestsInParallel(
+      runPatchTest("base-before-solution", "base", "all-pass", withoutSolutionWorkdir, env, testTimeoutMs),
+      runPatchTest("base-after-solution", "base", "all-pass", withSolutionWorkdir, env, testTimeoutMs),
+    );
+    phases.push(beforeBase, afterBase);
+    if (!beforeBase.passed) return failedResult(beforeBase, phases);
+    if (!afterBase.passed) return failedResult(afterBase, phases);
 
-    const beforeNew = await runPatchTest("new-before-solution", "new", "all-fail", workdir, env, testTimeoutMs);
-    phases.push(beforeNew);
-    if (!beforeNew.passed) {
-      return {
-        platform: "linux",
-        status: "failed",
-        passed: false,
-        phases,
-        durationMs: Date.now() - started,
-        error: patchPrecheckFailure(beforeNew),
-      };
-    }
-
-    await applyPrecheckPatch(solutionPatch, "solution", workdir, env);
-
-    const afterBase = await runPatchTest("base-after-solution", "base", "all-pass", workdir, env, testTimeoutMs);
-    phases.push(afterBase);
-    if (!afterBase.passed) {
-      return {
-        platform: "linux",
-        status: "failed",
-        passed: false,
-        phases,
-        durationMs: Date.now() - started,
-        error: patchPrecheckFailure(afterBase),
-      };
-    }
-
-    const afterNew = await runPatchTest("new-after-solution", "new", "all-pass", workdir, env, testTimeoutMs);
-    phases.push(afterNew);
-    if (!afterNew.passed) {
-      return {
-        platform: "linux",
-        status: "failed",
-        passed: false,
-        phases,
-        durationMs: Date.now() - started,
-        error: patchPrecheckFailure(afterNew),
-      };
-    }
+    const [beforeNew, afterNew] = await runPatchTestsInParallel(
+      runPatchTest("new-before-solution", "new", "all-fail", withoutSolutionWorkdir, env, testTimeoutMs),
+      runPatchTest("new-after-solution", "new", "all-pass", withSolutionWorkdir, env, testTimeoutMs),
+    );
+    phases.length = 0;
+    phases.push(beforeBase, beforeNew, afterBase, afterNew);
+    if (!beforeNew.passed) return failedResult(beforeNew, phases);
+    if (!afterNew.passed) return failedResult(afterNew, phases);
 
     return { platform: "linux", status: "ok", passed: true, phases, durationMs: Date.now() - started };
   } catch (error) {
@@ -522,6 +532,13 @@ async function runPatchPrecheck(
       durationMs: Date.now() - started,
       error: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    await runCommand(
+      `rm -rf ${quote(withoutSolutionWorkdir)} ${quote(withSolutionWorkdir)}`,
+      "/work",
+      env,
+      30_000,
+    ).catch(() => undefined);
   }
 }
 

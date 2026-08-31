@@ -18,7 +18,7 @@ import {
   loadChecksConfig,
   loadEnabledModelRefs,
   loadSolverGapConfig,
-  recordFargateResourceUsage,
+  persistFargateResourceUsage,
   SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
   SOLVER_GAP_DEFAULT_SOLVER_COUNT,
   SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
@@ -675,7 +675,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           }
           completed += 1;
           renderSolverProgress("finalizing");
-          if (fargateResourceUsage) saveChecksConfig(recordFargateResourceUsage(config, ctx.cwd, fargateResourceUsage));
+          if (fargateResourceUsage) persistFargateResourceUsage(ctx.cwd, fargateResourceUsage);
           if (abort.signal.aborted) {
             ctx.ui.notify("checks: cancelled.", "warning");
             return;

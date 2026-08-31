@@ -139,6 +139,35 @@ export function recordFargateResourceUsage(
   return { ...config, fargate: { ...fargate, projectProfiles } };
 }
 
+/** Persist adaptive Fargate sizing after either a solver-gap or quality-precheck run. */
+export function persistFargateResourceUsage(cwd: string, usage: FargateResourceUsage): void {
+  const config = loadChecksConfig();
+  if (config) {
+    saveChecksConfig(recordFargateResourceUsage(config, cwd, usage));
+    return;
+  }
+
+  // Quality checks can be used without configuring a reviewer model. Preserve
+  // that supported setup instead of dropping the Fargate-only configuration.
+  const raw = readRawChecksConfig();
+  const rawFargate = raw.fargate;
+  if (!rawFargate || typeof rawFargate !== "object" || Array.isArray(rawFargate)) return;
+  const next = recordFargateResourceUsage(
+    {
+      provider: "patch-precheck",
+      modelId: "patch-precheck",
+      thinkingLevel: "off",
+      fargate: rawFargate as FargateConfig,
+    },
+    cwd,
+    usage,
+  );
+  if (next.fargate?.adaptiveResourceProfile !== true) return;
+  const dir = dirname(CONFIG_PATH);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, fargate: next.fargate }, null, 2), "utf-8");
+}
+
 /** The nested `solverGap` section, normalized with sane defaults if partially missing/invalid. */
 export function loadSolverGapConfig(): SolverGapConfig | null {
   const solverGap = loadChecksConfig()?.solverGap;
