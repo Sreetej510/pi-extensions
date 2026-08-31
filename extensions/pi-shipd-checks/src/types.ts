@@ -19,7 +19,6 @@ export type PatchPrecheckPhase =
 
 export interface PatchTestRunResult {
   phase: PatchPrecheckPhase;
-  command: string;
   exitCode: number;
   tests: number | null;
   testcases: number | null;

@@ -393,7 +393,6 @@ async function runPatchTest(
   const counts = readJUnitCounts(outputPath);
   return {
     phase,
-    command,
     exitCode: result.code,
     tests: counts.tests,
     testcases: counts.testcases,
@@ -410,17 +409,38 @@ async function runPatchTest(
   };
 }
 
+function patchPhaseLabel(phase: PatchPrecheckPhase): string {
+  switch (phase) {
+    case "base-before-solution":
+      return "base tests before solution";
+    case "new-before-solution":
+      return "new tests before solution";
+    case "base-after-solution":
+      return "base tests after solution";
+    case "new-after-solution":
+      return "new tests after solution";
+  }
+}
+
 function patchPrecheckFailure(result: PatchTestRunResult): string {
   return [
-    `${result.phase} did not meet its expectation.`,
-    `command: ${result.command}`,
-    `exit code: ${result.exitCode}`,
-    `tests: ${result.tests ?? "unknown"}, testcases: ${result.testcases ?? "unknown"}, failures: ${result.failures ?? "unknown"} (${result.failedTestcases ?? "unknown"} testcase failures), errors: ${result.errors ?? "unknown"} (${result.erroredTestcases ?? "unknown"} testcase errors, ${result.suiteErrors ?? "unknown"} suite-level), skipped: ${result.skipped ?? "unknown"} (${result.skippedTestcases ?? "unknown"} testcases)`,
+    `phase: ${patchPhaseLabel(result.phase)}`,
     `failed tests: ${result.failedTestNames.length > 0 ? result.failedTestNames.join(", ") : "none"}`,
     `errored tests: ${result.erroredTestNames.length > 0 ? result.erroredTestNames.join(", ") : "none"}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ].join("\n");
+}
+
+async function applyPrecheckPatch(
+  patchPath: string,
+  label: "test" | "solution",
+  workdir: string,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  try {
+    await requiredCommand(`git -C ${quote(workdir)} apply --recount ${quote(patchPath)}`, "/work", env, 15 * 60_000);
+  } catch {
+    throw new Error(`${label} patch could not be applied.`);
+  }
 }
 
 async function runPatchPrecheck(
@@ -435,7 +455,7 @@ async function runPatchPrecheck(
   const solutionPatch = join(workdir, "solution.patch");
   const testTimeoutMs = Math.max(60_000, timeoutMinutes * 60_000);
   try {
-    await requiredCommand(`git -C ${quote(workdir)} apply --recount ${quote(testPatch)}`, "/work", env, 15 * 60_000);
+    await applyPrecheckPatch(testPatch, "test", workdir, env);
     await requiredCommand(`chmod +x ${quote(join(workdir, "test.sh"))}`, "/work", env, 30_000);
 
     const beforeBase = await runPatchTest("base-before-solution", "base", "all-pass", workdir, env, testTimeoutMs);
@@ -464,12 +484,7 @@ async function runPatchPrecheck(
       };
     }
 
-    await requiredCommand(
-      `git -C ${quote(workdir)} apply --recount ${quote(solutionPatch)}`,
-      "/work",
-      env,
-      15 * 60_000,
-    );
+    await applyPrecheckPatch(solutionPatch, "solution", workdir, env);
 
     const afterBase = await runPatchTest("base-after-solution", "base", "all-pass", workdir, env, testTimeoutMs);
     phases.push(afterBase);
