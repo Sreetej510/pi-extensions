@@ -523,7 +523,14 @@ async function initializeSource(plan: DockerPlan, env: NodeJS.ProcessEnv): Promi
     await download(requiredEnv("SHIPD_SOURCE_URL"), archive);
   }
   mkdirSync(plan.workdir, { recursive: true });
-  await requiredCommand(`tar -xzf ${quote(archive)} -C ${quote(plan.workdir)}`, plan.workdir, env, 15 * 60 * 1000);
+  const cleanWorkdir =
+    plan.workdir === "/" ? ":" : `find ${quote(plan.workdir)} -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +`;
+  await requiredCommand(
+    `set -eu\n${cleanWorkdir}\ntar --overwrite -xzf ${quote(archive)} -C ${quote(plan.workdir)}`,
+    "/work",
+    env,
+    15 * 60 * 1000,
+  );
   const git = [
     `git config --global --add safe.directory ${quote(plan.workdir)}`,
     `git -C ${quote(plan.workdir)} init -q`,
