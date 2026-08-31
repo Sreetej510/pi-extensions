@@ -23,10 +23,8 @@ export const SHIPD_JOB_LINK_COMMAND = "shipd:link";
 export const SHIPD_JOB_LINK_ENTRY = "shipd_job_link";
 
 const DEFAULT_STORAGE_STATE_PATH = join(homedir(), ".pi", "agent", "shipd-auth", "shipd.ai.json");
-const PATCH_PRECHECK_TIMEOUT_MINUTES = 10;
+const PATCH_PRECHECK_TIMEOUT_MINUTES = 15;
 const SHIPD_AUTH_URL = "https://shipd.ai/";
-const DEFAULT_TIMEOUT_MS = 900_000;
-const MAX_TIMEOUT_MS = 1_800_000;
 const PATCH_SCRIPT_TIMEOUT_MS = 120_000;
 const INITIAL_WAIT_MS = 300_000;
 const RECHECK_INTERVAL_MS = 90_000;
@@ -667,12 +665,6 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
       const executablePath = findChrome();
       if (!executablePath) throw new Error("Could not find Chrome/Chromium. Set SHIPD_CHROME_PATH and retry.");
 
-      const configuredTimeout = Number.parseInt(process.env.SHIPD_SUBMIT_TIMEOUT_MS ?? String(DEFAULT_TIMEOUT_MS), 10);
-      const timeoutMs = Math.min(
-        MAX_TIMEOUT_MS,
-        Math.max(30_000, Number.isFinite(configuredTimeout) ? configuredTimeout : DEFAULT_TIMEOUT_MS),
-      );
-      const deadline = Date.now() + timeoutMs;
       let browser: Browser | undefined;
       let page: Page | undefined;
       let precheckDir: string | undefined;
@@ -774,7 +766,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
 
           let nextCheckAt = Date.now() + INITIAL_WAIT_MS;
           while (true) {
-            const waitMs = Math.min(nextCheckAt, deadline) - Date.now();
+            const waitMs = nextCheckAt - Date.now();
             if (waitMs > 0) {
               onUpdate?.({
                 content: [{ type: "text", text: `Browser closed; next quality check in ${formatDuration(waitMs)}...` }],
@@ -783,9 +775,6 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
               await sleep(waitMs, signal);
             }
             checkCancelled(signal);
-            if (Date.now() >= deadline) {
-              throw new Error(`Shipd quality checks timed out after ${formatDuration(timeoutMs)}.`);
-            }
 
             onUpdate?.({
               content: [{ type: "text", text: "Reopening Shipd to check quality job status..." }],
@@ -818,7 +807,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
             await browser.close();
             browser = undefined;
             page = undefined;
-            nextCheckAt += RECHECK_INTERVAL_MS;
+            nextCheckAt = Date.now() + RECHECK_INTERVAL_MS;
           }
         } else {
           onUpdate?.({
