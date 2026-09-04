@@ -264,6 +264,7 @@ interface JUnitCounts {
   testcases: number | null;
   failures: number | null;
   failedTestcases: number | null;
+  passedTestcases: number | null;
   errors: number | null;
   erroredTestcases: number | null;
   suiteErrors: number | null;
@@ -306,6 +307,9 @@ function readJUnitCounts(path: string): JUnitCounts {
     );
     const failedCases = failedTestNames.length;
     const errorCases = erroredTestNames.length;
+    const passedCases = testcases.filter(
+      (caseXml) => !/<failure\b/i.test(caseXml) && !/<error\b/i.test(caseXml) && !/<skipped\b/i.test(caseXml),
+    ).length;
     const skippedCases = testcases.filter((caseXml) => /<skipped\b/i.test(caseXml)).length;
     const failureTags = [...xml.matchAll(/<failure\b/gi)].length;
     const errorTags = [...xml.matchAll(/<error\b/gi)].length;
@@ -325,6 +329,7 @@ function readJUnitCounts(path: string): JUnitCounts {
       testcases: testcaseCount,
       failures: aggregate("failures", failureTags, failedCases),
       failedTestcases: failedCases,
+      passedTestcases: passedCases,
       errors: aggregate("errors", errorTags, errorCases),
       erroredTestcases: errorCases,
       suiteErrors: Math.max(0, errorTags - testcaseErrorTags),
@@ -339,6 +344,7 @@ function readJUnitCounts(path: string): JUnitCounts {
       testcases: null,
       failures: null,
       failedTestcases: null,
+      passedTestcases: null,
       errors: null,
       erroredTestcases: null,
       suiteErrors: null,
@@ -356,6 +362,7 @@ function patchTestPassed(result: { code: number }, counts: JUnitCounts, expectat
     counts.testcases === null ||
     counts.failures === null ||
     counts.failedTestcases === null ||
+    counts.passedTestcases === null ||
     counts.errors === null ||
     counts.erroredTestcases === null ||
     counts.suiteErrors === null ||
@@ -374,6 +381,7 @@ function patchTestPassed(result: { code: number }, counts: JUnitCounts, expectat
       result.code === 0 &&
       counts.failures === 0 &&
       counts.failedTestcases === 0 &&
+      counts.passedTestcases === counts.testcases &&
       counts.errors === 0 &&
       counts.erroredTestcases === 0 &&
       counts.suiteErrors === 0
@@ -382,6 +390,7 @@ function patchTestPassed(result: { code: number }, counts: JUnitCounts, expectat
   return (
     result.code !== 0 &&
     counts.suiteErrors === 0 &&
+    counts.passedTestcases === 0 &&
     counts.failedTestcases + counts.erroredTestcases === counts.testcases
   );
 }
@@ -406,6 +415,7 @@ async function runPatchTest(
     testcases: counts.testcases,
     failures: counts.failures,
     failedTestcases: counts.failedTestcases,
+    passedTestcases: counts.passedTestcases,
     errors: counts.errors,
     erroredTestcases: counts.erroredTestcases,
     suiteErrors: counts.suiteErrors,
@@ -430,9 +440,24 @@ function patchPhaseLabel(phase: PatchPrecheckPhase): string {
   }
 }
 
+function patchPrecheckInstruction(phase: PatchPrecheckPhase): string {
+  switch (phase) {
+    case "new-before-solution":
+      return "Fix test.patch so every new test fails or errors before the solution; no new test may pass. Assert something behaviour so they only pass after the solution. Do not remove the tests.";
+    case "base-before-solution":
+      return "Modify test.sh to exclude the pre solution failing tests, so every base test passes before the solution with no failures or errors.";
+    case "base-after-solution":
+      return "Fix solution.patch so every base test passes after the solution with no failures or errors. Exclude the base test, if the fail not because of our solution (just flaky test).";
+    case "new-after-solution":
+      return "Fix solution.patch so every new test passes after the solution with no failures or errors.";
+  }
+}
+
 function patchPrecheckFailure(result: PatchTestRunResult): string {
   return [
     `phase: ${patchPhaseLabel(result.phase)}`,
+    `instruction: ${patchPrecheckInstruction(result.phase)}`,
+    `passed tests: ${result.passedTestcases ?? "unknown"}`,
     `failed tests: ${result.failedTestNames.length > 0 ? result.failedTestNames.join(", ") : "none"}`,
     `errored tests: ${result.erroredTestNames.length > 0 ? result.erroredTestNames.join(", ") : "none"}`,
   ].join("\n");
