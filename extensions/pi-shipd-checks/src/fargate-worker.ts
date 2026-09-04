@@ -440,15 +440,26 @@ function patchPhaseLabel(phase: PatchPrecheckPhase): string {
   }
 }
 
-function patchPrecheckInstruction(phase: PatchPrecheckPhase): string {
-  switch (phase) {
-    case "new-before-solution":
-      return "Fix test.patch so every new test fails or errors before the solution; no new test may pass. Assert something behaviour so they only pass after the solution. Do not remove the tests.";
+function patchPrecheckInstruction(result: PatchTestRunResult): string {
+  if (result.phase === "new-before-solution") {
+    if (result.passedTestcases !== null && result.passedTestcases > 0) {
+      return "Fix test.patch: add an assertion inside each passing new test for behavior introduced by the solution, so it fails before the solution and passes only after it. Do not remove tests.";
+    }
+    if (result.passedTestcases === 0 && result.failedTestcases === 0 && result.erroredTestcases === 0) {
+      return "Fix test.patch: each new test must fail or error individually before the solution. Do not rely on a whole-file, module, or import error; move solution-dependent imports or setup into each test (lazy import) so every testcase is collected and reports its own failure or error. Do not remove tests.";
+    }
+    return "Fix test.patch so every collected new test fails or errors individually before the solution; no new test may pass. Do not remove tests.";
+  }
+
+  switch (result.phase) {
     case "base-before-solution":
       return "Modify test.sh to exclude the pre solution failing tests, so every base test passes before the solution with no failures or errors.";
     case "base-after-solution":
-      return "Fix solution.patch so every base test passes after the solution with no failures or errors. Exclude the base test, if the fail not because of our solution (just flaky test).";
+      return "Base-test regression: fix solution.patch so every existing base test still passes after the solution. Do not delete, skip, deselect, weaken, or exclude base tests.";
     case "new-after-solution":
+      if (result.skippedTestcases !== null && result.skippedTestcases > 0) {
+        return "Fix solution.patch so every new test executes and passes after the solution. Do not skip, xfail, deselect, delete, or weaken new tests.";
+      }
       return "Fix solution.patch so every new test passes after the solution with no failures or errors.";
   }
 }
@@ -456,7 +467,7 @@ function patchPrecheckInstruction(phase: PatchPrecheckPhase): string {
 function patchPrecheckFailure(result: PatchTestRunResult): string {
   return [
     `phase: ${patchPhaseLabel(result.phase)}`,
-    `instruction: ${patchPrecheckInstruction(result.phase)}`,
+    `instruction: ${patchPrecheckInstruction(result)}`,
     `passed tests: ${result.passedTestcases ?? "unknown"}`,
     `failed tests: ${result.failedTestNames.length > 0 ? result.failedTestNames.join(", ") : "none"}`,
     `errored tests: ${result.erroredTestNames.length > 0 ? result.erroredTestNames.join(", ") : "none"}`,
