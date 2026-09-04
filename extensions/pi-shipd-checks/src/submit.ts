@@ -478,14 +478,71 @@ function qualitySummaryText(details: unknown, theme: Theme): string[] {
   ];
 }
 
+function parseErrorCount(lines: string[], label: string): number | undefined {
+  const line = lines.find((value) => new RegExp(`^${label}:`, "i").test(value));
+  const count = line?.match(/:\s*(\d+)/)?.[1];
+  return count === undefined ? undefined : Number.parseInt(count, 10);
+}
+
+function patchPrecheckUiProblem(
+  phase: string,
+  passed: number | undefined,
+  skipped: number | undefined,
+  failedLine: string,
+  erroredLine: string,
+): string {
+  if (phase === "new tests before solution") {
+    if (passed !== undefined && passed > 0) {
+      return "Some new tests pass before the solution; add assertions for behavior introduced by the solution.";
+    }
+    if (passed === 0 && /:\s*none$/i.test(failedLine) && /:\s*none$/i.test(erroredLine)) {
+      return "The test file did not produce individual failures or errors; use lazy imports so every test executes separately.";
+    }
+    return "Every new test must fail or error individually before the solution.";
+  }
+  if (phase === "new tests after solution") {
+    if (skipped !== undefined && skipped > 0) {
+      return "New tests were skipped after the solution; every new test must execute and pass.";
+    }
+    return "The solution does not make every new test pass.";
+  }
+  if (phase === "base tests after solution") {
+    return "Base-test regression: existing base tests fail after the solution.";
+  }
+  if (phase === "base tests before solution") {
+    return "Base tests fail before the solution; review the test patch and test setup.";
+  }
+  return "The patch precheck did not meet the required test outcomes.";
+}
+
 function compactToolError(result: { content?: Array<{ type: string; text?: string }> }): string {
   const text = (result.content ?? []).map((part) => (part.type === "text" ? (part.text ?? "") : "")).join(" ");
-  const compact = text
+  const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim().replace(/\s+/g, " "))
-    .join("\n")
-    .trim();
-  return compact.slice(0, 300) || "Quality checks failed";
+    .filter(Boolean);
+  const phaseLine = lines.find((line) => /^phase:/i.test(line));
+  if (/patch precheck/i.test(text)) {
+    if (phaseLine) {
+      const phase = phaseLine.replace(/^phase:\s*/i, "");
+      const passed = parseErrorCount(lines, "passed tests");
+      const skipped = parseErrorCount(lines, "skipped tests");
+      const failedLine = lines.find((line) => /^failed tests:/i.test(line)) ?? "";
+      const erroredLine = lines.find((line) => /^errored tests:/i.test(line)) ?? "";
+      return [
+        "Patch precheck failed.",
+        `Phase: ${phase}`,
+        `Problem: ${patchPrecheckUiProblem(phase, passed, skipped, failedLine, erroredLine)}`,
+      ].join("\n");
+    }
+    return "Patch precheck failed.\nProblem: The precheck task could not be completed.";
+  }
+  return (
+    lines
+      .map((line) => line.replace(/\bFargate\b\s*/gi, "").trim())
+      .slice(0, 4)
+      .join("\n") || "Quality checks failed"
+  );
 }
 
 function patchPrecheckError(result: PatchPrecheckResult): string {
@@ -685,7 +742,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         checkCancelled(signal);
 
         onUpdate?.({
-          content: [{ type: "text", text: "Running Fargate patch prechecks before opening Shipd..." }],
+          content: [{ type: "text", text: "Running patch prechecks before opening Shipd..." }],
           details: undefined,
         });
         precheckDir = await mkdtemp(join(tmpdir(), "shipd-patch-precheck-"));
@@ -715,7 +772,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           },
           onPhase: (phase) =>
             onUpdate?.({
-              content: [{ type: "text", text: `Fargate patch precheck: ${phase}...` }],
+              content: [{ type: "text", text: `Patch precheck: ${phase}...` }],
               details: undefined,
             }),
         });
@@ -724,9 +781,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         await rm(precheckDir, { recursive: true, force: true });
         precheckDir = undefined;
         onUpdate?.({
-          content: [
-            { type: "text", text: "Fargate patch prechecks passed; opening Shipd and filling draft fields..." },
-          ],
+          content: [{ type: "text", text: "Patch prechecks passed; opening Shipd and filling draft fields..." }],
           details: undefined,
         });
         checkCancelled(signal);
