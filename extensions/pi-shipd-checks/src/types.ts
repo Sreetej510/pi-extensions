@@ -24,6 +24,7 @@ export interface PatchTestRunResult {
   testcases: number | null;
   failures: number | null;
   failedTestcases: number | null;
+  passedTestcases: number | null;
   errors: number | null;
   erroredTestcases: number | null;
   suiteErrors: number | null;
