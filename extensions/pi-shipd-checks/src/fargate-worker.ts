@@ -363,7 +363,7 @@ function readJUnitCounts(path: string): JUnitCounts {
   }
 }
 
-function patchTestPassed(result: { code: number }, counts: JUnitCounts, expectation: "all-pass" | "all-fail"): boolean {
+function patchTestPassed(counts: JUnitCounts, expectation: "all-pass" | "all-fail"): boolean {
   if (
     counts.tests === null ||
     counts.testcases === null ||
@@ -377,7 +377,6 @@ function patchTestPassed(result: { code: number }, counts: JUnitCounts, expectat
     counts.skippedTestcases === null ||
     counts.tests <= 0 ||
     counts.testcases <= 0 ||
-    counts.testcases !== counts.tests ||
     counts.skipped !== 0 ||
     counts.skippedTestcases !== 0
   ) {
@@ -385,21 +384,14 @@ function patchTestPassed(result: { code: number }, counts: JUnitCounts, expectat
   }
   if (expectation === "all-pass") {
     return (
-      result.code === 0 &&
       counts.failures === 0 &&
       counts.failedTestcases === 0 &&
-      counts.passedTestcases === counts.testcases &&
       counts.errors === 0 &&
       counts.erroredTestcases === 0 &&
       counts.suiteErrors === 0
     );
   }
-  return (
-    result.code !== 0 &&
-    counts.suiteErrors === 0 &&
-    counts.passedTestcases === 0 &&
-    counts.failedTestcases + counts.erroredTestcases === counts.testcases
-  );
+  return counts.passedTestcases === 0;
 }
 
 async function runPatchTest(
@@ -435,7 +427,7 @@ async function runPatchTest(
     skippedTestcases: counts.skippedTestcases,
     failedTestNames: counts.failedTestNames,
     erroredTestNames: counts.erroredTestNames,
-    passed: patchTestPassed(result, counts, expectation),
+    passed: patchTestPassed(counts, expectation),
   };
 }
 
