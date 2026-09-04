@@ -480,7 +480,12 @@ function qualitySummaryText(details: unknown, theme: Theme): string[] {
 
 function compactToolError(result: { content?: Array<{ type: string; text?: string }> }): string {
   const text = (result.content ?? []).map((part) => (part.type === "text" ? (part.text ?? "") : "")).join(" ");
-  return clean(text).slice(0, 300) || "Quality checks failed";
+  const compact = text
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/\s+/g, " "))
+    .join("\n")
+    .trim();
+  return compact.slice(0, 300) || "Quality checks failed";
 }
 
 function patchPrecheckError(result: PatchPrecheckResult): string {
