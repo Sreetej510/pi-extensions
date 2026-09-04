@@ -50,6 +50,13 @@ registerBunOAuthFlows();
 const AGENT_DIR = "/opt/shipd-agent";
 const SOLVERS_DIR = "/work/solvers";
 const TAIL_CHARS = 4000;
+const WORKSPACE_PYTHON_WRAPPER = [
+  "#!/usr/bin/env bash",
+  'if [[ -d "$SHIPD_WORKSPACE_ROOT/src" ]]; then',
+  '  export PYTHONPATH="$SHIPD_WORKSPACE_ROOT/src$' + '{PYTHONPATH:+:$PYTHONPATH}"',
+  "fi",
+  'exec /usr/local/bin/python "$@"',
+].join("\n");
 
 // Command Code is a pi provider extension, not a CLI dependency. It is bundled
 // into this standalone worker and registered only when a solver selects it.
@@ -405,8 +412,13 @@ async function runPatchTest(
 ): Promise<PatchTestRunResult> {
   const outputPath = `/tmp/shipd-${phase}.xml`;
   const command = `./test.sh --output_path ${quote(outputPath)} ${mode}`;
-  await runCommand(`rm -f ${quote(outputPath)}`, workdir, env, 30_000);
-  const result = await runCommand(command, workdir, env, timeoutMs);
+  const testEnv: NodeJS.ProcessEnv = {
+    ...env,
+    SHIPD_WORKSPACE_ROOT: workdir,
+    PATH: `${join(workdir, ".shipd-bin")}:${env.PATH ?? ""}`,
+  };
+  await runCommand(`rm -f ${quote(outputPath)}`, workdir, testEnv, 30_000);
+  const result = await runCommand(command, workdir, testEnv, timeoutMs);
   const counts = readJUnitCounts(outputPath);
   return {
     phase,
@@ -469,6 +481,7 @@ function patchPrecheckFailure(result: PatchTestRunResult): string {
     `phase: ${patchPhaseLabel(result.phase)}`,
     `instruction: ${patchPrecheckInstruction(result)}`,
     `passed tests: ${result.passedTestcases ?? "unknown"}`,
+    `skipped tests: ${result.skippedTestcases ?? "unknown"}`,
     `failed tests: ${result.failedTestNames.length > 0 ? result.failedTestNames.join(", ") : "none"}`,
     `errored tests: ${result.erroredTestNames.length > 0 ? result.erroredTestNames.join(", ") : "none"}`,
   ].join("\n");
@@ -504,14 +517,20 @@ async function clonePrecheckWorkspace(
   destination: string,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
+  const wrapperDir = join(destination, ".shipd-bin");
+  const pythonWrapper = join(wrapperDir, "python");
   await requiredCommand(
     [
       "set -euo pipefail",
       `rm -rf ${quote(destination)}`,
-      `mkdir -p ${quote(destination)}`,
+      `mkdir -p ${quote(destination)} ${quote(wrapperDir)}`,
       `tar -cf - -C ${quote(sourceWorkdir)} . | tar --no-same-owner -xf - -C ${quote(destination)}`,
       `git config --global --add safe.directory ${quote(destination)}`,
       `chmod +x ${quote(join(destination, "test.sh"))}`,
+      `printf %s ${quote(WORKSPACE_PYTHON_WRAPPER)} > ${quote(pythonWrapper)}`,
+      `cp ${quote(pythonWrapper)} ${quote(join(wrapperDir, "python3"))}`,
+      `cp ${quote(pythonWrapper)} ${quote(join(wrapperDir, "python3.12"))}`,
+      `chmod +x ${quote(pythonWrapper)} ${quote(join(wrapperDir, "python3"))} ${quote(join(wrapperDir, "python3.12"))}`,
     ].join("\n"),
     "/work",
     env,
