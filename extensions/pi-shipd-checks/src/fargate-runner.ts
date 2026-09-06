@@ -363,6 +363,23 @@ export async function runFargateSolverGapFinder(opts: {
   return results;
 }
 
+function enforcePreSolutionPassInvariant(precheck: PatchPrecheckResult): PatchPrecheckResult {
+  const phase = precheck.phases.find((item) => item.phase === "new-before-solution");
+  if (!phase || phase.passedTestcases === null || phase.passedTestcases <= 0) return precheck;
+
+  const error =
+    precheck.error ??
+    [
+      "phase: new tests before solution",
+      "instruction: Fix test.patch so every new test fails or errors individually before the solution; no new test may pass. Do not remove tests.",
+      `passed tests: ${phase.passedTestcases}`,
+      `skipped tests: ${phase.skippedTestcases ?? "unknown"}`,
+      `failed tests: ${phase.failedTestNames.length > 0 ? phase.failedTestNames.join(", ") : "none"}`,
+      `errored tests: ${phase.erroredTestNames.length > 0 ? phase.erroredTestNames.join(", ") : "none"}`,
+    ].join("\n");
+  return { ...precheck, status: "failed", passed: false, error };
+}
+
 export async function runFargatePatchPrecheck(opts: {
   pi: ExtensionAPI;
   repoDir: string;
@@ -377,7 +394,7 @@ export async function runFargatePatchPrecheck(opts: {
   try {
     const payload = await runFargateWorker({ ...opts, mode: "patch-precheck" });
     if (!payload.precheck) throw new Error(payload.error ?? "no result was returned");
-    return payload.precheck;
+    return enforcePreSolutionPassInvariant(payload.precheck);
   } catch (error) {
     throw new Error(
       `Fargate patch precheck task failed.\nplatform: linux\n${error instanceof Error ? error.message : String(error)}`,
