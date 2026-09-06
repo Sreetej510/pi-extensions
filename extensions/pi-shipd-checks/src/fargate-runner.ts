@@ -32,7 +32,7 @@ import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { CONFIG_PATH, resolveFargateResources } from "./config.js";
+import { CONFIG_PATH, FARGATE_PREQUALITY_PROFILE, resolveFargateResources } from "./config.js";
 import { type FargateDockerPlan, parseFargateDockerfile } from "./fargate-docker.js";
 import { bashQuote, toSlashPath } from "./git.js";
 import { SOLVER_ARTIFACTS_DIRNAME } from "./solvergap.js";
@@ -110,7 +110,7 @@ async function runFargateWorker(opts: {
       `Fargate ${opts.mode === "solver" ? "solver gap finder" : "patch precheck"} requires Dockerfile in the project root.`,
     );
   const plan = parseFargateDockerfile(readFileSync(dockerfilePath, "utf-8"));
-  const fargateConfig = loadFargateConfigFromChecks(opts.config, opts.repoDir);
+  const fargateConfig = loadFargateConfigFromChecks(opts.config, opts.repoDir, opts.mode);
   const region = process.env.AWS_REGION ?? fargateConfig.region ?? "us-east-1";
   const clients = awsClients(region, fargateConfig.awsProfile);
   const resources = resolveFargateResources(opts.repoDir, fargateConfig);
@@ -385,8 +385,16 @@ export async function runFargatePatchPrecheck(opts: {
   }
 }
 
-function loadFargateConfigFromChecks(config: ChecksConfig, repoDir: string): FargateConfig {
+function loadFargateConfigFromChecks(config: ChecksConfig, repoDir: string, mode: WorkerMode): FargateConfig {
   const fargate = config.fargate ?? {};
+  if (mode === "patch-precheck") {
+    return {
+      ...fargate,
+      resourceProfile: FARGATE_PREQUALITY_PROFILE,
+      adaptiveResourceProfile: false,
+      projectProfiles: {},
+    };
+  }
   const projectProfile = fargate.projectProfiles?.[repoDir];
   return projectProfile ? { ...fargate, resourceProfile: projectProfile } : fargate;
 }

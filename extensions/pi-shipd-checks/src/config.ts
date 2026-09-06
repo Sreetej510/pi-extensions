@@ -41,6 +41,8 @@ export const FARGATE_RESOURCE_PROFILES = {
   large: { cpu: 4, memoryMiB: 8192 },
 } as const satisfies Record<FargateResourceProfile, { cpu: number; memoryMiB: number }>;
 export const FARGATE_DEFAULT_PROFILE: FargateResourceProfile = "medium";
+/** Quality patch prechecks always use this fixed profile instead of adaptive sizing. */
+export const FARGATE_PREQUALITY_PROFILE: FargateResourceProfile = "medium";
 export const FARGATE_DEFAULT_MAX_RETRIES = 1;
 const FARGATE_CPU_UPGRADE_DURATION_MS = 7 * 60 * 1000;
 const FARGATE_CPU_DOWNGRADE_DURATION_MS = 2 * 60 * 1000;
@@ -139,7 +141,7 @@ export function recordFargateResourceUsage(
   return { ...config, fargate: { ...fargate, projectProfiles } };
 }
 
-/** Persist adaptive Fargate sizing after either a solver-gap or quality-precheck run. */
+/** Persist adaptive Fargate sizing after a solver-gap run. */
 export function persistFargateResourceUsage(cwd: string, usage: FargateResourceUsage): void {
   const config = loadChecksConfig();
   if (config) {

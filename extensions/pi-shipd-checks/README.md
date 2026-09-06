@@ -143,14 +143,14 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
    ```
 
    `cluster`, `subnetIds`, and `securityGroupId` are optional when a default VPC is available.
-   With `adaptiveResourceProfile: true`, the first solver-gap or quality patch-precheck run for
-   a repository uses `resourceProfile` (unless `projectProfiles` already overrides it); later runs
-   upgrade when normalized CPU is at least 95% for more than seven
-   minutes, downgrade when CPU is at least 95% for under two minutes, and otherwise retain the
-   profile. Only the selected next profile is written to `projectProfiles`; CPU telemetry is
-   included in `shipd_report.json` for solver-gap runs, but no telemetry history is retained. Set
-   `projectProfiles` to override resources per repository:
-   `{"C:/path/to/repo":"large"}`.
+   With `adaptiveResourceProfile: true`, solver-gap runs use `resourceProfile` initially and adapt
+   on later runs (unless `projectProfiles` already overrides the repository). They upgrade when
+   normalized CPU is at least 95% for more than seven minutes, downgrade when CPU is at least 95%
+   for under two minutes, and otherwise retain the profile. Only the selected next profile is
+   written to `projectProfiles`; CPU telemetry is included in `shipd_report.json` for solver-gap
+   runs, but no telemetry history is retained. Quality patch prechecks always use the `medium`
+   profile and do not update adaptive sizing. Set `projectProfiles` to override solver-gap
+   resources per repository: `{"C:/path/to/repo":"large"}`.
 
 5. Restart pi, use `/checks --config` to select the solver and reviewer models, then run
    `/checks --solver-gap-finder`. Projects need `Dockerfile`, `agent_prompt.md`,
@@ -168,8 +168,7 @@ credential from the local pi auth state for the task; never put the credential i
 Use `/analyze:on` and `/analyze:off` to control the gap-finder and solution-precheck tools per project, like HPC. The
 enabled project list is stored alongside the other settings in `~/.pi/agent/checks-config.json`.
 
-The patch precheck applies `test.patch`, creates isolated workspaces with and without `solution.patch`, and runs the
-base suites concurrently in both workspaces followed by the new suites concurrently in both workspaces. It requires
+The patch precheck always uses the `medium` Fargate profile. It applies `test.patch`, creates isolated workspaces with and without `solution.patch`, and runs the base suites concurrently in both workspaces followed by the new suites concurrently in both workspaces. It requires
 `./test.sh base` to pass, requires every `./test.sh new` testcase to fail or error individually (with no suite-level error)
 before `solution.patch`, then requires both base and new suites to pass after the solution patch. A failed precheck aborts
 before Shipd is opened and includes the Linux platform, a human-readable phase, and failed/errored test names in the tool error.
