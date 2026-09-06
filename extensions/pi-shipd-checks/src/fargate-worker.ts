@@ -314,9 +314,6 @@ function readJUnitCounts(path: string): JUnitCounts {
     );
     const failedCases = failedTestNames.length;
     const errorCases = erroredTestNames.length;
-    const passedCases = testcases.filter(
-      (caseXml) => !/<failure\b/i.test(caseXml) && !/<error\b/i.test(caseXml) && !/<skipped\b/i.test(caseXml),
-    ).length;
     const skippedCases = testcases.filter((caseXml) => /<skipped\b/i.test(caseXml)).length;
     const failureTags = [...xml.matchAll(/<failure\b/gi)].length;
     const errorTags = [...xml.matchAll(/<error\b/gi)].length;
@@ -331,16 +328,23 @@ function readJUnitCounts(path: string): JUnitCounts {
     };
     const aggregate = (name: string, tags: number, fallback: number) =>
       Math.max(xmlNumber(root, name) ?? sumSuite(name, fallback), tags);
+    const tests = xmlNumber(root, "tests") ?? sumSuite("tests", testcaseCount);
+    const failures = aggregate("failures", failureTags, failedCases);
+    const errors = aggregate("errors", errorTags, errorCases);
+    const skipped = aggregate("skipped", skippedTags, skippedCases);
+    // Derive passes from the report totals, not only parsed testcase nodes. A
+    // report can omit a passing testcase while still declaring it in tests.
+    const passedCases = tests >= failures + errors + skipped ? tests - failures - errors - skipped : null;
     return {
-      tests: xmlNumber(root, "tests") ?? sumSuite("tests", testcaseCount),
+      tests,
       testcases: testcaseCount,
-      failures: aggregate("failures", failureTags, failedCases),
+      failures,
       failedTestcases: failedCases,
       passedTestcases: passedCases,
-      errors: aggregate("errors", errorTags, errorCases),
+      errors,
       erroredTestcases: errorCases,
       suiteErrors: Math.max(0, errorTags - testcaseErrorTags),
-      skipped: aggregate("skipped", skippedTags, skippedCases),
+      skipped,
       skippedTestcases: skippedCases,
       failedTestNames,
       erroredTestNames,
@@ -377,8 +381,13 @@ function patchTestPassed(counts: JUnitCounts, expectation: "all-pass" | "all-fai
     counts.skippedTestcases === null ||
     counts.tests <= 0 ||
     counts.testcases <= 0 ||
+    // A missing testcase must not make a pre-solution run look all-failing.
+    counts.tests !== counts.testcases ||
     counts.skipped !== 0 ||
-    counts.skippedTestcases !== 0
+    counts.skippedTestcases !== 0 ||
+    counts.failedTestcases + counts.erroredTestcases + counts.skippedTestcases + counts.passedTestcases !==
+      counts.testcases ||
+    counts.suiteErrors !== 0
   ) {
     return false;
   }
