@@ -34,9 +34,9 @@ The agent-callable `quality-check` tool runs `create_patches.sh` in the current 
 `agent_prompt.md`, `test.patch`, and `solution.patch`, first runs a Fargate patch precheck against a clean `HEAD`, then
 fills the authenticated Shipd draft fields, runs fresh checks with a `Run` button, reruns checks marked `Stale`, skips
 current checks, starts Test Quality before Solution Quality in one browser tab, waits for any started jobs, and returns only the useful report data:
-`details.testQuality.coverageSuggestions`, `details.testQuality.tests` filtered to items whose `fairness` is exactly
-`"Not fair"`, and the complete `details.solutionQuality.evaluation` block. Its compact UI is labeled `Quality Checks`,
-shows live elapsed time, and only displays unfair-test count, suggestion count, code-quality score, and
+`details.testQuality.coverageSuggestions`, `details.testQuality.tests` filtered to test blocks whose `concerns` array is
+non-empty, and the complete `details.solutionQuality.evaluation` block. Its compact UI is labeled `Quality Checks`,
+shows live elapsed time, and only displays test-concern count, suggestion count, code-quality score, and
 comprehensiveness score. It takes no parameters. It uses one fresh headless browser tab at a time: it closes the
 browser after starting the needed jobs, checks after 5 minutes, then reopens every 90 seconds until those jobs finish, with no
 client-side overall timeout. If

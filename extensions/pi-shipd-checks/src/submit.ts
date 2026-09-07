@@ -432,8 +432,10 @@ function buildAgentResult(
   solutionReport: QualityReport | undefined,
 ): JsonRecord {
   const coverageSuggestions = Array.isArray(testReport?.coverageSuggestions) ? testReport.coverageSuggestions : [];
-  const unfairTests = Array.isArray(testReport?.tests)
-    ? testReport.tests.filter((item): item is JsonRecord => isRecord(item) && item.fairness === "Not fair")
+  const testsWithConcerns = Array.isArray(testReport?.tests)
+    ? testReport.tests.filter(
+        (item): item is JsonRecord => isRecord(item) && Array.isArray(item.concerns) && item.concerns.length > 0,
+      )
     : [];
   return {
     testQuality: {
@@ -441,7 +443,7 @@ function buildAgentResult(
       completed: testReport?.completed ?? false,
       skipped: !testReport,
       coverageSuggestions,
-      tests: unfairTests,
+      tests: testsWithConcerns,
     },
     solutionQuality: {
       verdict: solutionReport?.verdict ?? null,
@@ -463,11 +465,11 @@ function qualitySummaryText(details: unknown, theme: Theme): string[] {
   const value = isRecord(details) ? details : {};
   const testQuality = isRecord(value.testQuality) ? value.testQuality : {};
   const solutionQuality = isRecord(value.solutionQuality) ? value.solutionQuality : {};
-  const unfairCount = Array.isArray(testQuality.tests) ? testQuality.tests.length : 0;
+  const concernCount = Array.isArray(testQuality.tests) ? testQuality.tests.length : 0;
   const suggestionCount = Array.isArray(testQuality.coverageSuggestions) ? testQuality.coverageSuggestions.length : 0;
   const evaluation = solutionQuality.evaluation;
   const testSummary =
-    testQuality.skipped === true ? "skipped" : `${unfairCount} unfair · ${suggestionCount} suggestions`;
+    testQuality.skipped === true ? "skipped" : `${concernCount} concerns · ${suggestionCount} suggestions`;
   const solutionSummary =
     solutionQuality.skipped === true
       ? "skipped"
@@ -662,8 +664,8 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
       "Run create_patches.sh in the current working directory, read agent_prompt.md, test.patch, and solution.patch, " +
       "run the Fargate patch precheck, then fill the Shipd challenge draft fields, run fresh checks with a Run button, " +
       "rerun checks marked Stale, and skip current checks. Start Test Quality then Solution Quality in one browser tab. " +
-      "Wait for any started jobs and return agent-focused JSON. details.testQuality contains coverageSuggestions and only tests whose " +
-      'fairness is exactly "Not fair"; details.solutionQuality contains the complete evaluation block. This consumes Shipd ' +
+      "Wait for any started jobs and return agent-focused JSON. details.testQuality contains coverageSuggestions and test blocks whose " +
+      "concerns array is non-empty; details.solutionQuality contains the complete evaluation block. This consumes Shipd " +
       "tokens and does not click the final challenge-submit button.",
     promptSnippet: "Submit the working-directory patches to Shipd",
     promptGuidelines: [
