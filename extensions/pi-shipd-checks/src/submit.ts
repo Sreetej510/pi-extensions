@@ -432,24 +432,29 @@ function buildAgentResult(
   solutionReport: QualityReport | undefined,
 ): JsonRecord {
   const coverageSuggestions = Array.isArray(testReport?.coverageSuggestions) ? testReport.coverageSuggestions : [];
-  const testsWithConcerns = Array.isArray(testReport?.tests)
-    ? testReport.tests.filter(
-        (item): item is JsonRecord => isRecord(item) && Array.isArray(item.concerns) && item.concerns.length > 0,
-      )
+  const unfairnessTests = Array.isArray(testReport?.tests)
+    ? testReport.tests
+        .filter(
+          (item): item is JsonRecord =>
+            isRecord(item) &&
+            (item.fairness === "Not fair" || (Array.isArray(item.concerns) && item.concerns.length > 0)),
+        )
+        .map((item) =>
+          item.fairness === "Not fair" && Array.isArray(item.concerns) && item.concerns.length === 0
+            ? { ...item, concerns: ["Not fully fair"] }
+            : item,
+        )
     : [];
   return {
     testQuality: {
-      verdict: testReport?.verdict ?? null,
-      completed: testReport?.completed ?? false,
-      skipped: !testReport,
+      verdict: testReport ? (unfairnessTests.length === 0 && coverageSuggestions.length === 0 ? "PASS" : "FAIL") : null,
       coverageSuggestions,
-      tests: testsWithConcerns,
+      unfairnessCount: unfairnessTests.length,
+      tests: unfairnessTests,
     },
     solutionQuality: {
-      verdict: solutionReport?.verdict ?? null,
-      completed: solutionReport?.completed ?? false,
-      skipped: !solutionReport,
-      evaluation: solutionReport?.evaluation ?? null,
+      verdict: solutionReport ? (hasPerfectSolutionEvaluation(solutionReport.evaluation) ? "PASS" : "FAIL") : null,
+      evaluation: filterSolutionEvaluation(solutionReport?.evaluation),
     },
   };
 }
@@ -461,17 +466,58 @@ function scoreText(evaluation: unknown, key: "code_quality" | "solution_comprehe
   return typeof score === "number" && typeof maxScore === "number" ? `${score}/${maxScore}` : "—";
 }
 
+function filterSolutionEvaluation(evaluation: unknown): unknown {
+  if (!isRecord(evaluation)) return evaluation ?? null;
+  return Object.fromEntries(
+    Object.entries(evaluation)
+      .filter(([key]) => key !== "overall_feedback")
+      .map(([key, value]) => [
+        key,
+        isRecord(value)
+          ? Object.fromEntries(Object.entries(value).filter(([nestedKey]) => nestedKey !== "level"))
+          : value,
+      ]),
+  );
+}
+
+function hasPerfectSolutionEvaluation(evaluation: unknown): boolean {
+  if (!isRecord(evaluation)) return false;
+  const requiredCriteria = ["code_quality", "solution_comprehensiveness"];
+  if (
+    !requiredCriteria.every((key) => {
+      const criterion = evaluation[key];
+      return isRecord(criterion) && typeof criterion.score === "number" && typeof criterion.max_score === "number";
+    })
+  ) {
+    return false;
+  }
+  const scoredCriteria = Object.values(evaluation).filter(
+    (value): value is JsonRecord => isRecord(value) && ("score" in value || "max_score" in value),
+  );
+  return scoredCriteria.every(
+    (criterion) =>
+      typeof criterion.score === "number" &&
+      typeof criterion.max_score === "number" &&
+      criterion.score === criterion.max_score,
+  );
+}
+
 function qualitySummaryText(details: unknown, theme: Theme): string[] {
   const value = isRecord(details) ? details : {};
   const testQuality = isRecord(value.testQuality) ? value.testQuality : {};
   const solutionQuality = isRecord(value.solutionQuality) ? value.solutionQuality : {};
-  const concernCount = Array.isArray(testQuality.tests) ? testQuality.tests.length : 0;
+  const unfairnessCount =
+    typeof testQuality.unfairnessCount === "number"
+      ? testQuality.unfairnessCount
+      : Array.isArray(testQuality.tests)
+        ? testQuality.tests.length
+        : 0;
   const suggestionCount = Array.isArray(testQuality.coverageSuggestions) ? testQuality.coverageSuggestions.length : 0;
   const evaluation = solutionQuality.evaluation;
   const testSummary =
-    testQuality.skipped === true ? "skipped" : `${concernCount} concerns · ${suggestionCount} suggestions`;
+    testQuality.verdict === null ? "skipped" : `${unfairnessCount} unfairness · ${suggestionCount} suggestions`;
   const solutionSummary =
-    solutionQuality.skipped === true
+    solutionQuality.verdict === null
       ? "skipped"
       : `quality ${scoreText(evaluation, "code_quality")} · comprehensiveness ${scoreText(evaluation, "solution_comprehensiveness")}`;
   return [
@@ -664,8 +710,10 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
       "Run create_patches.sh in the current working directory, read agent_prompt.md, test.patch, and solution.patch, " +
       "run the Fargate patch precheck, then fill the Shipd challenge draft fields, run fresh checks with a Run button, " +
       "rerun checks marked Stale, and skip current checks. Start Test Quality then Solution Quality in one browser tab. " +
-      "Wait for any started jobs and return agent-focused JSON. details.testQuality contains coverageSuggestions and test blocks whose " +
-      "concerns array is non-empty; details.solutionQuality contains the complete evaluation block. This consumes Shipd " +
+      "Wait for any started jobs and return agent-focused JSON. details.testQuality contains verdict, coverageSuggestions, an unfairnessCount, and test blocks whose " +
+      'concerns array is non-empty or whose fairness is exactly "Not fair"; Test Quality is PASS only when both filtered arrays are empty. ' +
+      "details.solutionQuality contains verdict and evaluation fields with level and overall_feedback removed; Solution Quality is PASS only when every score equals its max_score. " +
+      "Neither quality result contains completed or skipped. This consumes Shipd " +
       "tokens and does not click the final challenge-submit button.",
     promptSnippet: "Submit the working-directory patches to Shipd",
     promptGuidelines: [
@@ -806,7 +854,6 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           }
         }
 
-        let completed = initialStatuses.map(({ quality, rowText }) => ({ quality, rowText }));
         if (qualitiesToMonitor.length > 0) {
           onUpdate?.({
             content: [
@@ -842,12 +889,6 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
             page = reopened.page;
             const statuses = await readQualityStatuses(page, signal, qualitiesToMonitor);
             if (statuses.every((status) => !status.busy)) {
-              completed = [
-                ...initialStatuses
-                  .filter((status) => !qualitiesToMonitor.includes(status.quality))
-                  .map(({ quality, rowText }) => ({ quality, rowText })),
-                ...statuses.map(({ quality, rowText }) => ({ quality, rowText })),
-              ];
               break;
             }
 
@@ -876,12 +917,8 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         if (!page) throw new Error("Shipd quality status page was closed before report extraction.");
         onUpdate?.({ content: [{ type: "text", text: "Extracting quality reports..." }], details: undefined });
         const reports: ExtractedReport[] = [];
-        const skipped: QualityName[] = [];
         for (const quality of QUALITY_NAMES) {
-          if (!(await hasQualityReport(page, quality))) {
-            skipped.push(quality);
-            continue;
-          }
+          if (!(await hasQualityReport(page, quality))) continue;
           reports.push(await extractQualityReport(page, quality, signal));
         }
         const testReport = reports.find((report) => report.quality === "Test Quality")?.parsed;
@@ -889,7 +926,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         const result = buildAgentResult(testReport, solutionReport);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          details: { ...result, started, completed, skipped, precheck },
+          details: { ...result, started, precheck },
         };
       } catch (error) {
         if (signal?.aborted) throw new Error("Cancelled by user.");
