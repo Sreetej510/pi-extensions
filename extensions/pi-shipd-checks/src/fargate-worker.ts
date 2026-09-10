@@ -275,10 +275,12 @@ interface JUnitCounts {
   errors: number | null;
   erroredTestcases: number | null;
   suiteErrors: number | null;
+  collectionErrors: number | null;
   skipped: number | null;
   skippedTestcases: number | null;
   failedTestNames: string[];
   erroredTestNames: string[];
+  collectionErrorNames: string[];
 }
 
 function xmlNumber(tag: string | undefined, name: string): number | null {
@@ -299,6 +301,13 @@ function testCaseName(caseXml: string, index: number): string {
   return classname ? `${classname}::${name}` : name;
 }
 
+function isCollectionError(caseXml: string): boolean {
+  if (!/<error\b/i.test(caseXml)) return false;
+  const errorTag = caseXml.match(/<error\b[^>]*>/i)?.[0] ?? "";
+  const classname = xmlString(caseXml, "classname");
+  return /collection\s+failure/i.test(errorTag) || classname === undefined || classname.trim().length === 0;
+}
+
 function readJUnitCounts(path: string): JUnitCounts {
   try {
     const xml = readFileSync(path, "utf-8");
@@ -314,6 +323,10 @@ function readJUnitCounts(path: string): JUnitCounts {
     );
     const failedCases = failedTestNames.length;
     const errorCases = erroredTestNames.length;
+    const collectionErrorNames = testcases.flatMap((caseXml, index) =>
+      isCollectionError(caseXml) ? [testCaseName(caseXml, index)] : [],
+    );
+    const collectionErrors = collectionErrorNames.length;
     const skippedCases = testcases.filter((caseXml) => /<skipped\b/i.test(caseXml)).length;
     const failureTags = [...xml.matchAll(/<failure\b/gi)].length;
     const errorTags = [...xml.matchAll(/<error\b/gi)].length;
@@ -344,10 +357,12 @@ function readJUnitCounts(path: string): JUnitCounts {
       errors,
       erroredTestcases: errorCases,
       suiteErrors: Math.max(0, errorTags - testcaseErrorTags),
+      collectionErrors,
       skipped,
       skippedTestcases: skippedCases,
       failedTestNames,
       erroredTestNames,
+      collectionErrorNames,
     };
   } catch {
     return {
@@ -359,10 +374,12 @@ function readJUnitCounts(path: string): JUnitCounts {
       errors: null,
       erroredTestcases: null,
       suiteErrors: null,
+      collectionErrors: null,
       skipped: null,
       skippedTestcases: null,
       failedTestNames: [],
       erroredTestNames: [],
+      collectionErrorNames: [],
     };
   }
 }
@@ -377,6 +394,7 @@ function patchTestPassed(counts: JUnitCounts, expectation: "all-pass" | "all-fai
     counts.errors === null ||
     counts.erroredTestcases === null ||
     counts.suiteErrors === null ||
+    counts.collectionErrors === null ||
     counts.skipped === null ||
     counts.skippedTestcases === null ||
     counts.tests <= 0 ||
@@ -387,7 +405,8 @@ function patchTestPassed(counts: JUnitCounts, expectation: "all-pass" | "all-fai
     counts.skippedTestcases !== 0 ||
     counts.failedTestcases + counts.erroredTestcases + counts.skippedTestcases + counts.passedTestcases !==
       counts.testcases ||
-    counts.suiteErrors !== 0
+    counts.suiteErrors !== 0 ||
+    counts.collectionErrors !== 0
   ) {
     return false;
   }
@@ -400,7 +419,11 @@ function patchTestPassed(counts: JUnitCounts, expectation: "all-pass" | "all-fai
       counts.suiteErrors === 0
     );
   }
-  return counts.passedTestcases === 0;
+  return (
+    counts.passedTestcases === 0 &&
+    counts.failedTestcases + counts.erroredTestcases > 0 &&
+    counts.failures + counts.errors > 0
+  );
 }
 
 async function runPatchTest(
@@ -432,10 +455,12 @@ async function runPatchTest(
     errors: counts.errors,
     erroredTestcases: counts.erroredTestcases,
     suiteErrors: counts.suiteErrors,
+    collectionErrors: counts.collectionErrors,
     skipped: counts.skipped,
     skippedTestcases: counts.skippedTestcases,
     failedTestNames: counts.failedTestNames,
     erroredTestNames: counts.erroredTestNames,
+    collectionErrorNames: counts.collectionErrorNames,
     passed: patchTestPassed(counts, expectation),
   };
 }
@@ -457,6 +482,9 @@ function patchPrecheckInstruction(result: PatchTestRunResult): string {
   if (result.phase === "new-before-solution") {
     if (result.passedTestcases !== null && result.passedTestcases > 0) {
       return "Fix test.patch: add an assertion inside each passing new test for behavior introduced by the solution, so it fails before the solution and passes only after it. Do not remove tests.";
+    }
+    if (result.collectionErrors !== null && result.collectionErrors > 0) {
+      return "Fix test.patch: each new test must fail or error individually before the solution. Do not rely on a whole-file, module, or import error; move solution-dependent imports or setup into each test (lazy import) so every testcase is collected and reports its own failure or error. Do not remove tests.";
     }
     if (result.passedTestcases === 0 && result.failedTestcases === 0 && result.erroredTestcases === 0) {
       return "Fix test.patch: each new test must fail or error individually before the solution. Do not rely on a whole-file, module, or import error; move solution-dependent imports or setup into each test (lazy import) so every testcase is collected and reports its own failure or error. Do not remove tests.";
@@ -485,6 +513,7 @@ function patchPrecheckFailure(result: PatchTestRunResult): string {
     `skipped tests: ${result.skippedTestcases ?? "unknown"}`,
     `failed tests: ${result.failedTestNames.length > 0 ? result.failedTestNames.join(", ") : "none"}`,
     `errored tests: ${result.erroredTestNames.length > 0 ? result.erroredTestNames.join(", ") : "none"}`,
+    `collection errors: ${result.collectionErrorNames.length > 0 ? result.collectionErrorNames.join(", ") : "none"}`,
   ].join("\n");
 }
 

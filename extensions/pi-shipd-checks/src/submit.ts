@@ -538,10 +538,14 @@ function patchPrecheckUiProblem(
   skipped: number | undefined,
   failedLine: string,
   erroredLine: string,
+  collectionLine: string,
 ): string {
   if (phase === "new tests before solution") {
     if (passed !== undefined && passed > 0) {
       return "Some new tests pass before the solution; add assertions for behavior introduced by the solution.";
+    }
+    if (collectionLine && !/:\s*none$/i.test(collectionLine)) {
+      return "New tests fail during collection; move solution-dependent imports or setup into each test so every testcase fails or errors individually.";
     }
     if (passed === 0 && /:\s*none$/i.test(failedLine) && /:\s*none$/i.test(erroredLine)) {
       return "The test file did not produce individual failures or errors; use lazy imports so every test executes separately.";
@@ -577,10 +581,11 @@ function compactToolError(result: { content?: Array<{ type: string; text?: strin
       const skipped = parseErrorCount(lines, "skipped tests");
       const failedLine = lines.find((line) => /^failed tests:/i.test(line)) ?? "";
       const erroredLine = lines.find((line) => /^errored tests:/i.test(line)) ?? "";
+      const collectionLine = lines.find((line) => /^collection errors:/i.test(line)) ?? "";
       return [
         "Patch precheck failed.",
         `Phase: ${phase}`,
-        `Problem: ${patchPrecheckUiProblem(phase, passed, skipped, failedLine, erroredLine)}`,
+        `Problem: ${patchPrecheckUiProblem(phase, passed, skipped, failedLine, erroredLine, collectionLine)}`,
       ].join("\n");
     }
     return "Patch precheck failed.\nProblem: The precheck task could not be completed.";

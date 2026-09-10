@@ -28,10 +28,12 @@ export interface PatchTestRunResult {
   errors: number | null;
   erroredTestcases: number | null;
   suiteErrors: number | null;
+  collectionErrors: number | null;
   skipped: number | null;
   skippedTestcases: number | null;
   failedTestNames: string[];
   erroredTestNames: string[];
+  collectionErrorNames: string[];
   passed: boolean;
 }
 
