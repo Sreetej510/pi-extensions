@@ -374,8 +374,7 @@ function enforcePreSolutionPassInvariant(precheck: PatchPrecheckResult): PatchPr
       "instruction: Fix test.patch so every new test fails or errors individually before the solution; no new test may pass. Do not remove tests.",
       `passed tests: ${phase.passedTestcases}`,
       `skipped tests: ${phase.skippedTestcases ?? "unknown"}`,
-      `failed tests: ${phase.failedTestNames.length > 0 ? phase.failedTestNames.join(", ") : "none"}`,
-      `errored tests: ${phase.erroredTestNames.length > 0 ? phase.erroredTestNames.join(", ") : "none"}`,
+      `passing tests: ${phase.passedTestNames.length > 0 ? phase.passedTestNames.join(", ") : "unknown"}`,
     ].join("\n");
   return { ...precheck, status: "failed", passed: false, error };
 }

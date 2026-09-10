@@ -33,6 +33,7 @@ export interface PatchTestRunResult {
   skippedTestcases: number | null;
   failedTestNames: string[];
   erroredTestNames: string[];
+  passedTestNames: string[];
   collectionErrorNames: string[];
   passed: boolean;
 }

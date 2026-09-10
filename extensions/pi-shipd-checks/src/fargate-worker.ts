@@ -280,6 +280,7 @@ interface JUnitCounts {
   skippedTestcases: number | null;
   failedTestNames: string[];
   erroredTestNames: string[];
+  passedTestNames: string[];
   collectionErrorNames: string[];
 }
 
@@ -308,6 +309,24 @@ function isCollectionError(caseXml: string): boolean {
   return /collection\s+failure/i.test(errorTag) || classname === undefined || classname.trim().length === 0;
 }
 
+function normalizePytestNodeId(nodeId: string): string {
+  const separator = nodeId.indexOf("::");
+  if (separator < 0) return nodeId;
+  const file = nodeId
+    .slice(0, separator)
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\.py$/, "")
+    .replace(/\//g, ".");
+  return `${file}::${nodeId.slice(separator + 2)}`;
+}
+
+function parsePassedTestNames(output: string): string[] {
+  return [...output.matchAll(/^\s*(.+?)\s+PASSED(?:\s+\[[^\]]+\])?\s*$/gim)].map((match) =>
+    normalizePytestNodeId(match[1]?.trim() ?? ""),
+  );
+}
+
 function readJUnitCounts(path: string): JUnitCounts {
   try {
     const xml = readFileSync(path, "utf-8");
@@ -320,6 +339,9 @@ function readJUnitCounts(path: string): JUnitCounts {
     );
     const erroredTestNames = testcases.flatMap((caseXml, index) =>
       /<error\b/i.test(caseXml) ? [testCaseName(caseXml, index)] : [],
+    );
+    const passedTestNames = testcases.flatMap((caseXml, index) =>
+      !/<failure\b|<error\b|<skipped\b/i.test(caseXml) ? [testCaseName(caseXml, index)] : [],
     );
     const failedCases = failedTestNames.length;
     const errorCases = erroredTestNames.length;
@@ -362,6 +384,7 @@ function readJUnitCounts(path: string): JUnitCounts {
       skippedTestcases: skippedCases,
       failedTestNames,
       erroredTestNames,
+      passedTestNames,
       collectionErrorNames,
     };
   } catch {
@@ -379,6 +402,7 @@ function readJUnitCounts(path: string): JUnitCounts {
       skippedTestcases: null,
       failedTestNames: [],
       erroredTestNames: [],
+      passedTestNames: [],
       collectionErrorNames: [],
     };
   }
@@ -444,6 +468,9 @@ async function runPatchTest(
   await runCommand(`rm -f ${quote(outputPath)}`, workdir, testEnv, 30_000);
   const result = await runCommand(command, workdir, testEnv, timeoutMs);
   const counts = readJUnitCounts(outputPath);
+  const passedTestNames = [
+    ...new Set([...counts.passedTestNames, ...parsePassedTestNames(`${result.stdout}\n${result.stderr}`)]),
+  ];
   return {
     phase,
     exitCode: result.code,
@@ -460,6 +487,7 @@ async function runPatchTest(
     skippedTestcases: counts.skippedTestcases,
     failedTestNames: counts.failedTestNames,
     erroredTestNames: counts.erroredTestNames,
+    passedTestNames,
     collectionErrorNames: counts.collectionErrorNames,
     passed: patchTestPassed(counts, expectation),
   };
@@ -511,8 +539,12 @@ function patchPrecheckFailure(result: PatchTestRunResult): string {
     `instruction: ${patchPrecheckInstruction(result)}`,
     `passed tests: ${result.passedTestcases ?? "unknown"}`,
     `skipped tests: ${result.skippedTestcases ?? "unknown"}`,
-    `failed tests: ${result.failedTestNames.length > 0 ? result.failedTestNames.join(", ") : "none"}`,
-    `errored tests: ${result.erroredTestNames.length > 0 ? result.erroredTestNames.join(", ") : "none"}`,
+    ...(result.phase === "new-before-solution" && (result.passedTestcases ?? 0) > 0
+      ? [`passing tests: ${result.passedTestNames.length > 0 ? result.passedTestNames.join(", ") : "unknown"}`]
+      : [
+          `failed tests: ${result.failedTestNames.length > 0 ? result.failedTestNames.join(", ") : "none"}`,
+          `errored tests: ${result.erroredTestNames.length > 0 ? result.erroredTestNames.join(", ") : "none"}`,
+        ]),
     `collection errors: ${result.collectionErrorNames.length > 0 ? result.collectionErrorNames.join(", ") : "none"}`,
   ].join("\n");
 }
