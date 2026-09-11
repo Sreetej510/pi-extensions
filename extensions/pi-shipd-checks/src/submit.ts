@@ -166,6 +166,14 @@ function isShipdJobLink(value: string): boolean {
   }
 }
 
+function isShipdSignInPage(value: string): boolean {
+  try {
+    return /\/sign-in(?:\/|$)/i.test(new URL(value).pathname);
+  } catch {
+    return false;
+  }
+}
+
 function readSavedJobLink(entries: readonly unknown[]): string | undefined {
   let saved: string | undefined;
   for (const entry of entries) {
@@ -266,6 +274,9 @@ async function navigateAuthenticated(page: Page, targetUrl: string, signal?: Abo
   checkCancelled(signal);
   if (!isShipdJobLink(page.url())) {
     throw new Error("Shipd authentication or job-link navigation failed. Check the saved job link and auth state.");
+  }
+  if (isShipdSignInPage(page.url())) {
+    throw new Error("Shipd authentication failed: the saved session is expired or signed out. Run /shipd:auth again.");
   }
   if (response && response.status() >= 400) {
     throw new Error(`Shipd job-link navigation returned HTTP ${response.status()}.`);
