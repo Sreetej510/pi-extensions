@@ -19,6 +19,25 @@ const anthropicReport = normalizeAnthropicUsagePayload(
   },
   now,
 );
+const financialAnthropicReport = normalizeAnthropicUsagePayload(
+  {
+    cinder_cove: { utilization: 60, used_dollars: 5, limit_dollars: 10 },
+    extra_usage: {
+      is_enabled: true,
+      utilization: 50,
+      used_credits: 500,
+      monthly_limit: 1000,
+      currency: "USD",
+    },
+    model_scoped: {
+      fable: {
+        five_hour: { utilization: 75, resets_at: "2026-09-12T15:00:00Z" },
+        seven_day: { utilization: 41, resets_at: "2026-09-18T00:00:00Z" },
+      },
+    },
+  },
+  now,
+);
 const codexAdapterReport: AdapterUsageReport = {
   provider: "codex",
   source: "external-adapter",
@@ -53,6 +72,24 @@ void test("renders matching Anthropic model windows before account windows", () 
   try {
     assert.equal(
       formatUsageStatusline(anthropicReport, model("anthropic", "fable", "Claude Fable")),
+      "Fable · 5h 75% ↻2h · 7d 41%",
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+void test("preserves native Anthropic financial status while rendering matched model windows compactly", () => {
+  const originalNow = Date.now;
+  Date.now = () => now;
+  try {
+    assert.equal(financialAnthropicReport.statusline, "claude 60% $5/$10 50% $5/$10 extra");
+    assert.equal(
+      formatUsageStatusline(financialAnthropicReport, model("anthropic", "claude-sonnet", "Claude Sonnet")),
+      financialAnthropicReport.statusline,
+    );
+    assert.equal(
+      formatUsageStatusline(financialAnthropicReport, model("anthropic", "fable", "Claude Fable")),
       "Fable · 5h 75% ↻2h · 7d 41%",
     );
   } finally {

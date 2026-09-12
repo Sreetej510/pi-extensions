@@ -67,6 +67,16 @@ export function formatUsageStatusline(report: UsageReport, model?: ProviderUsage
   }
   if (report.provider === "anthropic") {
     if (!model) return report.statusline;
+    const hasMatchingModelWindows = report.windows.some(
+      (window) =>
+        isUsableNormalizedWindow(window) &&
+        window.scope.kind === "model" &&
+        modelScopeMatchesUsageModel(window.scope.modelIds, model),
+    );
+    const hasFinancialAccountWindows = report.windows.some(
+      (window) => window.scope.kind === "account" && window.windowMinutes === undefined,
+    );
+    if (!hasMatchingModelWindows && hasFinancialAccountWindows) return report.statusline;
     return formatNormalizedUsageStatusline(report.windows, report.provider, model);
   }
   return formatCodexUsageStatusline(report, model);
