@@ -15,10 +15,11 @@ export function isUsageSupportedModel(model: Pick<PiModel, "provider"> | undefin
 
 export function reportMatchesModel(report: UsageReport, model: Pick<PiModel, "provider"> | undefined): boolean {
   if (!model) return false;
-  return (
-    (report.provider === "codex" && isOpenAICodexModel(model)) ||
-    (report.provider === "anthropic" && isAnthropicModel(model))
-  );
+  if (report.source === "external-adapter") {
+    return report.provider === "codex" ? isOpenAICodexModel(model) : isAnthropicModel(model);
+  }
+  if (report.provider === "codex") return isOpenAICodexModel(model);
+  return isAnthropicModel(model);
 }
 
 export function providerKeyForModel(model: Pick<PiModel, "provider"> | undefined): "codex" | "anthropic" {

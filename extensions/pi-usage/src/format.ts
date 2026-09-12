@@ -2,10 +2,12 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { BAR_SEGMENTS, LIMIT_VALUE_COLUMN, RESET_FOREGROUND } from "./constants.js";
 import { isOpenAICodexModel, reportMatchesModel } from "./models.js";
 import type {
+  AdapterUsageReport,
   CodexUsageReport,
   NormalizedCredits,
   NormalizedRateLimitSnapshot,
   NormalizedRateLimitWindow,
+  NormalizedUsageWindow,
   PiModel,
   ProviderUsageModel,
   UsageQueryError,
@@ -58,12 +60,121 @@ export function formatCodexUsageStatusline(report: CodexUsageReport, model?: Pro
   return parts.join(" ");
 }
 
-export function formatUsageStatusline(report: UsageReport, model?: ProviderUsageModel): string {
-  return report.provider === "anthropic" ? report.statusline : formatCodexUsageStatusline(report, model);
+export function formatUsageStatusline(report: UsageReport, model?: ProviderUsageModel): string | undefined {
+  if (model && !reportMatchesModel(report, model)) return undefined;
+  if (report.source === "external-adapter") {
+    return formatNormalizedUsageStatusline(report.windows, report.provider, model);
+  }
+  if (report.provider === "anthropic") {
+    if (!model) return report.statusline;
+    return formatNormalizedUsageStatusline(report.windows, report.provider, model);
+  }
+  return formatCodexUsageStatusline(report, model);
 }
 
 export function formatUsageReport(report: UsageReport, cacheAgeMs?: number): string {
-  return report.provider === "anthropic" ? report.summaryLines.join("\n") : formatCodexUsageReport(report, cacheAgeMs);
+  if (report.source === "external-adapter") return formatAdapterUsageReport(report);
+  if (report.provider === "anthropic") return report.summaryLines.join("\n");
+  return formatCodexUsageReport(report, cacheAgeMs);
+}
+
+function formatNormalizedUsageStatusline(
+  windows: NormalizedUsageWindow[],
+  provider: UsageReport["provider"],
+  model: ProviderUsageModel | undefined,
+): string {
+  const usableWindows = windows.filter(isUsableNormalizedWindow);
+  const modelWindows = model
+    ? usableWindows.filter(
+        (window) => window.scope.kind === "model" && modelScopeMatchesUsageModel(window.scope.modelIds, model),
+      )
+    : [];
+  const accountWindows = usableWindows.filter((window) => window.scope.kind === "account");
+  const selectedWindows =
+    modelWindows.length > 0
+      ? modelWindows
+      : accountWindows.length > 0
+        ? accountWindows
+        : model
+          ? []
+          : selectFirstModelScope(usableWindows);
+  if (selectedWindows.length === 0) return "usage unavailable";
+
+  const selectedScope = selectedWindows[0].scope;
+  const prefix = selectedScope.kind === "model" ? selectedScope.label : provider === "anthropic" ? "Claude" : "Codex";
+  const parts = selectedWindows.map((window, index) => {
+    const reset = index === 0 ? formatResetCountdown(window.resetsAt) : undefined;
+    return `${window.label} ${clampPercent(window.usedPercent).toFixed(0)}%${reset ? ` ↻${reset}` : ""}`;
+  });
+  return [prefix, ...parts].join(" · ");
+}
+
+function formatAdapterUsageReport(report: AdapterUsageReport): string {
+  const providerLabel = report.provider === "anthropic" ? "Anthropic" : "OpenAI Codex";
+  const lines = [`  >_ ${providerLabel} Usage`, ""];
+  const usableWindows = report.windows.filter(isUsableNormalizedWindow);
+  if (usableWindows.length === 0) {
+    lines.push("  Usage unavailable");
+    return lines.join("\n");
+  }
+
+  const groups = new Map<string, { label: string; windows: NormalizedUsageWindow[] }>();
+  for (const window of usableWindows) {
+    const key = window.scope.kind === "account" ? "account" : `model:${JSON.stringify(window.scope.modelIds)}`;
+    const label = window.scope.kind === "account" ? "Account" : window.scope.label;
+    const group = groups.get(key) ?? { label, windows: [] };
+    group.windows.push(window);
+    groups.set(key, group);
+  }
+
+  let first = true;
+  for (const group of groups.values()) {
+    if (!first) lines.push("");
+    first = false;
+    lines.push(`  ${group.label} usage:`);
+    for (const window of group.windows) {
+      lines.push(formatWindowLine(`${window.label}:`, window));
+    }
+  }
+  return lines.join("\n");
+}
+
+function isUsableNormalizedWindow(window: NormalizedUsageWindow): boolean {
+  return Boolean(window.label.trim()) && Number.isFinite(window.usedPercent);
+}
+
+function modelScopeMatchesUsageModel(modelIds: string[], model: ProviderUsageModel): boolean {
+  const modelKeys = new Set(
+    [normalizedUsageKey(model.id), normalizedUsageKey(model.name)].filter((key): key is string => key !== undefined),
+  );
+  return modelIds.some((modelId) => {
+    const key = normalizedUsageKey(modelId);
+    return key !== undefined && modelKeys.has(key);
+  });
+}
+
+function selectFirstModelScope(windows: NormalizedUsageWindow[]): NormalizedUsageWindow[] {
+  const first = windows.find((window) => window.scope.kind === "model");
+  if (first?.scope.kind !== "model") return [];
+  const modelIds = new Set(first.scope.modelIds.map((modelId) => normalizedUsageKey(modelId)));
+  return windows.filter(
+    (window) =>
+      window.scope.kind === "model" &&
+      window.scope.modelIds.some((modelId) => modelIds.has(normalizedUsageKey(modelId))),
+  );
+}
+
+function formatResetCountdown(resetsAt: number | undefined): string | undefined {
+  if (resetsAt === undefined || !Number.isFinite(resetsAt)) return undefined;
+  const remainingMilliseconds = resetsAt * 1000 - Date.now();
+  if (remainingMilliseconds <= 0) return undefined;
+  const remainingMinutes = Math.floor(remainingMilliseconds / 60_000);
+  const remainingHours = Math.floor(remainingMilliseconds / 3_600_000);
+  const remainingDays = Math.floor(remainingMilliseconds / 86_400_000);
+  if (remainingDays > 0) return `${remainingDays}d`;
+  if (remainingHours > 0) return `${remainingHours}h`;
+  if (remainingMinutes > 0) return `${remainingMinutes}m`;
+  return "<1m";
 }
 
 export function showReport(ctx: ExtensionCommandContext, report: UsageReport, fromCache: boolean): void {
@@ -87,7 +198,13 @@ export function formatQueryErrors(errors: UsageQueryError[], partial = false): s
   const lines = [partial ? "Some provider usage is unavailable:" : "Usage unavailable:"];
   for (const error of errors) {
     const source =
-      error.source === "pi-auth" ? "Codex" : error.source === "codex-app-server" ? "Codex fallback" : "Anthropic";
+      error.source === "pi-auth"
+        ? "Codex"
+        : error.source === "codex-app-server"
+          ? "Codex fallback"
+          : error.source === "anthropic-oauth"
+            ? "Anthropic"
+            : "External adapter";
     lines.push(`- ${source}: ${compactQueryError(error.message)}`);
   }
   return lines.join("\n");
