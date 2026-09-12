@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
   id-token: write
 
 concurrency:
@@ -16,7 +17,7 @@ concurrency:
 
 jobs:
   publish:
-    name: Publish packages to npm
+    name: Publish packages to npm and GitHub Packages
     runs-on: ubuntu-latest
 
     steps:
@@ -74,6 +75,38 @@ jobs:
               continue
             fi
 
-            echo "Publishing ${package}@${version}..."
+            echo "Publishing ${package}@${version} to npm..."
             npm --workspace "$package" publish --access public --loglevel verbose
+          done < /tmp/pi-workspaces.tsv
+
+      - name: Configure GitHub Packages registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@sreetej510"
+
+      - name: Publish unpublished workspace packages to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "false"
+          GITHUB_PACKAGES_REGISTRY: "https://npm.pkg.github.com"
+        run: |
+          set -euo pipefail
+
+          while IFS=$'\t' read -r package version; do
+            if [ -z "$package" ] || [ -z "$version" ]; then
+              continue
+            fi
+
+            if npm view "${package}@${version}" version --registry "$GITHUB_PACKAGES_REGISTRY" >/dev/null 2>&1; then
+              echo "${package}@${version} already exists on GitHub Packages; skipping publish."
+              continue
+            fi
+
+            echo "Publishing ${package}@${version} to GitHub Packages..."
+            npm --workspace "$package" publish \
+              --registry "$GITHUB_PACKAGES_REGISTRY" \
+              --access public \
+              --loglevel verbose
           done < /tmp/pi-workspaces.tsv

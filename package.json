@@ -1,9 +1,9 @@
 {
   "name": "pi-extensions",
-  "version": "0.9.17",
+  "version": "0.10.0",
   "private": true,
   "packageManager": "npm@11.16.0",
-  "description": "Monorepo for @sreetej510 pi extension packages.",
+  "description": "Monorepo for @sreetej510 pi extension packages published to npm and GitHub Packages.",
   "type": "module",
   "workspaces": [
     "extensions/*"
@@ -21,6 +21,7 @@
     "pack:usage": "npm --workspace @sreetej510/pi-usage pack --dry-run",
     "pack:shipd-checks": "npm --workspace @sreetej510/pi-shipd-checks pack --dry-run",
     "publish:dry": "npm --workspaces publish --dry-run --access public",
+    "publish:github:dry": "npm --workspaces publish --dry-run --access public --registry https://npm.pkg.github.com",
     "release:patch": "node ./scripts/bump-shared-version.mjs patch",
     "release:minor": "node ./scripts/bump-shared-version.mjs minor",
     "release:major": "node ./scripts/bump-shared-version.mjs major"

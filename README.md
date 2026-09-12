@@ -1,8 +1,8 @@
 # pi-extensions
 
 A monorepo of independently installable [pi coding agent](https://github.com/earendil-works/pi)
-extensions, published to npm under the `@sreetej510` scope so each package name is globally unique
-(`@sreetej510/pi-<extension-name>`).
+extensions, published to npm and GitHub Packages under the `@sreetej510` scope so each package name is
+globally unique (`@sreetej510/pi-<extension-name>`).
 
 ## Packages
 
@@ -37,7 +37,7 @@ pi-extensions/
 │   ├── ci.yml              # lint + typecheck on push/PR
 │   ├── bump-version.yml    # manual: bump all package versions in lockstep + tag
 │   ├── release.yml         # tag push -> GitHub Release
-│   └── publish.yml         # tag push -> build + publish minified dist/ to npm
+│   └── publish.yml         # tag push -> build + publish minified dist/ to npm + GitHub Packages
 ├── package.json             # npm workspaces root (private)
 ├── tsconfig.json            # shared, workspace-wide typecheck config
 ├── biome.json                # shared lint/format config
@@ -46,7 +46,7 @@ pi-extensions/
 
 This is an **npm workspaces monorepo**: the root `package.json` is `private` and only exists to
 drive tooling (install, lint, typecheck, version bumps). Every folder under `extensions/*` is an
-independently publishable npm package.
+independently publishable package for npm and GitHub Packages.
 
 ## Getting started
 
@@ -66,12 +66,14 @@ npm install
 | `npm run format` | Biome format (writes changes) |
 | `npm run typecheck` | `tsc --noEmit` in every workspace |
 | `npm run pack:<name>` | `npm pack --dry-run` for one package (sanity-check `files`/tarball contents) |
-| `npm run publish:dry` | Dry-run publish of every non-private workspace |
+| `npm run publish:dry` | Dry-run publish of every non-private workspace to npm |
+| `npm run publish:github:dry` | Dry-run publish of every non-private workspace to GitHub Packages |
 
 ### Build pipeline
 
-Source lives in `src/` (multi-file TypeScript, with comments). **npm publishes only `dist/`** —
-a single minified ESM bundle per extension, produced by [esbuild](https://esbuild.github.io/):
+Source lives in `src/` (multi-file TypeScript, with comments). **Both npm and GitHub Packages publish
+only `dist/`** — a single minified ESM bundle per extension, produced by
+[esbuild](https://esbuild.github.io/):
 
 ```bash
 npm run build                              # all extensions
@@ -85,8 +87,8 @@ What the build does:
 - Keeps `@earendil-works/*` external (provided by pi at runtime)
 - Bundles runtime deps like `typebox` into the output
 
-`prepublishOnly` on each package runs `build` automatically before `npm publish`. The GitHub
-**Publish** workflow also runs `npm run build` before publishing.
+`prepublishOnly` on each package runs `build` automatically before publishing. The GitHub
+**Publish** workflow also runs `npm run build` before publishing to either registry.
 
 For local pi development against source (not the minified npm build), point `settings.json` at
 `src/index.ts` directly — see each package README.
@@ -148,13 +150,16 @@ The full pipeline is push-button once configured:
    GitHub Release with auto-generated notes.
 4. **Publish** (`.github/workflows/publish.yml`) — also triggered by the `vX.Y.Z` tag push (or
    manually); installs deps, runs `npm run check` again as a safety gate, then publishes every
-   non-private workspace package whose `name@version` isn't already on the npm registry
-   (`npm --workspace <name> publish --access public`).
+   non-private workspace package whose `name@version` isn't already on each registry. Packages are
+   published to both npm (`https://registry.npmjs.org`) and GitHub Packages
+   (`https://npm.pkg.github.com`). Existing versions are skipped so rerunning a release is safe.
 
 ### One-time setup
 
 - Create an npm **automation/publish token** for the `@sreetej510` org/scope and add it to the repo
   as the `NPM_TOKEN` secret (used by `publish.yml`).
+- GitHub Packages publishing uses the workflow's `GITHUB_TOKEN`; the workflow grants it
+  `packages: write`. Ensure package creation is allowed for Actions in the repository/org settings.
 - If `bump-version.yml` needs to push to a protected `main` branch, add a `PAT_TOKEN` secret
   with a personal access token that has `contents: write` (repo `Settings → Secrets`).
 - Make sure the `@sreetej510` scope exists on npm and this repo's publishing account is a member with
@@ -171,17 +176,24 @@ git commit -m "chore(release): v$(node -p "require('./package.json').version")"
 git tag "v$(node -p "require('./package.json').version")"
 git push origin main --tags
 
-# Publish (requires npm login with publish rights on @sreetej510)
-npm publish --workspace @sreetej510/pi-hpc-tools --access public
-npm publish --workspace @sreetej510/pi-prompt-manager --access public
-npm publish --workspace @sreetej510/pi-usage --access public
-npm publish --workspace @sreetej510/pi-shipd-checks --access public
+# Publish to npm (requires npm login with publish rights on @sreetej510)
+npm publish --workspace @sreetej510/pi-hpc-tools --registry https://registry.npmjs.org --access public
+npm publish --workspace @sreetej510/pi-prompt-manager --registry https://registry.npmjs.org --access public
+npm publish --workspace @sreetej510/pi-usage --registry https://registry.npmjs.org --access public
+npm publish --workspace @sreetej510/pi-shipd-checks --registry https://registry.npmjs.org --access public
+
+# Publish the same versions to GitHub Packages (requires a GitHub token with write:packages)
+npm publish --workspace @sreetej510/pi-hpc-tools --registry https://npm.pkg.github.com --access public
+npm publish --workspace @sreetej510/pi-prompt-manager --registry https://npm.pkg.github.com --access public
+npm publish --workspace @sreetej510/pi-usage --registry https://npm.pkg.github.com --access public
+npm publish --workspace @sreetej510/pi-shipd-checks --registry https://npm.pkg.github.com --access public
 ```
 
 ## Installing published extensions
 
 Once published, add any package to your pi `settings.json` under `packages` (pi resolves the
-`pi.extensions` entry points from the installed npm package automatically):
+`pi.extensions` entry points from the installed npm package automatically). npm is the default
+registry:
 
 ```json
 {
@@ -193,6 +205,16 @@ Once published, add any package to your pi `settings.json` under `packages` (pi 
   ]
 }
 ```
+
+To install from GitHub Packages instead, configure the `@sreetej510` scope in your user or project
+`.npmrc` and provide a GitHub token with `read:packages`:
+
+```ini
+@sreetej510:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=YOUR_GITHUB_TOKEN
+```
+
+Then use the same `npm:@sreetej510/pi-<extension-name>` package entry in pi settings.
 
 ## License
 
