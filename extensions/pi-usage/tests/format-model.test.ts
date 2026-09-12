@@ -41,6 +41,7 @@ const financialAnthropicReport = normalizeAnthropicUsagePayload(
 const codexAdapterReport: AdapterUsageReport = {
   provider: "codex",
   source: "external-adapter",
+  modelProviders: ["openai-codex"],
   capturedAt: now,
   windows: [
     {

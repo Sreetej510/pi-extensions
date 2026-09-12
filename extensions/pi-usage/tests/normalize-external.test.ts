@@ -3,6 +3,8 @@ import test from "node:test";
 import { normalizeExternalUsageSnapshot } from "../src/normalize-external.js";
 import type { ProviderUsageSnapshotV1 } from "../src/types.js";
 
+const modelProviders = ["openai-codex"];
+
 function snapshot(overrides: Partial<ProviderUsageSnapshotV1> = {}): ProviderUsageSnapshotV1 {
   return {
     version: 1,
@@ -24,7 +26,11 @@ function snapshot(overrides: Partial<ProviderUsageSnapshotV1> = {}): ProviderUsa
 
 void test("rejects unsupported external snapshot versions", () => {
   assert.throws(
-    () => normalizeExternalUsageSnapshot({ ...snapshot(), version: 2 } as unknown as ProviderUsageSnapshotV1),
+    () =>
+      normalizeExternalUsageSnapshot(
+        { ...snapshot(), version: 2 } as unknown as ProviderUsageSnapshotV1,
+        modelProviders,
+      ),
     /version/i,
   );
 });
@@ -33,12 +39,12 @@ void test("rejects non-finite percentages and invalid reset values", () => {
   const nonFinitePercent = snapshot({
     windows: [{ ...snapshot().windows[0], usedPercent: Number.NaN }],
   });
-  assert.throws(() => normalizeExternalUsageSnapshot(nonFinitePercent), /usedPercent/i);
+  assert.throws(() => normalizeExternalUsageSnapshot(nonFinitePercent, modelProviders), /usedPercent/i);
 
   const invalidReset = snapshot({
     windows: [{ ...snapshot().windows[0], resetsAt: Number.POSITIVE_INFINITY }],
   });
-  assert.throws(() => normalizeExternalUsageSnapshot(invalidReset), /resetsAt/i);
+  assert.throws(() => normalizeExternalUsageSnapshot(invalidReset, modelProviders), /resetsAt/i);
 });
 
 void test("clamps percentages, accepts unknown model labels, and strips extra material", () => {
@@ -57,9 +63,10 @@ void test("clamps percentages, accepts unknown model labels, and strips extra ma
     ],
   } as ProviderUsageSnapshotV1 & { authToken: string };
 
-  assert.deepEqual(normalizeExternalUsageSnapshot(input), {
+  assert.deepEqual(normalizeExternalUsageSnapshot(input, modelProviders), {
     provider: "codex",
     source: "external-adapter",
+    modelProviders: ["openai-codex"],
     capturedAt: Date.parse("2026-09-12T13:00:00Z"),
     windows: [
       {

@@ -1,7 +1,10 @@
 import type { AdapterUsageReport, NormalizedUsageWindow, ProviderUsageSnapshotV1, UsageScopeV1 } from "./types.js";
 import { clampPercent } from "./utils.js";
 
-export function normalizeExternalUsageSnapshot(snapshot: ProviderUsageSnapshotV1): AdapterUsageReport {
+export function normalizeExternalUsageSnapshot(
+  snapshot: ProviderUsageSnapshotV1,
+  modelProviders: readonly string[],
+): AdapterUsageReport {
   if (!snapshot || typeof snapshot !== "object") {
     throw new Error("External usage snapshot must be an object.");
   }
@@ -17,10 +20,14 @@ export function normalizeExternalUsageSnapshot(snapshot: ProviderUsageSnapshotV1
   if (!Array.isArray(snapshot.windows)) {
     throw new Error("External usage snapshot windows must be an array.");
   }
+  if (!Array.isArray(modelProviders) || !modelProviders.every((provider) => typeof provider === "string")) {
+    throw new Error("External adapter modelProviders must be an array of strings.");
+  }
 
   return {
     provider: snapshot.provider,
     source: "external-adapter",
+    modelProviders: [...modelProviders],
     capturedAt: snapshot.capturedAt,
     windows: snapshot.windows.map(normalizeExternalWindow),
   };

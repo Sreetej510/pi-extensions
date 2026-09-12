@@ -76,9 +76,24 @@ export type ProviderUsageEventV1 =
       snapshot?: ProviderUsageSnapshotV1;
     };
 
+export type ProviderUsageAdapterV1 = {
+  id: string;
+  modelProviders: string[];
+  refresh(options: { timeoutMs: number; signal?: AbortSignal }): Promise<ProviderUsageSnapshotV1>;
+};
+
+export type ProviderUsageBusV1 = {
+  version: 1;
+  register(adapter: ProviderUsageAdapterV1): () => void;
+  adapters(): ProviderUsageAdapterV1[];
+  subscribe(listener: (event: ProviderUsageEventV1) => void): () => void;
+  publish(event: ProviderUsageEventV1): number;
+};
+
 export type AdapterUsageReport = {
   provider: "anthropic" | "codex";
   source: "external-adapter";
+  modelProviders: string[];
   capturedAt: number;
   windows: NormalizedUsageWindow[];
 };
