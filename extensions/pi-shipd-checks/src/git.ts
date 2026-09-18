@@ -24,6 +24,12 @@ function isIncludedCodeFile(name: string): boolean {
   return name.length > 0 && !EXCLUDED_CODE_FILE.test(name) && !EXCLUDED_DOCKERFILE.test(name);
 }
 
+function toWslPath(value: string): string | undefined {
+  const slash = toSlashPath(value);
+  const match = slash.match(/^([A-Za-z]):\/(.*)$/);
+  return match ? `/mnt/${match[1].toLowerCase()}/${match[2]}` : undefined;
+}
+
 /**
  * Lists changed, existing code files to give read-only analysis agents a
  * concrete starting set. Patch, markdown, Dockerfile, and shell files are
@@ -144,12 +150,42 @@ export async function snapshotGitHead(
 
   // Git for Windows can apply core.autocrlf while streaming an archive, which
   // makes patches generated from Git blobs fail to apply in the Linux worker.
-  const cmd = `git -c core.autocrlf=false archive HEAD | tar -x -C ${bashQuote(toSlashPath(tempDir))}`;
-  const result = await pi.exec(getShellExecutable(), ["-c", cmd], {
-    cwd: repoDir,
-    timeout: 60_000,
-    signal: cancelSignal,
-  });
+  // Git Bash also cannot extract dangling or forward-referenced symlinks on
+  // Windows. When WSL is available, let its Linux tar preserve the HEAD tree
+  // exactly; fall back to Git Bash for Windows hosts without WSL.
+  const shell = getShellExecutable();
+  const wslRepoDir = process.platform === "win32" ? toWslPath(repoDir) : undefined;
+  const wslTempDir = process.platform === "win32" ? toWslPath(tempDir) : undefined;
+  let result: Awaited<ReturnType<typeof pi.exec>>;
+  if (wslRepoDir && wslTempDir) {
+    const wslProbe = await pi.exec("wsl.exe", ["-e", "true"], {
+      cwd: repoDir,
+      timeout: 15_000,
+      signal: cancelSignal,
+    });
+    if (wslProbe.code === 0) {
+      const wslCommand = `git -C ${bashQuote(wslRepoDir)} -c core.autocrlf=false archive HEAD | tar -x -C ${bashQuote(wslTempDir)}`;
+      result = await pi.exec("wsl.exe", ["bash", "-lc", wslCommand], {
+        cwd: repoDir,
+        timeout: 60_000,
+        signal: cancelSignal,
+      });
+    } else {
+      const cmd = `git -c core.autocrlf=false archive HEAD | tar -x -C ${bashQuote(toSlashPath(tempDir))}`;
+      result = await pi.exec(shell, ["-c", cmd], {
+        cwd: repoDir,
+        timeout: 60_000,
+        signal: cancelSignal,
+      });
+    }
+  } else {
+    const cmd = `git -c core.autocrlf=false archive HEAD | tar -x -C ${bashQuote(toSlashPath(tempDir))}`;
+    result = await pi.exec(shell, ["-c", cmd], {
+      cwd: repoDir,
+      timeout: 60_000,
+      signal: cancelSignal,
+    });
+  }
   if (result.code !== 0) {
     return { status: "error", error: result.stderr?.trim() || `git archive failed (exit ${result.code})` };
   }
