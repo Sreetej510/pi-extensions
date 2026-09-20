@@ -423,12 +423,13 @@ function patchTestPassed(counts: JUnitCounts, expectation: "all-pass" | "all-fai
     counts.skippedTestcases === null ||
     counts.tests <= 0 ||
     counts.testcases <= 0 ||
-    // A missing testcase must not make a pre-solution run look all-failing.
-    counts.tests !== counts.testcases ||
+    // pytest's junitxml counts pytest-subtests in the declared suite total but
+    // does not emit one <testcase> node for every subtest. Parsed testcase
+    // records may therefore be fewer than the declared total, but never more.
+    counts.testcases > counts.tests ||
     counts.skipped !== 0 ||
     counts.skippedTestcases !== 0 ||
-    counts.failedTestcases + counts.erroredTestcases + counts.skippedTestcases + counts.passedTestcases !==
-      counts.testcases ||
+    counts.failures + counts.errors + counts.skipped + counts.passedTestcases !== counts.tests ||
     counts.suiteErrors !== 0 ||
     counts.collectionErrors !== 0
   ) {
