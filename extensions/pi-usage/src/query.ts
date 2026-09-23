@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getUsageBusV1 } from "./adapter-bus.js";
 import { queryAnthropicUsage } from "./anthropic-query.js";
 import { queryViaCodexAppServer } from "./codex-app-server.js";
 import { queryCodexUsageWithFallback, queryViaPiAuth } from "./codex-query.js";
@@ -10,6 +11,7 @@ import {
   isAnthropicModel,
   isOpenAICodexModel,
 } from "./models.js";
+import { normalizeExternalUsageSnapshot } from "./normalize-external.js";
 import type { QueryUsageOptions, QueryUsageResult, UsageQueryError, UsageReport, UsageSource } from "./types.js";
 import { delay, errorMessage } from "./utils.js";
 
@@ -93,10 +95,29 @@ export async function queryUsage(
   }
 
   if (!isOpenAICodexModel(ctx.model)) {
-    return {
-      ok: false,
-      errors: [{ source: "pi-auth", message: "Current model provider is not supported." }],
-    };
+    const modelProvider = ctx.model?.provider;
+    const adapter =
+      modelProvider === undefined
+        ? undefined
+        : getUsageBusV1()
+            .adapters()
+            .find((candidate) => candidate.modelProviders.includes(modelProvider));
+    if (!adapter) {
+      return {
+        ok: false,
+        errors: [{ source: "pi-auth", message: "Current model provider is not supported." }],
+      };
+    }
+
+    try {
+      const snapshot = await adapter.refresh({ timeoutMs: options.timeoutMs });
+      return { ok: true, report: normalizeExternalUsageSnapshot(snapshot, adapter.modelProviders) };
+    } catch (cause) {
+      return {
+        ok: false,
+        errors: [{ source: "external-adapter", message: errorMessage(cause), cause }],
+      };
+    }
   }
 
   const errors: UsageQueryError[] = [];

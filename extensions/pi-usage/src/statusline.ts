@@ -116,6 +116,10 @@ const setUsageStatusline = (
   },
 ) => {
   let text = formatUsageStatusline(report, options.model);
+  if (text === undefined) {
+    setStatuslineValue(ctx, undefined);
+    return;
+  }
   if (options.staleAgeMs !== undefined && options.staleAgeMs > CACHE_TTL_MS) {
     text = `${text} (${formatAgeShort(options.staleAgeMs)} old)`;
   }

@@ -1,3 +1,4 @@
+import { getUsageBusV1 } from "./adapter-bus.js";
 import { ANTHROPIC_PROVIDER_ID, CODEX_PROVIDER_ID } from "./constants.js";
 import type { PiModel, UsageReport } from "./types.js";
 
@@ -10,15 +11,20 @@ export function isAnthropicModel(model: Pick<PiModel, "provider"> | undefined): 
 }
 
 export function isUsageSupportedModel(model: Pick<PiModel, "provider"> | undefined): boolean {
-  return isOpenAICodexModel(model) || isAnthropicModel(model);
+  if (!model) return false;
+  if (isOpenAICodexModel(model) || isAnthropicModel(model)) return true;
+  return getUsageBusV1()
+    .adapters()
+    .some((adapter) => adapter.modelProviders.includes(model.provider));
 }
 
 export function reportMatchesModel(report: UsageReport, model: Pick<PiModel, "provider"> | undefined): boolean {
   if (!model) return false;
-  return (
-    (report.provider === "codex" && isOpenAICodexModel(model)) ||
-    (report.provider === "anthropic" && isAnthropicModel(model))
-  );
+  if (report.source === "external-adapter") {
+    return report.modelProviders.includes(model.provider);
+  }
+  if (report.provider === "codex") return isOpenAICodexModel(model);
+  return isAnthropicModel(model);
 }
 
 export function providerKeyForModel(model: Pick<PiModel, "provider"> | undefined): "codex" | "anthropic" {
