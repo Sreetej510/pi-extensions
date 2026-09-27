@@ -4,6 +4,7 @@ import { join, posix as posixPath } from "node:path";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+import { XMLParser } from "fast-xml-parser";
 import {
   createAgentSessionFromServices,
   createAgentSessionServices,
@@ -278,35 +279,75 @@ interface JUnitCounts {
   collectionErrors: number | null;
   skipped: number | null;
   skippedTestcases: number | null;
+  skippedTestNames: string[];
   failedTestNames: string[];
   erroredTestNames: string[];
   passedTestNames: string[];
   collectionErrorNames: string[];
 }
 
-function xmlNumber(tag: string | undefined, name: string): number | null {
-  if (!tag) return null;
-  const value = tag.match(new RegExp(`\\b${name}=["']([0-9]+(?:\\.[0-9]+)?)["']`, "i"))?.[1];
+type XmlNode = Record<string, unknown>;
+
+const junitParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
+  isArray: (name) => ["testsuite", "testcase", "failure", "error", "skipped"].includes(name),
+});
+
+function asXmlNode(value: unknown): XmlNode | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as XmlNode)
+    : undefined;
+}
+
+function asXmlNodes(value: unknown): XmlNode[] {
+  const values = Array.isArray(value) ? value : [value];
+  return values.flatMap((item) => {
+    if (item === undefined || item === null) return [];
+    const node = asXmlNode(item);
+    return node ? [node] : [{ "#text": String(item) }];
+  });
+}
+
+function xmlChildNodes(node: XmlNode | undefined, name: string): XmlNode[] {
+  return asXmlNodes(node?.[name]);
+}
+
+function xmlAttribute(node: XmlNode | undefined, name: string): string | undefined {
+  const value = node?.[`@_${name}`];
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  return undefined;
+}
+
+function xmlNumber(node: XmlNode | undefined, name: string): number | null {
+  const value = xmlAttribute(node, name);
   if (value === undefined) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function xmlString(tag: string, name: string): string | undefined {
-  return tag.match(new RegExp(`\\b${name}=["']([^"']*)["']`, "i"))?.[1];
+function collectSuiteNodes(node: XmlNode): XmlNode[] {
+  return xmlChildNodes(node, "testsuite").flatMap((suite) => [suite, ...collectSuiteNodes(suite)]);
 }
 
-function testCaseName(caseXml: string, index: number): string {
-  const name = xmlString(caseXml, "name") ?? `testcase-${index + 1}`;
-  const classname = xmlString(caseXml, "classname");
+function testCaseName(caseNode: XmlNode, index: number): string {
+  const name = xmlAttribute(caseNode, "name") ?? `testcase-${index + 1}`;
+  const classname = xmlAttribute(caseNode, "classname");
   return classname ? `${classname}::${name}` : name;
 }
 
-function isCollectionError(caseXml: string): boolean {
-  if (!/<error\b/i.test(caseXml)) return false;
-  const errorTag = caseXml.match(/<error\b[^>]*>/i)?.[0] ?? "";
-  const classname = xmlString(caseXml, "classname");
-  return /collection\s+failure/i.test(errorTag) || classname === undefined || classname.trim().length === 0;
+function isCollectionError(caseNode: XmlNode): boolean {
+  const errors = xmlChildNodes(caseNode, "error");
+  if (errors.length === 0) return false;
+  const classname = xmlAttribute(caseNode, "classname");
+  return (
+    errors.some((error) => {
+      const message = `${xmlAttribute(error, "message") ?? ""} ${String(error["#text"] ?? "")}`;
+      return /collection\s+failure/i.test(message);
+    }) ||
+    classname === undefined ||
+    classname.trim().length === 0
+  );
 }
 
 function normalizePytestNodeId(nodeId: string): string {
@@ -322,48 +363,90 @@ function normalizePytestNodeId(nodeId: string): string {
 }
 
 function parsePassedTestNames(output: string): string[] {
-  return [...output.matchAll(/^\s*(.+?)\s+PASSED(?:\s+\[[^\]]+\])?\s*$/gim)].map((match) =>
-    normalizePytestNodeId(match[1]?.trim() ?? ""),
-  );
+  const names = [
+    ...output.matchAll(/^\s*(.+?)\s+PASSED(?:\s+\[[^\]]+\])?\s*$/gim),
+    ...output.matchAll(/^\s*\[gw\d+\]\s+(?:\[[^\]]+\]\s+)?PASSED\s+(.+?)(?:\s+\[[^\]]+\])?\s*$/gim),
+    ...output.matchAll(/^\s*PASSED\s+(.+?)\s*$/gim),
+  ].map((match) => normalizePytestNodeId(match[1]?.trim() ?? ""));
+  return [...new Set(names.filter((name) => name.includes("::")))];
 }
 
 function readJUnitCounts(path: string): JUnitCounts {
   try {
     const xml = readFileSync(path, "utf-8");
-    const root = xml.match(/<testsuites\b[^>]*>/i)?.[0];
-    const suites = [...xml.matchAll(/<testsuite\b[^>]*>/gi)].map((match) => match[0]);
-    const testcases = [...xml.matchAll(/<testcase\b[^>]*(?:\/>|>[\s\S]*?<\/testcase\s*>)/gi)].map((match) => match[0]);
+    const document = junitParser.parse(xml) as XmlNode;
+    const reportRoot = asXmlNodes(document.testsuites)[0];
+    const directSuiteRoot = asXmlNodes(document.testsuite)[0];
+    const suites = reportRoot
+      ? collectSuiteNodes(reportRoot)
+      : directSuiteRoot
+        ? [directSuiteRoot, ...collectSuiteNodes(directSuiteRoot)]
+        : [];
+    const testcases = suites.flatMap((suite) => xmlChildNodes(suite, "testcase"));
+    if (testcases.length === 0 && reportRoot) testcases.push(...xmlChildNodes(reportRoot, "testcase"));
     const testcaseCount = testcases.length;
-    const failedTestNames = testcases.flatMap((caseXml, index) =>
-      /<failure\b/i.test(caseXml) ? [testCaseName(caseXml, index)] : [],
+    const failedTestNames = testcases.flatMap((caseNode, index) =>
+      xmlChildNodes(caseNode, "failure").length > 0 ? [testCaseName(caseNode, index)] : [],
     );
-    const erroredTestNames = testcases.flatMap((caseXml, index) =>
-      /<error\b/i.test(caseXml) ? [testCaseName(caseXml, index)] : [],
+    const erroredTestNames = testcases.flatMap((caseNode, index) =>
+      xmlChildNodes(caseNode, "error").length > 0 ? [testCaseName(caseNode, index)] : [],
     );
-    const passedTestNames = testcases.flatMap((caseXml, index) =>
-      !/<failure\b|<error\b|<skipped\b/i.test(caseXml) ? [testCaseName(caseXml, index)] : [],
+    const passedTestNames = testcases.flatMap((caseNode, index) =>
+      xmlChildNodes(caseNode, "failure").length === 0 &&
+      xmlChildNodes(caseNode, "error").length === 0 &&
+      xmlChildNodes(caseNode, "skipped").length === 0
+        ? [testCaseName(caseNode, index)]
+        : [],
+    );
+    const skippedTestNames = testcases.flatMap((caseNode, index) =>
+      xmlChildNodes(caseNode, "skipped").length > 0 ? [testCaseName(caseNode, index)] : [],
     );
     const failedCases = failedTestNames.length;
     const errorCases = erroredTestNames.length;
-    const collectionErrorNames = testcases.flatMap((caseXml, index) =>
-      isCollectionError(caseXml) ? [testCaseName(caseXml, index)] : [],
+    const collectionErrorNames = testcases.flatMap((caseNode, index) =>
+      isCollectionError(caseNode) ? [testCaseName(caseNode, index)] : [],
     );
     const collectionErrors = collectionErrorNames.length;
-    const skippedCases = testcases.filter((caseXml) => /<skipped\b/i.test(caseXml)).length;
-    const failureTags = [...xml.matchAll(/<failure\b/gi)].length;
-    const errorTags = [...xml.matchAll(/<error\b/gi)].length;
-    const testcaseErrorTags = testcases.reduce(
-      (count, caseXml) => count + [...caseXml.matchAll(/<error\b/gi)].length,
+    const skippedCases = skippedTestNames.length;
+    const testcaseFailureTags = testcases.reduce(
+      (count, caseNode) => count + xmlChildNodes(caseNode, "failure").length,
       0,
     );
-    const skippedTags = [...xml.matchAll(/<skipped\b/gi)].length;
+    const testcaseErrorTags = testcases.reduce(
+      (count, caseNode) => count + xmlChildNodes(caseNode, "error").length,
+      0,
+    );
+    const testcaseSkippedTags = testcases.reduce(
+      (count, caseNode) => count + xmlChildNodes(caseNode, "skipped").length,
+      0,
+    );
+    const suiteFailureTags = suites.reduce(
+      (count, suite) => count + xmlChildNodes(suite, "failure").length,
+      0,
+    );
+    const suiteErrorTags = suites.reduce(
+      (count, suite) => count + xmlChildNodes(suite, "error").length,
+      0,
+    );
+    const suiteSkippedTags = suites.reduce(
+      (count, suite) => count + xmlChildNodes(suite, "skipped").length,
+      0,
+    );
+    const reportFailureTags = reportRoot ? xmlChildNodes(reportRoot, "failure").length : 0;
+    const reportErrorTags = reportRoot ? xmlChildNodes(reportRoot, "error").length : 0;
+    const reportSkippedTags = reportRoot ? xmlChildNodes(reportRoot, "skipped").length : 0;
+    const failureTags = testcaseFailureTags + suiteFailureTags + reportFailureTags;
+    const errorTags = testcaseErrorTags + suiteErrorTags + reportErrorTags;
+    const skippedTags = testcaseSkippedTags + suiteSkippedTags + reportSkippedTags;
     const sumSuite = (name: string, fallback: number) => {
-      const values = suites.map((suite) => xmlNumber(suite, name)).filter((value): value is number => value !== null);
+      const values = suites
+        .map((suite) => xmlNumber(suite, name))
+        .filter((value): value is number => value !== null);
       return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : fallback;
     };
     const aggregate = (name: string, tags: number, fallback: number) =>
-      Math.max(xmlNumber(root, name) ?? sumSuite(name, fallback), tags);
-    const tests = xmlNumber(root, "tests") ?? sumSuite("tests", testcaseCount);
+      Math.max(xmlNumber(reportRoot, name) ?? sumSuite(name, fallback), tags);
+    const tests = xmlNumber(reportRoot, "tests") ?? sumSuite("tests", testcaseCount);
     const failures = aggregate("failures", failureTags, failedCases);
     const errors = aggregate("errors", errorTags, errorCases);
     const skipped = aggregate("skipped", skippedTags, skippedCases);
@@ -382,6 +465,7 @@ function readJUnitCounts(path: string): JUnitCounts {
       collectionErrors,
       skipped,
       skippedTestcases: skippedCases,
+      skippedTestNames,
       failedTestNames,
       erroredTestNames,
       passedTestNames,
@@ -400,6 +484,7 @@ function readJUnitCounts(path: string): JUnitCounts {
       collectionErrors: null,
       skipped: null,
       skippedTestcases: null,
+      skippedTestNames: [],
       failedTestNames: [],
       erroredTestNames: [],
       passedTestNames: [],
@@ -486,6 +571,7 @@ async function runPatchTest(
     collectionErrors: counts.collectionErrors,
     skipped: counts.skipped,
     skippedTestcases: counts.skippedTestcases,
+    skippedTestNames: counts.skippedTestNames,
     failedTestNames: counts.failedTestNames,
     erroredTestNames: counts.erroredTestNames,
     passedTestNames,
@@ -508,6 +594,16 @@ function patchPhaseLabel(phase: PatchPrecheckPhase): string {
 }
 
 function patchPrecheckInstruction(result: PatchTestRunResult): string {
+  if (result.skippedTestcases !== null && result.skippedTestcases > 0) {
+    if (result.phase === "new-before-solution") {
+      return "Fix test.patch so every new test executes and fails or errors individually before the solution. Do not skip, xfail, deselect, or remove tests.";
+    }
+    if (result.phase === "new-after-solution") {
+      return "Fix solution.patch so every new test executes and passes after the solution. Do not skip, xfail, deselect, or remove tests.";
+    }
+    return "Fix test.sh or solution.patch so every base test executes with no skipped tests. Do not skip, deselect, or exclude base tests.";
+  }
+
   if (result.phase === "new-before-solution") {
     if (result.passedTestcases !== null && result.passedTestcases > 0) {
       return "Fix test.patch: add an assertion inside each passing new test for behavior introduced by the solution, so it fails before the solution and passes only after it. Do not remove tests.";
@@ -540,6 +636,13 @@ function patchPrecheckFailure(result: PatchTestRunResult): string {
     `instruction: ${patchPrecheckInstruction(result)}`,
     `passed tests: ${result.passedTestcases ?? "unknown"}`,
     `skipped tests: ${result.skippedTestcases ?? "unknown"}`,
+    ...((result.skippedTestcases ?? 0) > 0
+      ? [
+          `skipped test names: ${
+            result.skippedTestNames.length > 0 ? result.skippedTestNames.join(", ") : "unknown"
+          }`,
+        ]
+      : []),
     ...(result.phase === "new-before-solution" && (result.passedTestcases ?? 0) > 0
       ? [`passing tests: ${result.passedTestNames.length > 0 ? result.passedTestNames.join(", ") : "unknown"}`]
       : [
