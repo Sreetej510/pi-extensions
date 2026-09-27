@@ -204,11 +204,15 @@ async function snapshotWithGitBash(
     if (archive.code !== 0) return { code: archive.code, stderr: archive.stderr?.trim() };
 
     const excludes = listed.symlinks.map(({ path }) => `--exclude=${bashQuote(path)}`).join(" ");
-    const extract = await pi.exec(shell, ["-c", `tar --force-local ${excludes} -xf ${quotedArchive} -C ${quotedTemp}`], {
-      cwd: repoDir,
-      timeout: 60_000,
-      signal: cancelSignal,
-    });
+    const extract = await pi.exec(
+      shell,
+      ["-c", `tar --force-local ${excludes} -xf ${quotedArchive} -C ${quotedTemp}`],
+      {
+        cwd: repoDir,
+        timeout: 60_000,
+        signal: cancelSignal,
+      },
+    );
     if (extract.code !== 0) return { code: extract.code, stderr: extract.stderr?.trim() };
 
     const pending = [...listed.symlinks];
