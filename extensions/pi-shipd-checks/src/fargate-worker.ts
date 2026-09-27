@@ -4,12 +4,12 @@ import { join, posix as posixPath } from "node:path";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
-import { XMLParser } from "fast-xml-parser";
 import {
   createAgentSessionFromServices,
   createAgentSessionServices,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
+import { XMLParser } from "fast-xml-parser";
 import commandCodeProvider from "pi-commandcode-provider";
 import { buildSolverPrompt } from "./prompts.js";
 import { TaskResourceUsageSampler } from "./resource-usage.js";
@@ -295,9 +295,7 @@ const junitParser = new XMLParser({
 });
 
 function asXmlNode(value: unknown): XmlNode | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as XmlNode)
-    : undefined;
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as XmlNode) : undefined;
 }
 
 function asXmlNodes(value: unknown): XmlNode[] {
@@ -412,26 +410,14 @@ function readJUnitCounts(path: string): JUnitCounts {
       (count, caseNode) => count + xmlChildNodes(caseNode, "failure").length,
       0,
     );
-    const testcaseErrorTags = testcases.reduce(
-      (count, caseNode) => count + xmlChildNodes(caseNode, "error").length,
-      0,
-    );
+    const testcaseErrorTags = testcases.reduce((count, caseNode) => count + xmlChildNodes(caseNode, "error").length, 0);
     const testcaseSkippedTags = testcases.reduce(
       (count, caseNode) => count + xmlChildNodes(caseNode, "skipped").length,
       0,
     );
-    const suiteFailureTags = suites.reduce(
-      (count, suite) => count + xmlChildNodes(suite, "failure").length,
-      0,
-    );
-    const suiteErrorTags = suites.reduce(
-      (count, suite) => count + xmlChildNodes(suite, "error").length,
-      0,
-    );
-    const suiteSkippedTags = suites.reduce(
-      (count, suite) => count + xmlChildNodes(suite, "skipped").length,
-      0,
-    );
+    const suiteFailureTags = suites.reduce((count, suite) => count + xmlChildNodes(suite, "failure").length, 0);
+    const suiteErrorTags = suites.reduce((count, suite) => count + xmlChildNodes(suite, "error").length, 0);
+    const suiteSkippedTags = suites.reduce((count, suite) => count + xmlChildNodes(suite, "skipped").length, 0);
     const reportFailureTags = reportRoot ? xmlChildNodes(reportRoot, "failure").length : 0;
     const reportErrorTags = reportRoot ? xmlChildNodes(reportRoot, "error").length : 0;
     const reportSkippedTags = reportRoot ? xmlChildNodes(reportRoot, "skipped").length : 0;
@@ -439,9 +425,7 @@ function readJUnitCounts(path: string): JUnitCounts {
     const errorTags = testcaseErrorTags + suiteErrorTags + reportErrorTags;
     const skippedTags = testcaseSkippedTags + suiteSkippedTags + reportSkippedTags;
     const sumSuite = (name: string, fallback: number) => {
-      const values = suites
-        .map((suite) => xmlNumber(suite, name))
-        .filter((value): value is number => value !== null);
+      const values = suites.map((suite) => xmlNumber(suite, name)).filter((value): value is number => value !== null);
       return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : fallback;
     };
     const aggregate = (name: string, tags: number, fallback: number) =>
@@ -637,11 +621,7 @@ function patchPrecheckFailure(result: PatchTestRunResult): string {
     `passed tests: ${result.passedTestcases ?? "unknown"}`,
     `skipped tests: ${result.skippedTestcases ?? "unknown"}`,
     ...((result.skippedTestcases ?? 0) > 0
-      ? [
-          `skipped test names: ${
-            result.skippedTestNames.length > 0 ? result.skippedTestNames.join(", ") : "unknown"
-          }`,
-        ]
+      ? [`skipped test names: ${result.skippedTestNames.length > 0 ? result.skippedTestNames.join(", ") : "unknown"}`]
       : []),
     ...(result.phase === "new-before-solution" && (result.passedTestcases ?? 0) > 0
       ? [`passing tests: ${result.passedTestNames.length > 0 ? result.passedTestNames.join(", ") : "unknown"}`]
