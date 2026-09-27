@@ -557,9 +557,7 @@ async function runPatchTest(
   const partiallyPassedTestNames = reportedPassedTestNames.filter((name) =>
     nonPassingTestNames.some((failedName) => testNodeIdsEquivalent(name, failedName)),
   );
-  const passedTestNames = reportedPassedTestNames.filter(
-    (name) => !partiallyPassedTestNames.includes(name),
-  );
+  const passedTestNames = reportedPassedTestNames.filter((name) => !partiallyPassedTestNames.includes(name));
   return {
     phase,
     exitCode: result.code,
