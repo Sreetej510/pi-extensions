@@ -369,6 +369,14 @@ function parsePassedTestNames(output: string): string[] {
   return [...new Set(names.filter((name) => name.includes("::")))];
 }
 
+function parsePassedSubtestNames(output: string): string[] {
+  const names = [
+    ...output.matchAll(/^\s*\[gw\d+\]\s+(?:\[[^\]]+\]\s+)?SUBPASSED\([^)]*\)\s+(.+?)\s*$/gim),
+    ...output.matchAll(/^\s*SUBPASSED\([^)]*\)\s+(.+?)\s*$/gim),
+  ].map((match) => normalizePytestNodeId(match[1]?.trim() ?? ""));
+  return [...new Set(names.filter((name) => name.includes("::")))];
+}
+
 function testNodeIdsEquivalent(first: string, second: string): boolean {
   if (first === second) return true;
   const firstParts = first.split("::");
@@ -446,8 +454,10 @@ function readJUnitCounts(path: string): JUnitCounts {
     const failures = aggregate("failures", failureTags, failedCases);
     const errors = aggregate("errors", errorTags, errorCases);
     const skipped = aggregate("skipped", skippedTags, skippedCases);
-    // Derive passes from the report totals, not only parsed testcase nodes. A
-    // report can omit a passing testcase while still declaring it in tests.
+    // Derive passes from report totals for all-pass suites. For the
+    // pre-solution all-fail invariant, runPatchTest replaces this with the
+    // explicit passed testcase/subtest records so pytest subtest totals cannot
+    // manufacture passing tests.
     const passedCases = tests >= failures + errors + skipped ? tests - failures - errors - skipped : null;
     return {
       tests,
@@ -510,7 +520,6 @@ function patchTestPassed(counts: JUnitCounts, expectation: "all-pass" | "all-fai
     counts.testcases > counts.tests ||
     counts.skipped !== 0 ||
     counts.skippedTestcases !== 0 ||
-    counts.failures + counts.errors + counts.skipped + counts.passedTestcases !== counts.tests ||
     counts.suiteErrors !== 0 ||
     counts.collectionErrors !== 0
   ) {
@@ -522,11 +531,17 @@ function patchTestPassed(counts: JUnitCounts, expectation: "all-pass" | "all-fai
       counts.failedTestcases === 0 &&
       counts.errors === 0 &&
       counts.erroredTestcases === 0 &&
-      counts.suiteErrors === 0
+      counts.suiteErrors === 0 &&
+      counts.failures + counts.errors + counts.skipped + counts.passedTestcases === counts.tests
     );
   }
+  // Pytest can add subtest records to suite-level totals while still emitting
+  // one failed <testcase> node for the enclosing method. For the pre-solution
+  // invariant, trust the emitted testcase statuses and explicit SUBPASSED lines
+  // rather than deriving passes from aggregate totals.
   return (
     counts.passedTestcases === 0 &&
+    counts.failedTestcases + counts.erroredTestcases === counts.testcases &&
     counts.failedTestcases + counts.erroredTestcases > 0 &&
     counts.failures + counts.errors > 0
   );
@@ -550,14 +565,21 @@ async function runPatchTest(
   await runCommand(`rm -f ${quote(outputPath)}`, workdir, testEnv, 30_000);
   const result = await runCommand(command, workdir, testEnv, timeoutMs);
   const counts = readJUnitCounts(outputPath);
-  const reportedPassedTestNames = [
-    ...new Set([...counts.passedTestNames, ...parsePassedTestNames(`${result.stdout}\n${result.stderr}`)]),
-  ];
+  const output = `${result.stdout}\n${result.stderr}`;
+  const reportedPassedTestNames = [...new Set([...counts.passedTestNames, ...parsePassedTestNames(output)])];
+  const passedSubtestNames = parsePassedSubtestNames(output);
   const nonPassingTestNames = [...counts.failedTestNames, ...counts.erroredTestNames];
   const partiallyPassedTestNames = reportedPassedTestNames.filter((name) =>
     nonPassingTestNames.some((failedName) => testNodeIdsEquivalent(name, failedName)),
   );
-  const passedTestNames = reportedPassedTestNames.filter((name) => !partiallyPassedTestNames.includes(name));
+  const passedTestNames = [
+    ...new Set([
+      ...reportedPassedTestNames.filter((name) => !partiallyPassedTestNames.includes(name)),
+      ...passedSubtestNames,
+    ]),
+  ];
+  const passedTestcases = expectation === "all-fail" ? passedTestNames.length : counts.passedTestcases;
+  const effectiveCounts = expectation === "all-fail" ? { ...counts, passedTestcases } : counts;
   return {
     phase,
     exitCode: result.code,
@@ -565,7 +587,7 @@ async function runPatchTest(
     testcases: counts.testcases,
     failures: counts.failures,
     failedTestcases: counts.failedTestcases,
-    passedTestcases: counts.passedTestcases,
+    passedTestcases,
     errors: counts.errors,
     erroredTestcases: counts.erroredTestcases,
     suiteErrors: counts.suiteErrors,
@@ -578,7 +600,7 @@ async function runPatchTest(
     passedTestNames,
     partiallyPassedTestNames,
     collectionErrorNames: counts.collectionErrorNames,
-    passed: patchTestPassed(counts, expectation),
+    passed: patchTestPassed(effectiveCounts, expectation),
   };
 }
 
@@ -641,12 +663,12 @@ function patchPrecheckFailure(result: PatchTestRunResult): string {
     ...((result.skippedTestcases ?? 0) > 0
       ? [`skipped test names: ${result.skippedTestNames.length > 0 ? result.skippedTestNames.join(", ") : "unknown"}`]
       : []),
+    ...(result.phase === "new-before-solution" && result.partiallyPassedTestNames.length > 0
+      ? [`reported passed tests that also failed: ${result.partiallyPassedTestNames.join(", ")}`]
+      : []),
     ...(result.phase === "new-before-solution" && (result.passedTestcases ?? 0) > 0
       ? [
           `passing tests: ${result.passedTestNames.length > 0 ? result.passedTestNames.join(", ") : "none"}`,
-          `partially passing tests (also failed): ${
-            result.partiallyPassedTestNames.length > 0 ? result.partiallyPassedTestNames.join(", ") : "none"
-          }`,
           `failed tests: ${result.failedTestNames.length > 0 ? result.failedTestNames.join(", ") : "none"}`,
           `errored tests: ${result.erroredTestNames.length > 0 ? result.erroredTestNames.join(", ") : "none"}`,
         ]

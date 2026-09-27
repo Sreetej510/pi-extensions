@@ -175,7 +175,7 @@ enabled project list is stored alongside the other settings in `~/.pi/agent/chec
 
 The patch precheck always uses the `medium` Fargate profile. It applies `test.patch`, creates isolated workspaces with and without `solution.patch`, and runs the base suites concurrently in both workspaces followed by the new suites concurrently in both workspaces. It requires
 `./test.sh base` to pass, requires every `./test.sh new` testcase to fail or error individually (with no suite-level error)
-before `solution.patch`, then requires both base and new suites to pass after the solution patch. A failed precheck aborts
+before `solution.patch`, then requires both base and new suites to pass after the solution patch. Pytest subtest totals are not treated as passing testcase records; emitted `<testcase>` statuses and explicit `SUBPASSED` records are used for the pre-solution invariant. A failed precheck aborts
 before Shipd is opened and includes the Linux platform, a human-readable phase, and failed/errored test names in the tool error.
 
 The `gap-finder` and `solution-precheck` tools are read-only and return repair recommendations; the caller changes the

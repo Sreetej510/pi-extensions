@@ -375,7 +375,7 @@ function enforcePreSolutionPassInvariant(precheck: PatchPrecheckResult): PatchPr
       `passed tests: ${phase.passedTestcases}`,
       `skipped tests: ${phase.skippedTestcases ?? "unknown"}`,
       `passing tests: ${phase.passedTestNames.length > 0 ? phase.passedTestNames.join(", ") : "none"}`,
-      `partially passing tests (also failed): ${
+      `reported passed tests that also failed: ${
         phase.partiallyPassedTestNames.length > 0 ? phase.partiallyPassedTestNames.join(", ") : "none"
       }`,
       `failed tests: ${phase.failedTestNames.length > 0 ? phase.failedTestNames.join(", ") : "none"}`,
