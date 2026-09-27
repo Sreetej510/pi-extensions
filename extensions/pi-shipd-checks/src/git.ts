@@ -1,7 +1,7 @@
 /** Clean, non-mutating git HEAD snapshot into a scratch directory. */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellExecutable } from "./config.js";
 
@@ -131,6 +131,116 @@ function formatUntrackedCodeDiff(repoDir: string, name: string): string | null {
   }
 }
 
+type ExecResultSummary = { code: number; stderr?: string };
+type GitSymlink = { path: string; target: string };
+
+async function listGitSymlinks(
+  pi: ExtensionAPI,
+  repoDir: string,
+  cancelSignal?: AbortSignal,
+): Promise<{ symlinks: GitSymlink[] } | { error: string }> {
+  const tree = await pi.exec("git", ["ls-tree", "-r", "-z", "HEAD"], {
+    cwd: repoDir,
+    timeout: 30_000,
+    signal: cancelSignal,
+  });
+  if (tree.code !== 0) return { error: tree.stderr?.trim() || `git ls-tree failed (exit ${tree.code})` };
+
+  const symlinkPaths = tree.stdout
+    .split("\0")
+    .map((entry) => {
+      const separator = entry.indexOf("\t");
+      if (separator < 0) return null;
+      const metadata = entry.slice(0, separator).split(" ");
+      return metadata[0] === "120000" ? entry.slice(separator + 1) : null;
+    })
+    .filter((path): path is string => path !== null);
+  const symlinks: GitSymlink[] = [];
+  for (const path of symlinkPaths) {
+    const target = await pi.exec("git", ["show", `HEAD:${path}`], {
+      cwd: repoDir,
+      timeout: 15_000,
+      signal: cancelSignal,
+    });
+    if (target.code !== 0) return { error: target.stderr?.trim() || `git show failed for symlink ${path}` };
+    symlinks.push({ path, target: target.stdout.replace(/\r?\n$/, "") });
+  }
+  return { symlinks };
+}
+
+function pathExistsIncludingDanglingSymlink(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Git for Windows' tar cannot create a dangling symlink. Extract regular tree
+ * entries first, excluding HEAD symlinks, then recreate links once their
+ * targets exist. This keeps clean HEAD snapshots usable when WSL has no Git.
+ */
+async function snapshotWithGitBash(
+  pi: ExtensionAPI,
+  shell: string,
+  repoDir: string,
+  tempDir: string,
+  cancelSignal?: AbortSignal,
+): Promise<ExecResultSummary> {
+  const listed = await listGitSymlinks(pi, repoDir, cancelSignal);
+  if ("error" in listed) return { code: 1, stderr: listed.error };
+
+  const archivePath = join(tempDir, ".shipd-head.tar");
+  const quotedArchive = bashQuote(toSlashPath(archivePath));
+  const quotedTemp = bashQuote(toSlashPath(tempDir));
+  try {
+    const archive = await pi.exec(shell, ["-c", `git -c core.autocrlf=false archive HEAD > ${quotedArchive}`], {
+      cwd: repoDir,
+      timeout: 60_000,
+      signal: cancelSignal,
+    });
+    if (archive.code !== 0) return { code: archive.code, stderr: archive.stderr?.trim() };
+
+    const excludes = listed.symlinks.map(({ path }) => `--exclude=${bashQuote(path)}`).join(" ");
+    const extract = await pi.exec(shell, ["-c", `tar --force-local ${excludes} -xf ${quotedArchive} -C ${quotedTemp}`], {
+      cwd: repoDir,
+      timeout: 60_000,
+      signal: cancelSignal,
+    });
+    if (extract.code !== 0) return { code: extract.code, stderr: extract.stderr?.trim() };
+
+    const pending = [...listed.symlinks];
+    while (pending.length > 0) {
+      let created = 0;
+      for (let index = pending.length - 1; index >= 0; index -= 1) {
+        const link = pending[index];
+        const linkPath = join(tempDir, link.path);
+        const targetPath = resolve(dirname(linkPath), link.target);
+        if (!pathExistsIncludingDanglingSymlink(targetPath)) continue;
+        const create = await pi.exec(shell, ["-c", `ln -s -- ${bashQuote(link.target)} ${bashQuote(link.path)}`], {
+          cwd: tempDir,
+          timeout: 15_000,
+          signal: cancelSignal,
+        });
+        if (create.code !== 0) return { code: create.code, stderr: create.stderr?.trim() };
+        pending.splice(index, 1);
+        created += 1;
+      }
+      if (created === 0) {
+        return {
+          code: 1,
+          stderr: `Could not recreate HEAD symlinks; unresolved targets: ${pending.map(({ path }) => path).join(", ")}`,
+        };
+      }
+    }
+    return { code: 0 };
+  } finally {
+    rmSync(archivePath, { force: true });
+  }
+}
+
 export async function snapshotGitHead(
   pi: ExtensionAPI,
   repoDir: string,
@@ -156,7 +266,7 @@ export async function snapshotGitHead(
   const shell = getShellExecutable();
   const wslRepoDir = process.platform === "win32" ? toWslPath(repoDir) : undefined;
   const wslTempDir = process.platform === "win32" ? toWslPath(tempDir) : undefined;
-  let result: Awaited<ReturnType<typeof pi.exec>>;
+  let result: ExecResultSummary;
   if (wslRepoDir && wslTempDir) {
     // A minimal Docker Desktop WSL distro may expose `wsl.exe` but not Git (or
     // Bash). Probe the actual archive tools before selecting the WSL path so
@@ -175,20 +285,10 @@ export async function snapshotGitHead(
         signal: cancelSignal,
       });
     } else {
-      const cmd = `git -c core.autocrlf=false archive HEAD | tar -x -C ${bashQuote(toSlashPath(tempDir))}`;
-      result = await pi.exec(shell, ["-c", cmd], {
-        cwd: repoDir,
-        timeout: 60_000,
-        signal: cancelSignal,
-      });
+      result = await snapshotWithGitBash(pi, shell, repoDir, tempDir, cancelSignal);
     }
   } else {
-    const cmd = `git -c core.autocrlf=false archive HEAD | tar -x -C ${bashQuote(toSlashPath(tempDir))}`;
-    result = await pi.exec(shell, ["-c", cmd], {
-      cwd: repoDir,
-      timeout: 60_000,
-      signal: cancelSignal,
-    });
+    result = await snapshotWithGitBash(pi, shell, repoDir, tempDir, cancelSignal);
   }
   if (result.code !== 0) {
     return { status: "error", error: result.stderr?.trim() || `git archive failed (exit ${result.code})` };
