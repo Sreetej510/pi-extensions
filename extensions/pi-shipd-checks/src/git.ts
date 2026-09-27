@@ -158,14 +158,18 @@ export async function snapshotGitHead(
   const wslTempDir = process.platform === "win32" ? toWslPath(tempDir) : undefined;
   let result: Awaited<ReturnType<typeof pi.exec>>;
   if (wslRepoDir && wslTempDir) {
-    const wslProbe = await pi.exec("wsl.exe", ["-e", "true"], {
+    // A minimal Docker Desktop WSL distro may expose `wsl.exe` but not Git (or
+    // Bash). Probe the actual archive tools before selecting the WSL path so
+    // those hosts fall back to Git for Windows instead of returning a cryptic
+    // `/bin/sh: git: not found` snapshot error.
+    const wslProbe = await pi.exec("wsl.exe", ["-e", "git", "--version"], {
       cwd: repoDir,
       timeout: 15_000,
       signal: cancelSignal,
     });
     if (wslProbe.code === 0) {
       const wslCommand = `git -C ${bashQuote(wslRepoDir)} -c core.autocrlf=false archive HEAD | tar -x -C ${bashQuote(wslTempDir)}`;
-      result = await pi.exec("wsl.exe", ["bash", "-lc", wslCommand], {
+      result = await pi.exec("wsl.exe", ["-e", "sh", "-lc", wslCommand], {
         cwd: repoDir,
         timeout: 60_000,
         signal: cancelSignal,

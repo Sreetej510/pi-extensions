@@ -558,8 +558,9 @@ async function applyPrecheckPatch(
 ): Promise<void> {
   try {
     await requiredCommand(`git -C ${quote(workdir)} apply --recount ${quote(patchPath)}`, "/work", env, 15 * 60_000);
-  } catch {
-    throw new Error(`${label} patch could not be applied.`);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} patch could not be applied.${detail ? `\n${detail}` : ""}`);
   }
 }
 
