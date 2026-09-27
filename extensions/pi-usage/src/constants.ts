@@ -31,7 +31,7 @@ export const RESET_FOREGROUND = "\x1b[39m";
  * looks like a `{ used_dollars, limit_dollars }` object is treated as one —
  * Anthropic uses rotating codenames (cinder_cove, amber_ladder, …) so we
  * detect windows by shape instead of a hardcoded key list. */
-export const ANTHROPIC_NON_WINDOW_KEYS = new Set(["five_hour", "seven_day", "extra_usage"]);
+export const ANTHROPIC_NON_WINDOW_KEYS = new Set(["five_hour", "seven_day", "extra_usage", "model_scoped"]);
 
 export const COMMAND_COMPLETIONS: readonly CommandArgumentCompletion[] = [
   { value: "--refresh", label: "--refresh", description: "Refresh usage instead of cached data" },

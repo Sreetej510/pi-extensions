@@ -6,7 +6,7 @@ export type CommandArgumentCompletion = {
   description?: string;
 };
 
-export type UsageSource = "pi-auth" | "codex-app-server" | "anthropic-oauth";
+export type UsageSource = "pi-auth" | "codex-app-server" | "anthropic-oauth" | "external-adapter";
 export type PiModel = NonNullable<ExtensionContext["model"]>;
 export type ProviderUsageModel = Pick<PiModel, "id" | "name" | "provider">;
 
@@ -41,15 +41,73 @@ export type CodexUsageReport = {
   snapshots: NormalizedRateLimitSnapshot[];
 };
 
+export type UsageScopeV1 = { kind: "account" } | { kind: "model"; modelIds: string[]; label: string };
+
+export type NormalizedUsageWindow = {
+  id: string;
+  label: string;
+  usedPercent: number;
+  resetsAt?: number; // epoch seconds
+  windowMinutes?: number;
+  scope: UsageScopeV1;
+};
+
+export type ProviderUsageSnapshotV1 = {
+  version: 1;
+  provider: "anthropic" | "codex";
+  capturedAt: number; // epoch milliseconds
+  windows: NormalizedUsageWindow[];
+};
+
+export type ProviderUsageEventV1 =
+  | { version: 1; type: "snapshot"; snapshot: ProviderUsageSnapshotV1 }
+  | {
+      version: 1;
+      type: "soft-warning";
+      provider: "anthropic" | "codex";
+      message: string;
+      snapshot?: ProviderUsageSnapshotV1;
+    }
+  | {
+      version: 1;
+      type: "hard-limit";
+      provider: "anthropic" | "codex";
+      message: string;
+      snapshot?: ProviderUsageSnapshotV1;
+    };
+
+export type ProviderUsageAdapterV1 = {
+  id: string;
+  modelProviders: string[];
+  refresh(options: { timeoutMs: number; signal?: AbortSignal }): Promise<ProviderUsageSnapshotV1>;
+};
+
+export type ProviderUsageBusV1 = {
+  version: 1;
+  register(adapter: ProviderUsageAdapterV1): () => void;
+  adapters(): ProviderUsageAdapterV1[];
+  subscribe(listener: (event: ProviderUsageEventV1) => void): () => void;
+  publish(event: ProviderUsageEventV1): number;
+};
+
+export type AdapterUsageReport = {
+  provider: "anthropic" | "codex";
+  source: "external-adapter";
+  modelProviders: string[];
+  capturedAt: number;
+  windows: NormalizedUsageWindow[];
+};
+
 export type AnthropicUsageReport = {
   provider: "anthropic";
   source: "anthropic-oauth";
   capturedAt: number;
+  windows: NormalizedUsageWindow[];
   summaryLines: string[];
   statusline: string;
 };
 
-export type UsageReport = CodexUsageReport | AnthropicUsageReport;
+export type UsageReport = CodexUsageReport | AnthropicUsageReport | AdapterUsageReport;
 
 export type NormalizedRateLimitSnapshot = {
   limitId: string;
@@ -171,6 +229,7 @@ export type AnthropicOAuthUsagePayload = Record<string, unknown> & {
   five_hour?: unknown;
   seven_day?: unknown;
   extra_usage?: unknown;
+  model_scoped?: unknown;
 };
 
 export type CodexResetCreditPayload = {
