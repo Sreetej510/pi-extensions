@@ -369,6 +369,18 @@ function parsePassedTestNames(output: string): string[] {
   return [...new Set(names.filter((name) => name.includes("::")))];
 }
 
+function testNodeIdsEquivalent(first: string, second: string): boolean {
+  if (first === second) return true;
+  const firstParts = first.split("::");
+  const secondParts = second.split("::");
+  if (firstParts.length >= 3 && secondParts.length === 2) {
+    const classPath = firstParts.slice(1, -1).join(".");
+    return secondParts[0] === `${firstParts[0]}.${classPath}` && secondParts[1] === firstParts.at(-1);
+  }
+  if (firstParts.length === 2 && secondParts.length === 3) return testNodeIdsEquivalent(second, first);
+  return false;
+}
+
 function readJUnitCounts(path: string): JUnitCounts {
   try {
     const xml = readFileSync(path, "utf-8");
@@ -538,9 +550,16 @@ async function runPatchTest(
   await runCommand(`rm -f ${quote(outputPath)}`, workdir, testEnv, 30_000);
   const result = await runCommand(command, workdir, testEnv, timeoutMs);
   const counts = readJUnitCounts(outputPath);
-  const passedTestNames = [
+  const reportedPassedTestNames = [
     ...new Set([...counts.passedTestNames, ...parsePassedTestNames(`${result.stdout}\n${result.stderr}`)]),
   ];
+  const nonPassingTestNames = [...counts.failedTestNames, ...counts.erroredTestNames];
+  const partiallyPassedTestNames = reportedPassedTestNames.filter((name) =>
+    nonPassingTestNames.some((failedName) => testNodeIdsEquivalent(name, failedName)),
+  );
+  const passedTestNames = reportedPassedTestNames.filter(
+    (name) => !partiallyPassedTestNames.includes(name),
+  );
   return {
     phase,
     exitCode: result.code,
@@ -559,6 +578,7 @@ async function runPatchTest(
     failedTestNames: counts.failedTestNames,
     erroredTestNames: counts.erroredTestNames,
     passedTestNames,
+    partiallyPassedTestNames,
     collectionErrorNames: counts.collectionErrorNames,
     passed: patchTestPassed(counts, expectation),
   };
@@ -590,7 +610,7 @@ function patchPrecheckInstruction(result: PatchTestRunResult): string {
 
   if (result.phase === "new-before-solution") {
     if (result.passedTestcases !== null && result.passedTestcases > 0) {
-      return "Fix test.patch: add an assertion inside each passing new test for behavior introduced by the solution, so it fails before the solution and passes only after it. Do not remove tests.";
+      return "Fix test.patch: add an assertion inside each passing new test case or subtest for behavior introduced by the solution, so it fails before the solution and passes only after it. Do not remove tests.";
     }
     if (result.collectionErrors !== null && result.collectionErrors > 0) {
       return "Fix test.patch: each new test must fail or error individually before the solution. Do not rely on a whole-file, module, or import error; move solution-dependent imports or setup into each test (lazy import) so every testcase is collected and reports its own failure or error. Do not remove tests.";
@@ -624,7 +644,14 @@ function patchPrecheckFailure(result: PatchTestRunResult): string {
       ? [`skipped test names: ${result.skippedTestNames.length > 0 ? result.skippedTestNames.join(", ") : "unknown"}`]
       : []),
     ...(result.phase === "new-before-solution" && (result.passedTestcases ?? 0) > 0
-      ? [`passing tests: ${result.passedTestNames.length > 0 ? result.passedTestNames.join(", ") : "unknown"}`]
+      ? [
+          `passing tests: ${result.passedTestNames.length > 0 ? result.passedTestNames.join(", ") : "none"}`,
+          `partially passing tests (also failed): ${
+            result.partiallyPassedTestNames.length > 0 ? result.partiallyPassedTestNames.join(", ") : "none"
+          }`,
+          `failed tests: ${result.failedTestNames.length > 0 ? result.failedTestNames.join(", ") : "none"}`,
+          `errored tests: ${result.erroredTestNames.length > 0 ? result.erroredTestNames.join(", ") : "none"}`,
+        ]
       : [
           `failed tests: ${result.failedTestNames.length > 0 ? result.failedTestNames.join(", ") : "none"}`,
           `errored tests: ${result.erroredTestNames.length > 0 ? result.erroredTestNames.join(", ") : "none"}`,

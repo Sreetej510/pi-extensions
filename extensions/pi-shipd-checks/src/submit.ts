@@ -553,7 +553,7 @@ function patchPrecheckUiProblem(
 ): string {
   if (phase === "new tests before solution") {
     if (passed !== undefined && passed > 0) {
-      return "Some new tests pass before the solution; add assertions for behavior introduced by the solution.";
+      return "Some individual test cases or subtests pass before the solution; the precheck remains failed. Ensure every new case fails or errors before the solution.";
     }
     if (collectionLine && !/:\s*none$/i.test(collectionLine)) {
       return "New tests fail during collection; move solution-dependent imports or setup into each test so every testcase fails or errors individually.";
