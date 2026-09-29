@@ -146,7 +146,6 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
      }
    }
    ```
-
    `cluster`, `subnetIds`, and `securityGroupId` are optional when a default VPC is available.
    With `adaptiveResourceProfile: true`, solver-gap runs use `resourceProfile` initially and adapt
    on later runs (unless `projectProfiles` already overrides the repository). They upgrade when
@@ -160,15 +159,6 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
 5. Restart pi, use `/checks --config` to select the solver and reviewer models, then run
    `/checks --solver-gap-finder`. Projects need `Dockerfile`, `agent_prompt.md`,
    `solution.patch`, `test.patch`, and `test.sh`.
-
-For a Command Code subscription model, install the provider in the local pi if needed
-(`pi install npm:pi-commandcode-provider`), then authenticate it with `/login` (**Use a
-subscription** → **Command Code**) and make sure the plan includes Provider API access. Select a
-`commandcode/...` solver model. The standalone Fargate worker bundles the pinned
-`pi-commandcode-provider` package and registers it before starting solver sessions; installing a
-separate Command Code CLI or npm package in the task image is not required. The task needs
-outbound HTTPS access to the Command Code API. The runner uploads only the selected provider
-credential from the local pi auth state for the task; never put the credential in project files.
 
 Use `/analyze:on` and `/analyze:off` to control the gap-finder and solution-precheck tools per project, like HPC. The
 enabled project list is stored alongside the other settings in `~/.pi/agent/checks-config.json`.

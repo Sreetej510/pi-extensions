@@ -282,6 +282,7 @@ interface JUnitCounts {
   skippedTestNames: string[];
   failedTestNames: string[];
   erroredTestNames: string[];
+  failureDetails: string[];
   passedTestNames: string[];
   collectionErrorNames: string[];
 }
@@ -348,6 +349,17 @@ function isCollectionError(caseNode: XmlNode): boolean {
   );
 }
 
+function xmlDiagnostic(node: XmlNode): string {
+  const message = xmlAttribute(node, "message")?.trim();
+  if (message) return message.slice(0, 500);
+  const text = String(node["#text"] ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  return (text ?? "unknown failure").slice(0, 500);
+}
+
 function normalizePytestNodeId(nodeId: string): string {
   const separator = nodeId.indexOf("::");
   if (separator < 0) return nodeId;
@@ -409,6 +421,14 @@ function readJUnitCounts(path: string): JUnitCounts {
     const erroredTestNames = testcases.flatMap((caseNode, index) =>
       xmlChildNodes(caseNode, "error").length > 0 ? [testCaseName(caseNode, index)] : [],
     );
+    const failureDetails = [
+      ...testcases.flatMap((caseNode) => xmlChildNodes(caseNode, "failure").map(xmlDiagnostic)),
+      ...testcases.flatMap((caseNode) => xmlChildNodes(caseNode, "error").map(xmlDiagnostic)),
+      ...suites.flatMap((suite) => xmlChildNodes(suite, "failure").map(xmlDiagnostic)),
+      ...suites.flatMap((suite) => xmlChildNodes(suite, "error").map(xmlDiagnostic)),
+      ...(reportRoot ? xmlChildNodes(reportRoot, "failure").map(xmlDiagnostic) : []),
+      ...(reportRoot ? xmlChildNodes(reportRoot, "error").map(xmlDiagnostic) : []),
+    ];
     const passedTestNames = testcases.flatMap((caseNode, index) =>
       xmlChildNodes(caseNode, "failure").length === 0 &&
       xmlChildNodes(caseNode, "error").length === 0 &&
@@ -474,6 +494,7 @@ function readJUnitCounts(path: string): JUnitCounts {
       skippedTestNames,
       failedTestNames,
       erroredTestNames,
+      failureDetails: [...new Set(failureDetails)],
       passedTestNames,
       collectionErrorNames,
     };
@@ -493,13 +514,14 @@ function readJUnitCounts(path: string): JUnitCounts {
       skippedTestNames: [],
       failedTestNames: [],
       erroredTestNames: [],
+      failureDetails: [],
       passedTestNames: [],
       collectionErrorNames: [],
     };
   }
 }
 
-function patchTestPassed(counts: JUnitCounts, expectation: "all-pass" | "all-fail"): boolean {
+function patchTestPassed(counts: JUnitCounts, expectation: "all-pass" | "all-fail", allowSkipped: boolean): boolean {
   if (
     counts.tests === null ||
     counts.testcases === null ||
@@ -518,8 +540,7 @@ function patchTestPassed(counts: JUnitCounts, expectation: "all-pass" | "all-fai
     // does not emit one <testcase> node for every subtest. Parsed testcase
     // records may therefore be fewer than the declared total, but never more.
     counts.testcases > counts.tests ||
-    counts.skipped !== 0 ||
-    counts.skippedTestcases !== 0 ||
+    (!allowSkipped && (counts.skipped !== 0 || counts.skippedTestcases !== 0)) ||
     counts.suiteErrors !== 0 ||
     counts.collectionErrors !== 0
   ) {
@@ -597,10 +618,11 @@ async function runPatchTest(
     skippedTestNames: counts.skippedTestNames,
     failedTestNames: counts.failedTestNames,
     erroredTestNames: counts.erroredTestNames,
+    failureDetails: counts.failureDetails,
     passedTestNames,
     partiallyPassedTestNames,
     collectionErrorNames: counts.collectionErrorNames,
-    passed: patchTestPassed(effectiveCounts, expectation),
+    passed: patchTestPassed(effectiveCounts, expectation, mode === "base"),
   };
 }
 
@@ -625,7 +647,7 @@ function patchPrecheckInstruction(result: PatchTestRunResult): string {
     if (result.phase === "new-after-solution") {
       return "Fix solution.patch so every new test executes and passes after the solution. Do not skip, xfail, deselect, or remove tests.";
     }
-    return "Fix test.sh or solution.patch so every base test executes with no skipped tests. Do not skip, deselect, or exclude base tests.";
+    return "Fix test.sh or solution.patch so every base test passes or skips with no failures or errors.";
   }
 
   if (result.phase === "new-before-solution") {
@@ -663,6 +685,7 @@ function patchPrecheckFailure(result: PatchTestRunResult): string {
     ...((result.skippedTestcases ?? 0) > 0
       ? [`skipped test names: ${result.skippedTestNames.length > 0 ? result.skippedTestNames.join(", ") : "unknown"}`]
       : []),
+    ...(result.failureDetails.length > 0 ? [`failure details: ${result.failureDetails.join(" | ")}`] : []),
     ...(result.phase === "new-before-solution" && result.partiallyPassedTestNames.length > 0
       ? [`reported passed tests that also failed: ${result.partiallyPassedTestNames.join(", ")}`]
       : []),

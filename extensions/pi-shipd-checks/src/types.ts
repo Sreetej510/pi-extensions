@@ -34,6 +34,7 @@ export interface PatchTestRunResult {
   skippedTestNames: string[];
   failedTestNames: string[];
   erroredTestNames: string[];
+  failureDetails: string[];
   passedTestNames: string[];
   partiallyPassedTestNames: string[];
   collectionErrorNames: string[];
