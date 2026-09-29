@@ -593,17 +593,10 @@ function compactToolError(result: { content?: Array<{ type: string; text?: strin
       const failedLine = lines.find((line) => /^failed tests:/i.test(line)) ?? "";
       const erroredLine = lines.find((line) => /^errored tests:/i.test(line)) ?? "";
       const collectionLine = lines.find((line) => /^collection errors:/i.test(line)) ?? "";
-      const diagnosticLines = lines.filter(
-        (line) =>
-          /^(?:failed tests|errored tests|collection errors|skipped test names|passing tests|reported passed tests that also failed|failure details):/i.test(
-            line,
-          ) && !/:\s*none$/i.test(line),
-      );
       return [
         "Patch precheck failed.",
         `Phase: ${phase}`,
         `Problem: ${patchPrecheckUiProblem(phase, passed, skipped, failedLine, erroredLine, collectionLine)}`,
-        ...diagnosticLines,
       ].join("\n");
     }
     return "Patch precheck failed.\nProblem: The precheck task could not be completed.";

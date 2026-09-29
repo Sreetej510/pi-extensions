@@ -685,7 +685,9 @@ function patchPrecheckFailure(result: PatchTestRunResult): string {
     ...((result.skippedTestcases ?? 0) > 0
       ? [`skipped test names: ${result.skippedTestNames.length > 0 ? result.skippedTestNames.join(", ") : "unknown"}`]
       : []),
-    ...(result.failureDetails.length > 0 ? [`failure details: ${result.failureDetails.join(" | ")}`] : []),
+    ...(result.phase !== "new-before-solution" && result.failureDetails.length > 0
+      ? [`failure details: ${result.failureDetails.join(" | ")}`]
+      : []),
     ...(result.phase === "new-before-solution" && result.partiallyPassedTestNames.length > 0
       ? [`reported passed tests that also failed: ${result.partiallyPassedTestNames.join(", ")}`]
       : []),
