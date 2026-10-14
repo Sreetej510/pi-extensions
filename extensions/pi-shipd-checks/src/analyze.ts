@@ -13,6 +13,7 @@ import {
   loadChecksConfig,
 } from "./config.js";
 import { getChangedCodeDiff, listChangedCodeFiles } from "./git.js";
+import { registerHumanizerTool } from "./humanize.js";
 import { formatDuration } from "./report.js";
 import { loadFairnessRules, loadGapRules, loadSolutionRules, loadTestGuidelines } from "./rubric.js";
 import type { SolutionAuditFinding, TestGapFinal } from "./types.js";
@@ -39,6 +40,7 @@ function analysisCountLabel(kind: AnalysisKind, count: number): string {
 export function registerAnalysisTools(pi: ExtensionAPI): void {
   registerAnalysisTool(pi, "gaps");
   registerAnalysisTool(pi, "solution");
+  registerHumanizerTool(pi);
 }
 
 function registerAnalysisTool(pi: ExtensionAPI, kind: AnalysisKind): void {

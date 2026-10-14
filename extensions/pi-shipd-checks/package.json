@@ -1,7 +1,7 @@
 {
   "name": "@sreetej510/pi-shipd-checks",
   "version": "0.10.13",
-  "description": "Pi extension that runs a strict, multi-agent fairness review of a benchmark task's agent_prompt.md, test.patch, and solution.patch, plus behavioral test-gap analysis, via /checks.",
+  "description": "Pi extension for Shipd checks, behavioral test-gap analysis, and opt-in CoreWeave-backed agent_prompt.md humanization.",
   "type": "module",
   "license": "MIT",
   "private": false,

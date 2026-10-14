@@ -32,7 +32,13 @@ import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { CONFIG_PATH, FARGATE_PREQUALITY_PROFILE, resolveFargateResources } from "./config.js";
+import {
+  CONFIG_PATH,
+  FARGATE_PREQUALITY_PROFILE,
+  HUMANIZER_MAX_CANDIDATE_COUNT,
+  HUMANIZER_MIN_CANDIDATE_COUNT,
+  resolveFargateResources,
+} from "./config.js";
 import { type FargateDockerPlan, parseFargateDockerfile } from "./fargate-docker.js";
 import { bashQuote, toSlashPath } from "./git.js";
 import { SOLVER_ARTIFACTS_DIRNAME } from "./solvergap.js";
@@ -74,6 +80,10 @@ interface AwsContext {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function awsClients(region: string, profile?: string) {
@@ -406,6 +416,167 @@ export async function runFargatePatchPrecheck(opts: {
   }
 }
 
+const DETECTOR_TASK_DEFINITION = "shipd-humanizer-detector-spot";
+const DETECTOR_CONTAINER_NAME = "detector";
+const DETECTOR_TASK_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** Run one on-demand Spot task to score all drafts from a humanizer invocation. */
+export async function runFargateDetectorBatch(opts: {
+  texts: string[];
+  fargateConfig: FargateConfig;
+  cancelSignal?: AbortSignal;
+  onPhase?: (phase: string) => void;
+}): Promise<unknown[]> {
+  if (
+    opts.texts.length < HUMANIZER_MIN_CANDIDATE_COUNT ||
+    opts.texts.length > HUMANIZER_MAX_CANDIDATE_COUNT ||
+    opts.texts.some((text) => !text.trim())
+  ) {
+    throw new Error("The Fargate detector expects one to ten non-empty candidate texts.");
+  }
+  if (opts.cancelSignal?.aborted) throw new Error("Humanization cancelled.");
+
+  const region = process.env.AWS_REGION ?? opts.fargateConfig.region ?? "us-east-1";
+  const clients = awsClients(region, opts.fargateConfig.awsProfile);
+  const runId = randomUUID();
+  const keys: Record<string, string> = { input: `runs/${runId}/humanizer-input.json` };
+  let bucket: string | undefined;
+  let cluster: string | undefined;
+  let taskArn: string | undefined;
+  let stoppedByUs = false;
+  const stopActiveTask = async (reason: string) => {
+    if (!taskArn || !cluster) return;
+    await clients.ecs.send(new StopTaskCommand({ cluster, task: taskArn, reason })).catch(() => undefined);
+    await waitUntilTaskStopped(clients.ecs, cluster, taskArn);
+    taskArn = undefined;
+  };
+  const onAbort = () => {
+    if (taskArn) {
+      stoppedByUs = true;
+      void stopActiveTask("humanization cancelled");
+    }
+  };
+  opts.cancelSignal?.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    opts.onPhase?.("preparing detector task");
+    const context = await resolveAwsContext(clients, opts.fargateConfig, region);
+    bucket = context.bucket;
+    cluster = context.cluster;
+    await clients.s3.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: keys.input,
+        Body: JSON.stringify({ texts: opts.texts }),
+        ContentType: "application/json",
+        ServerSideEncryption: "AES256",
+      }),
+    );
+
+    const maxRetries = Math.min(3, Math.max(0, Math.floor(opts.fargateConfig.maxRetries ?? 1)));
+    let lastFailure = "Fargate Spot detector task did not return scores.";
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      if (opts.cancelSignal?.aborted) throw new Error("Humanization cancelled.");
+      const resultKey = `runs/${runId}/humanizer-result-${attempt}.json`;
+      keys[`result${attempt}`] = resultKey;
+      const inputUrl = await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: bucket, Key: keys.input }), {
+        expiresIn: URL_EXPIRY_SECONDS,
+      });
+      const resultPutUrl = await getSignedUrl(
+        clients.s3,
+        new PutObjectCommand({ Bucket: bucket, Key: resultKey, ContentType: "application/json" }),
+        { expiresIn: URL_EXPIRY_SECONDS },
+      );
+      opts.onPhase?.("starting Spot detector");
+      const run = await clients.ecs.send(
+        new RunTaskCommand({
+          cluster,
+          capacityProviderStrategy: [{ capacityProvider: "FARGATE_SPOT", weight: 1 }],
+          taskDefinition: DETECTOR_TASK_DEFINITION,
+          count: 1,
+          networkConfiguration: {
+            awsvpcConfiguration: {
+              subnets: context.subnets,
+              securityGroups: [context.securityGroup],
+              assignPublicIp: "ENABLED",
+            },
+          },
+          overrides: {
+            containerOverrides: [
+              {
+                name: DETECTOR_CONTAINER_NAME,
+                environment: [
+                  { name: "SHIPD_DETECTOR_INPUT_URL", value: inputUrl },
+                  { name: "SHIPD_DETECTOR_RESULT_URL", value: resultPutUrl },
+                ],
+              },
+            ],
+          },
+        }),
+      );
+      taskArn = run.tasks?.[0]?.taskArn;
+      if (!taskArn) {
+        lastFailure = run.failures?.[0]?.reason ?? "ECS could not place the FARGATE_SPOT detector task.";
+        continue;
+      }
+
+      opts.onPhase?.("waiting for detector scores");
+      const deadline = Date.now() + DETECTOR_TASK_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        if (opts.cancelSignal?.aborted) {
+          stoppedByUs = true;
+          await stopActiveTask("humanization cancelled");
+          throw new Error("Humanization cancelled.");
+        }
+        const result = await readJsonObject(clients.s3, bucket, resultKey);
+        if (isRecord(result)) {
+          if (typeof result.error === "string") {
+            lastFailure = result.error;
+            await stopActiveTask("detector returned an error");
+            break;
+          }
+          if (!Array.isArray(result.scores) || result.scores.length !== opts.texts.length) {
+            lastFailure = "Fargate detector returned an invalid score batch.";
+            await stopActiveTask("detector returned an invalid result");
+            break;
+          }
+          const scores = result.scores;
+          await stopActiveTask("detector batch completed");
+          return scores;
+        }
+        const described = await clients.ecs.send(new DescribeTasksCommand({ cluster, tasks: [taskArn] }));
+        const task = described.tasks?.[0];
+        if (task?.lastStatus === "STOPPED") {
+          lastFailure =
+            task.stoppedReason ??
+            task.containers?.find((container) => container.exitCode !== 0)?.reason ??
+            "Fargate detector task stopped before returning a result.";
+          taskArn = undefined;
+          break;
+        }
+        await sleep(POLL_MS);
+      }
+      if (taskArn) {
+        lastFailure = "Fargate Spot detector task timed out.";
+        await stopActiveTask("detector task timed out");
+      }
+      if (opts.cancelSignal?.aborted) throw new Error("Humanization cancelled.");
+    }
+    throw new Error(`Fargate Spot detector task failed: ${lastFailure}`);
+  } finally {
+    opts.cancelSignal?.removeEventListener("abort", onAbort);
+    if (taskArn) {
+      if (!stoppedByUs) await stopActiveTask("humanization task cleanup");
+      else await waitUntilTaskStopped(clients.ecs, cluster, taskArn);
+    }
+    await deleteObjects(clients.s3, bucket, keys).catch(() => undefined);
+    clients.ecs.destroy();
+    clients.ec2.destroy();
+    clients.s3.destroy();
+    clients.sts.destroy();
+  }
+}
+
 function loadFargateConfigFromChecks(config: ChecksConfig, repoDir: string, mode: WorkerMode): FargateConfig {
   const fargate = config.fargate ?? {};
   if (mode === "patch-precheck") {
@@ -707,6 +878,16 @@ async function readResultObject(s3: S3Client, bucket: string, key: string): Prom
     const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
     const body = await response.Body?.transformToString();
     return body ? (JSON.parse(body) as WorkerPayload) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readJsonObject(s3: S3Client, bucket: string, key: string): Promise<unknown | undefined> {
+  try {
+    const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    const body = await response.Body?.transformToString();
+    return body ? (JSON.parse(body) as unknown) : undefined;
   } catch {
     return undefined;
   }

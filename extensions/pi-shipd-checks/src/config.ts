@@ -14,6 +14,7 @@ import type {
   FargateConfig,
   FargateResourceProfile,
   FargateResourceUsage,
+  PromptHumanizerConfig,
   SolverGapConfig,
   ThinkingLevel,
 } from "./types.js";
@@ -34,6 +35,10 @@ export const ANALYZE_GAP_DEFAULT_ENABLED = false;
 export const ANALYZE_TIMEOUT_MIN_MINUTES = 10;
 export const ANALYZE_TIMEOUT_MAX_MINUTES = 30;
 export const ANALYZE_DEFAULT_TIMEOUT_MINUTES = 15;
+export const HUMANIZER_MIN_CANDIDATE_COUNT = 1;
+export const HUMANIZER_MAX_CANDIDATE_COUNT = 10;
+export const HUMANIZER_DEFAULT_CANDIDATE_COUNT = 3;
+export const HUMANIZER_DEFAULT_TOP_COUNT = 2;
 
 export const FARGATE_RESOURCE_PROFILES = {
   small: { cpu: 1, memoryMiB: 2048 },
@@ -180,6 +185,34 @@ export function loadSolverGapConfig(): SolverGapConfig | null {
     solverCount: solverGap.solverCount > 0 ? solverGap.solverCount : SOLVER_GAP_DEFAULT_SOLVER_COUNT,
     saveArtifacts:
       typeof solverGap.saveArtifacts === "boolean" ? solverGap.saveArtifacts : SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
+  };
+}
+
+/** Candidate counts for the humanizer can be configured even when reviewer models are unset. */
+export function loadPromptHumanizerConfig(): {
+  candidateCount: number;
+  topCount: number;
+  coreweaveApiKeyFile?: string;
+} {
+  const raw = readRawChecksConfig().promptHumanizer;
+  const config = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as PromptHumanizerConfig) : {};
+  const isHumanizerCount = (value: unknown): value is number =>
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= HUMANIZER_MIN_CANDIDATE_COUNT &&
+    value <= HUMANIZER_MAX_CANDIDATE_COUNT;
+  const candidateCount = isHumanizerCount(config.candidateCount)
+    ? config.candidateCount
+    : HUMANIZER_DEFAULT_CANDIDATE_COUNT;
+  const configuredTopCount = isHumanizerCount(config.topCount) ? config.topCount : HUMANIZER_DEFAULT_TOP_COUNT;
+  const coreweaveApiKeyFile =
+    typeof config.coreweaveApiKeyFile === "string" && config.coreweaveApiKeyFile.trim()
+      ? config.coreweaveApiKeyFile.trim()
+      : undefined;
+  return {
+    candidateCount,
+    topCount: Math.min(configuredTopCount, candidateCount),
+    coreweaveApiKeyFile,
   };
 }
 

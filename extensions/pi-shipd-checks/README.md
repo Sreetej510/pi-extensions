@@ -1,7 +1,6 @@
 # @sreetej510/pi-shipd-checks
 
-A [pi](https://github.com/earendil-works/pi) coding agent extension that analyzes benchmark
-tests for behavioral coverage gaps, fairness, and test strength.
+A [pi](https://github.com/earendil-works/pi) coding agent extension for benchmark-test analysis, prompt humanization, and Shipd quality checks.
 
 ## What it does
 
@@ -30,34 +29,50 @@ The agent-callable `solution-precheck` tool runs one exhaustive read-only soluti
 `details.solutionAuditFindings`. It checks contract gaps, regressions, failure safety, architecture, dead code, and
 unrelated changes.
 
-The agent-callable `quality-check` tool runs `create_patches.sh` in the current working directory, reads
-`agent_prompt.md`, `test.patch`, and `solution.patch`, first runs a Fargate patch precheck against a clean `HEAD`, then
-fills the authenticated Shipd draft fields, runs fresh checks with a `Run` button, reruns checks marked `Stale`, skips
-current checks, starts Test Quality before Solution Quality in one browser tab, waits for any started jobs, and returns only the useful report data:
+The opt-in `humanize-agent-prompt` tool reads the complete current-project `agent_prompt.md`, requests 3 experimental
+rewrite drafts from the CoreWeave Nemotron LoRA, scores every draft through a configured HTTPS detector endpoint, and
+returns the top 2 as JSON (defaults are configurable). It never edits files: the local agent must review every source
+requirement before applying a draft. Detector scores are exploratory triage, not confidence, authorship, semantic-fidelity,
+or correctness evidence. The adapter is experimental and was trained on all 519 pairs, including records originally
+assigned to EVAL and HOLDOUT; treat all outputs as unapproved drafts.
+
+The agent-callable `quality-check` tool runs `create_patches.sh` in the current working directory and reads
+`agent_prompt.md`, `test.patch`, and `solution.patch`. It fills the authenticated Shipd draft fields and computes a SHA-256
+of the exact prompt content. The last passing prompt hash is stored as a custom entry in the current chat session. If the
+hash matches, it skips the Shipd Prompt Quality check entirely and reports a cached `PASS`; if it differs or is absent, it
+force-runs Shipd's Task Prompt Quality check even if Shipd labels the existing report current. A new hash is saved only after
+Prompt Quality passes. On failure, only `promptQuality` is returned; there are no Test/Solution results or `stoppedReason`.
+Only after Prompt Quality passes or has a matching cached pass does it run the Fargate patch precheck against a clean `HEAD`;
+only if that passes does it run Test Quality and Solution Quality. Those checks run fresh jobs, rerun stale reports, skip
+current reports, and wait for started jobs. It returns only the useful report data:
 `details.testQuality.verdict`, `details.testQuality.coverageSuggestions`, `details.testQuality.unfairnessCount`, and
 `details.testQuality.tests` filtered to blocks whose `concerns` array is non-empty or whose `fairness` is exactly `"Not fair"`,
-plus `details.solutionQuality.verdict` and its evaluation fields with `level` and `overall_feedback` removed.
-Fairness-only blocks with an empty `concerns` array are marked `Not fully fair`. Test Quality is `PASS` only when both
-filtered tests and coverage suggestions are empty; otherwise it is `FAIL`. Solution Quality is `PASS` only when every
-reported score equals its corresponding `max_score`; otherwise it is `FAIL`. Neither quality result includes `completed` or
-`skipped`. Its compact UI is labeled `Quality Checks`, shows live elapsed time, and only displays the unfairness count
-(including concern blocks), suggestion count, code-quality score, and
-comprehensiveness score. It takes no parameters. It uses one fresh headless browser tab at a time: it closes the
-browser after starting the needed jobs, checks after 5 minutes, then reopens every 90 seconds until those jobs finish, with no
-client-side overall timeout. If
-all checks are current, it uses existing reports without starting a job. Each
-browser context blocks images, fonts, and media to reduce memory use. It does not click the final orange
+`details.promptQuality` and its verdict, reason, and major comments (only `category`, `quote`, and `suggestion`), plus
+`details.solutionQuality.verdict` and its evaluation fields with `level` and `overall_feedback` removed. Fairness-only blocks
+with an empty `concerns` array are marked `Not fully fair`. Test Quality is `PASS` only when both filtered tests and coverage
+suggestions are empty; otherwise it is `FAIL`. Prompt Quality is `PASS` only when the completed report and evaluation
+verdicts are both `PASS`, `requirementCount` is not blocking, and the AI gate does not flag the prompt. The prompt is
+flagged as AI only when `aiDetection.blocking` is `true` and `aiDetection.fractionAi` is at least `0.5`; the prediction
+label is not a gate. A cached Prompt Quality pass is marked
+`cached: true`. Test and Solution Quality return compact `PASS` results; failures include only actionable feedback. Prompt
+Quality failures return a concise reason or major comments. Returned quality results omit `completed` and `skipped`. Its
+compact UI is labeled `Quality Checks`, shows live elapsed time, and summarizes each stage; it does not print full pass
+criteria in the tool description. It takes no parameters. It uses one fresh headless browser tab at a time: for Prompt Quality
+it checks after 2 minutes, then every 30 seconds; for Test and Solution Quality it checks after 5 minutes, then reopens
+every 90 seconds until those jobs finish, with no client-side overall timeout. If all checks are current, it uses existing
+reports without starting a job. Each browser context blocks images, fonts, and media to reduce memory use. It does not click the final orange
 challenge-submit button. Authentication comes from `SHIPD_STORAGE_STATE` or the saved state created by
 `/shipd:auth`. `/shipd:auth` launches the installed browser as a normal visible process and attaches over local CDP,
 which supports Google/SSO sign-in better than an automated browser launch.
 
-The analysis tools are read-only and each uses one agent. Invoke them only when the user asks, never in parallel, and
-run repeated requests sequentially after applying each result. `quality-check` consumes Shipd tokens; do not run
-overlapping invocations for the same challenge.
+The gap-finder and solution-precheck tools are read-only and each uses one agent. Invoke them only when the user asks,
+never in parallel, and run repeated requests sequentially after applying each result. The prompt humanizer also requires
+an explicit user request and sends the prompt to CoreWeave and the configured detector endpoint. `quality-check` consumes
+Shipd tokens; do not run overlapping invocations for the same challenge.
 
 ## Commands
 
-`--config` must be used alone; solver-gap-finder is the only `/checks` run mode. The gap-finder and solution-precheck tools are enabled per project with `/analyze:on`.
+`--config` must be used alone; solver-gap-finder is the only `/checks` run mode. The gap-finder, solution-precheck, and prompt-humanizer tools are enabled per project with `/analyze:on`.
 
 | Command | Effect |
 |---|---|
@@ -66,8 +81,8 @@ overlapping invocations for the same challenge.
 | `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
 | `/shipd:auth` | Open a browser for first-time Shipd sign-in and save the session |
 | `/shipd:link <url>` | Save the Shipd job link for the current chat session |
-| `/analyze:on` | Enable the gap-finder and solution-precheck tools for the current project |
-| `/analyze:off` | Disable the gap-finder and solution-precheck tools for the current project |
+| `/analyze:on` | Enable the gap-finder, solution-precheck, and prompt-humanizer tools for the current project |
+| `/analyze:off` | Disable the gap-finder, solution-precheck, and prompt-humanizer tools for the current project |
 
 **Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run. Cancellation is propagated to active solver sessions and their spawned shell/test process trees; post-cancel verification, comparison, and artifact writing are skipped.
 
@@ -81,6 +96,21 @@ overlapping invocations for the same challenge.
   solution-precheck tools. The timeout applies to each read-only agent. These are stored under
   `analyzeGap.timeoutMinutes`, `analyzeGap.provider`, `analyzeGap.modelId`, and
   `analyzeGap.thinkingLevel`. Fargate resources are selected automatically and are not configurable in this menu.
+
+The humanizer candidate counts are configured separately in `~/.pi/agent/checks-config.json`. `candidateCount` controls
+how many drafts are requested from CoreWeave (1–10); `topCount` controls the maximum returned (1–10, capped at
+`candidateCount`). Only drafts below the detector's reported Human-like cutoff are returned; if none pass, `candidates` is empty:
+
+```json
+{
+  "promptHumanizer": {
+    "candidateCount": 3,
+    "topCount": 2
+  }
+}
+```
+
+The detector runs as one on-demand `FARGATE_SPOT` task per humanizer invocation. The generated drafts are sent as one batch through short-lived, pre-signed S3 URLs; the task exits after scoring and the extension removes the run objects. There is no always-on detector task, API Gateway endpoint, or NLB in this execution path. The current task definition is 1 vCPU/2 GiB; the smoke test returned scores in about 83 seconds overall (the task ran about 27 seconds). The earlier 2-vCPU/4-GiB test took about 68 seconds; cold-start time varies. From the Pi agent directory, deploy the worker image/task definition with `bash shipd-humanizer-assets/shipd-detector/deploy_fargate_spot_worker.sh` before using the humanizer. The CoreWeave key can come from `COREWEAVE_API_KEY`, `COREWEAVE_API_KEY_FILE`, or the local path in `promptHumanizer.coreweaveApiKeyFile`; only the path, never the secret, is stored in `checks-config.json`. `COREWEAVE_BASE_URL` defaults to `https://api.inference.wandb.ai/v1`; `COREWEAVE_PROJECT` and `NEMOTRON_MODEL` default to the handoff's v1 LoRA. Output is intentionally compact: each candidate has rank, text, and a raw `triage_score`. It is exploratory triage, not a confidence percentage. Candidates that fail the detector's Human-like cutoff are discarded; passing candidates are ranked by ascending detector score, up to `topCount`. A CoreWeave `finish_reason: "length"` or reported completion count at the 900-token cap is rejected before scoring. If CoreWeave reports a normal stop despite an incomplete draft, there is no reliable automatic completeness check; compare each draft with the source. Detector scoring processes the full text in windows.
 
 AWS credentials stay local. Configure the AWS CLI profile, then set `AWS_PROFILE`/`AWS_REGION` (or add
 `fargate.awsProfile`/`fargate.region` to `checks-config.json`). The runner discovers the default
@@ -160,7 +190,7 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
    `/checks --solver-gap-finder`. Projects need `Dockerfile`, `agent_prompt.md`,
    `solution.patch`, `test.patch`, and `test.sh`.
 
-Use `/analyze:on` and `/analyze:off` to control the gap-finder and solution-precheck tools per project, like HPC. The
+Use `/analyze:on` and `/analyze:off` to control the gap-finder, solution-precheck, and prompt-humanizer tools per project, like HPC. The
 enabled project list is stored alongside the other settings in `~/.pi/agent/checks-config.json`.
 
 The patch precheck always uses the `medium` Fargate profile. It applies `test.patch`, creates isolated workspaces with and without `solution.patch`, and runs the base suites concurrently in both workspaces followed by the new suites concurrently in both workspaces. It requires
@@ -170,7 +200,8 @@ before Shipd is opened and includes the Linux platform, a human-readable phase, 
 
 The `gap-finder` and `solution-precheck` tools are read-only and return repair recommendations; the caller changes the
 tests, prompt, or solution. Invoke them only when the user asks, never in parallel, and run repeated requests
-sequentially after applying each result.
+sequentially after applying each result. The humanizer does not modify `agent_prompt.md`; validate all requirements and
+apply any selected draft locally.
 
 
 ```json
@@ -215,7 +246,7 @@ Or, for local development, point at the entry point directly:
 | `src/agents.ts` | Spawns and races the gap-finder, solution-precheck, reviewer, and solver agent sessions |
 | `src/solvergap.ts` | Local solver result persistence and comparison artifacts |
 | `src/fargate-docker.ts` | Supported Dockerfile parsing for remote solver setup |
-| `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration for solver and patch-precheck tasks, retries, cleanup, and telemetry |
+| `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration for solver, patch-precheck, and batched detector tasks; retries and cleanup |
 | `src/fargate-worker.ts` | ESM worker that runs solver workspaces or patch prechecks in the shared task |
 | `src/resource-usage.ts` | Container CPU sampling for adaptive profile selection |
 | `src/prompts.ts` | All prompt text sent to those agents |
@@ -223,14 +254,16 @@ Or, for local development, point at the entry point directly:
 | `src/rubric.ts` | Embedded guidelines/fairness rubric text + per-role section loaders |
 | `src/roles.ts` | The 3 reviewer roles (description/tests/solution) metadata |
 | `src/report.ts` | `shipd_report.json` load/merge/summary logic |
-| `src/config.ts` | `~/.pi/agent/checks-config.json` + `settings.json` helpers (models, thinking levels, shell path) |
+| `src/config.ts` | `~/.pi/agent/checks-config.json` + `settings.json` helpers (models, humanizer counts, thinking levels, shell path) |
+| `src/humanize.ts` | Opt-in CoreWeave draft generation, detector scoring, and ranked JSON output |
 | `src/git.ts` | Clean, non-mutating git `HEAD` snapshot into a scratch directory |
 | `src/progress.ts` | Progress-bar widget rendering |
 | `src/state.ts` | Shared "run in progress" / cancel state between the command and the shortcut |
 | `src/types.ts` | Shared TypeScript types |
 
 To change reviewer strictness or wording, edit `prompts.ts`. To change the rubric/fairness text
-itself, edit `rubric.ts`. To add a new tool, add it in `tools.ts` and wire it up in `agents.ts`.
+itself, edit `rubric.ts`. Agent result-submission tools are defined in `tools.ts` and wired up in `agents.ts`; direct
+extension tools are registered from their feature modules and synchronized in `tool-sync.ts`.
 
 ## Development
 

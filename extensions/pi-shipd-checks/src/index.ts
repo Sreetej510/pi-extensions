@@ -1,7 +1,7 @@
 /**
  * Shipd Checks Extension for pi
  *
- * Behavioral test-gap finding plus post-implementation solution-quality prechecking for a task's
+ * Behavioral test-gap finding, prompt humanization, and post-implementation solution-quality prechecking for a task's
  * agent_prompt.md, tests, and repository source,
  * with an optional solver-based gap finder and an agent-callable Shipd submission tool.
  *
@@ -64,18 +64,18 @@ const CANCEL_SHORTCUT = Key.ctrlShift("x");
 
 export default function shipdChecksExtension(pi: ExtensionAPI) {
   pi.registerCommand("analyze:on", {
-    description: "Enable the gap-finder and solution-precheck tools for this project folder",
+    description: "Enable the gap-finder, solution-precheck, and prompt-humanizer tools for this project folder",
     handler: async (_args, ctx) => {
       setAnalyzeEnabled(pi, ctx.cwd, true);
-      ctx.ui.notify("Gap-finder and solution-precheck tools ON in this project", "info");
+      ctx.ui.notify("Gap-finder, solution-precheck, and prompt-humanizer tools ON in this project", "info");
     },
   });
 
   pi.registerCommand("analyze:off", {
-    description: "Disable the gap-finder and solution-precheck tools for this project folder",
+    description: "Disable the gap-finder, solution-precheck, and prompt-humanizer tools for this project folder",
     handler: async (_args, ctx) => {
       setAnalyzeEnabled(pi, ctx.cwd, false);
-      ctx.ui.notify("Gap-finder and solution-precheck tools OFF in this project", "info");
+      ctx.ui.notify("Gap-finder, solution-precheck, and prompt-humanizer tools OFF in this project", "info");
     },
   });
 

@@ -103,6 +103,15 @@ export interface SolverGapConfig {
   saveArtifacts: boolean;
 }
 
+export interface PromptHumanizerConfig {
+  /** Number of humanizer drafts to request from CoreWeave (1–10). */
+  candidateCount?: number;
+  /** Maximum number of cutoff-passing drafts to return (1–10, capped at candidateCount). */
+  topCount?: number;
+  /** Optional path to a local CoreWeave API-key file; the secret itself is never stored in this config. */
+  coreweaveApiKeyFile?: string;
+}
+
 /** Single combined `checks-config.json`: reviewer settings at the top level, solver-gap-finder settings nested. */
 export interface ChecksConfig {
   provider: string;
@@ -116,6 +125,8 @@ export interface ChecksConfig {
   enableAnalyzeTool?: boolean;
   /** Model/thinking-level settings for the agent-callable gap-finder and solution-precheck tools. */
   analyzeGap?: AnalyzeGapConfig;
+  /** Candidate-count settings for the opt-in agent-prompt humanizer. */
+  promptHumanizer?: PromptHumanizerConfig;
 }
 
 /** Model settings shared by the read-only gap-finder and solution-precheck tools. */

@@ -1,7 +1,7 @@
 /** Shipd submission tool: build patches, fill a challenge draft, run quality checks, and return focused results. */
 
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -21,6 +21,7 @@ import type { PatchPrecheckResult } from "./types.js";
 export const QUALITY_CHECK_TOOL_NAME = "quality-check";
 export const SHIPD_JOB_LINK_COMMAND = "shipd:link";
 export const SHIPD_JOB_LINK_ENTRY = "shipd_job_link";
+export const SHIPD_PROMPT_QUALITY_SHA_ENTRY = "shipd_prompt_quality_sha";
 
 const DEFAULT_STORAGE_STATE_PATH = join(homedir(), ".pi", "agent", "shipd-auth", "shipd.ai.json");
 const PATCH_PRECHECK_TIMEOUT_MINUTES = 15;
@@ -28,8 +29,13 @@ const SHIPD_AUTH_URL = "https://shipd.ai/";
 const PATCH_SCRIPT_TIMEOUT_MS = 120_000;
 const INITIAL_WAIT_MS = 300_000;
 const RECHECK_INTERVAL_MS = 90_000;
+const PROMPT_QUALITY_INITIAL_WAIT_MS = 120_000;
+const PROMPT_QUALITY_RECHECK_INTERVAL_MS = 30_000;
 const UI_TIMEOUT_MS = 5_000;
-const QUALITY_NAMES = ["Test Quality", "Solution Quality"] as const;
+const QUALITY_NAMES = ["Task Prompt Quality", "Test Quality", "Solution Quality"] as const;
+const PROMPT_PRESERVATION_NOTE =
+  "Keep agent_prompt.md unchanged if possible—small edits can make it fail. Prefer aligning tests and solution to the prompt; only if the prompt is demonstrably wrong, make the smallest correction while preserving its human style.";
+const AI_DETECTION_THRESHOLD = 0.5;
 
 type QualityName = (typeof QUALITY_NAMES)[number];
 type JsonRecord = Record<string, unknown>;
@@ -186,6 +192,22 @@ function readSavedJobLink(entries: readonly unknown[]): string | undefined {
   return saved;
 }
 
+function readSavedPromptQualitySha(entries: readonly unknown[]): string | undefined {
+  let saved: string | undefined;
+  for (const entry of entries) {
+    if (!isRecord(entry) || entry.type !== "custom" || entry.customType !== SHIPD_PROMPT_QUALITY_SHA_ENTRY) continue;
+    const data = entry.data;
+    if (!isRecord(data)) continue;
+    if (typeof data.sha256 === "string" && /^[a-f0-9]{64}$/i.test(data.sha256)) saved = data.sha256;
+    else if (data.sha256 === null) saved = undefined;
+  }
+  return saved;
+}
+
+function displayQualityName(quality: QualityName): string {
+  return quality === "Task Prompt Quality" ? "Prompt Quality" : quality;
+}
+
 function qualityLabel(page: Page, quality: QualityName): Locator {
   return page
     .locator("span")
@@ -330,7 +352,7 @@ async function fillChallengeFields(page: Page, files: SubmissionFiles, signal?: 
   await description.fill(files.taskPrompt);
   await fillCodeEditor(page, testEditor, files.testPatch);
   await fillCodeEditor(page, solutionEditor, files.solutionPatch);
-  await qualityRow(page, "Test Quality").hover();
+  await qualityRow(page, "Task Prompt Quality").hover();
   await sleep(1_000, signal);
 }
 
@@ -338,7 +360,8 @@ async function clickAndConfirm(page: Page, quality: QualityName, signal?: AbortS
   checkCancelled(signal);
   const row = qualityRow(page, quality);
   const initialText = clean(await row.innerText());
-  if (isBusy(initialText)) return { quality, status: "already-running", rowTextAfterConfirm: initialText };
+  if (isBusy(initialText))
+    return { quality: displayQualityName(quality), status: "already-running", rowTextAfterConfirm: initialText };
 
   const rerun = row.locator('button[title^="Re-run"]').or(row.locator('button[title^="Run"]'));
   const count = await rerun.count();
@@ -354,7 +377,7 @@ async function clickAndConfirm(page: Page, quality: QualityName, signal?: AbortS
   if ((await confirm.count()) !== 1) throw new Error(`${quality}: rerun confirmation button was not found.`);
   await confirm.click();
   await sleep(500, signal);
-  return { quality, status: "started", rerunTitle: title, confirmation };
+  return { quality: displayQualityName(quality), status: "started", rerunTitle: title, confirmation };
 }
 
 interface QualityStatus {
@@ -438,8 +461,58 @@ async function extractQualityReport(page: Page, quality: QualityName, signal?: A
   return { quality, parsed };
 }
 
+function getMajorPromptComments(evaluation: JsonRecord): JsonRecord[] {
+  return Array.isArray(evaluation.comments)
+    ? evaluation.comments
+        .filter((comment): comment is JsonRecord => isRecord(comment) && comment.severity === "major")
+        .map((comment) => ({
+          category: comment.category,
+          quote: comment.quote,
+          suggestion: compactFeedback(comment.suggestion, 500) ?? comment.suggestion,
+        }))
+    : [];
+}
+
+function buildPromptQualityResult(report: QualityReport | undefined): JsonRecord {
+  if (report?.completed !== true || !isRecord(report.evaluation)) {
+    return { verdict: "FAIL", reason: "No completed Prompt Quality report was available." };
+  }
+
+  const evaluation = report.evaluation;
+  const requirementCount = isRecord(evaluation.requirementCount) ? evaluation.requirementCount : {};
+  if (requirementCount.blocking === true && requirementCount.mode === "blocking") {
+    return {
+      verdict: "FAIL",
+      reason:
+        "There are too many requirements in the prompt. Decrease the very easy requirements that any agent can easily implement.",
+    };
+  }
+
+  const aiDetection = isRecord(evaluation.aiDetection) ? evaluation.aiDetection : {};
+  const fractionAi = aiDetection.fractionAi;
+  if (typeof aiDetection.blocking !== "boolean" || typeof fractionAi !== "number" || !Number.isFinite(fractionAi)) {
+    return { verdict: "FAIL", reason: "Prompt Quality did not report valid AI-detection fields." };
+  }
+  if (aiDetection.blocking === true && fractionAi >= AI_DETECTION_THRESHOLD) {
+    return {
+      verdict: "FAIL",
+      reason: "The prompt is flagged as AI; humanize it using humanize-agent-prompt.",
+    };
+  }
+
+  const passed = report.verdict === "PASS" && evaluation.verdict === "PASS";
+  if (passed) return { verdict: "PASS" };
+
+  const comments = getMajorPromptComments(evaluation);
+  const result: JsonRecord = { verdict: "FAIL" };
+  if (comments.length > 0) result.comments = comments;
+  else if (typeof evaluation.summary === "string") result.reason = evaluation.summary;
+  return result;
+}
+
 function buildAgentResult(
   testReport: QualityReport | undefined,
+  promptQuality: JsonRecord,
   solutionReport: QualityReport | undefined,
 ): JsonRecord {
   const coverageSuggestions = Array.isArray(testReport?.coverageSuggestions) ? testReport.coverageSuggestions : [];
@@ -456,39 +529,77 @@ function buildAgentResult(
             : item,
         )
     : [];
+  const testPasses = Boolean(testReport) && unfairnessTests.length === 0 && coverageSuggestions.length === 0;
+  const testQuality: JsonRecord = !testReport
+    ? { verdict: "FAIL", reason: "No completed Test Quality report was available." }
+    : testPasses
+      ? { verdict: "PASS" }
+      : {
+          verdict: "FAIL",
+          ...(coverageSuggestions.length > 0 ? { coverageSuggestions } : {}),
+          unfairnessCount: unfairnessTests.length,
+          ...(unfairnessTests.length > 0 ? { tests: unfairnessTests } : {}),
+        };
+  const solutionPasses = Boolean(solutionReport) && hasPerfectSolutionEvaluation(solutionReport?.evaluation);
+  const solutionQuality: JsonRecord = !solutionReport
+    ? { verdict: "FAIL", reason: "No completed Solution Quality report was available." }
+    : solutionPasses
+      ? { verdict: "PASS" }
+      : { verdict: "FAIL", failures: solutionQualityFailures(solutionReport.evaluation) };
+
   return {
-    testQuality: {
-      verdict: testReport ? (unfairnessTests.length === 0 && coverageSuggestions.length === 0 ? "PASS" : "FAIL") : null,
-      coverageSuggestions,
-      unfairnessCount: unfairnessTests.length,
-      tests: unfairnessTests,
-    },
-    solutionQuality: {
-      verdict: solutionReport ? (hasPerfectSolutionEvaluation(solutionReport.evaluation) ? "PASS" : "FAIL") : null,
-      evaluation: filterSolutionEvaluation(solutionReport?.evaluation),
-    },
+    promptQuality,
+    ...(promptQuality.verdict === "PASS" ? { note: PROMPT_PRESERVATION_NOTE } : {}),
+    testQuality,
+    solutionQuality,
   };
 }
 
-function scoreText(evaluation: unknown, key: "code_quality" | "solution_comprehensiveness"): string {
-  if (!isRecord(evaluation) || !isRecord(evaluation[key])) return "—";
-  const score = evaluation[key].score;
-  const maxScore = evaluation[key].max_score;
-  return typeof score === "number" && typeof maxScore === "number" ? `${score}/${maxScore}` : "—";
+function compactFeedback(value: unknown, maxLength = 400): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const text = value.trim().replace(/\s+/g, " ");
+  if (text.length <= maxLength) return text;
+  const clipped = text.slice(0, maxLength);
+  const boundary = clipped.lastIndexOf(" ");
+  return `${clipped.slice(0, boundary > 0 ? boundary : maxLength).trim()}…`;
 }
 
-function filterSolutionEvaluation(evaluation: unknown): unknown {
-  if (!isRecord(evaluation)) return evaluation ?? null;
-  return Object.fromEntries(
-    Object.entries(evaluation)
-      .filter(([key]) => key !== "overall_feedback")
-      .map(([key, value]) => [
-        key,
-        isRecord(value)
-          ? Object.fromEntries(Object.entries(value).filter(([nestedKey]) => nestedKey !== "level"))
-          : value,
-      ]),
+function solutionQualityFailures(evaluation: unknown): JsonRecord[] {
+  if (!isRecord(evaluation)) return [{ feedback: "No scored Solution Quality evaluation was available." }];
+
+  const issues = Array.isArray(evaluation.issues) ? evaluation.issues.filter(isRecord) : [];
+  const failures = Object.entries(evaluation).filter(
+    ([, value]) =>
+      isRecord(value) &&
+      typeof value.score === "number" &&
+      typeof value.max_score === "number" &&
+      value.score !== value.max_score,
   );
+  if (failures.length === 0) {
+    return [
+      { feedback: compactFeedback(evaluation.summary) ?? "One or more required scores did not meet its maximum." },
+    ];
+  }
+
+  return failures.map(([criterion, value]) => {
+    if (!isRecord(value)) return { criterion };
+    const normalizedCriterion = criterion.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const issue = issues.find((candidate) => {
+      const issueCriterion =
+        typeof candidate.criterion === "string" ? candidate.criterion.toLowerCase().replace(/[^a-z0-9]/g, "") : "";
+      return (
+        issueCriterion && (normalizedCriterion.endsWith(issueCriterion) || issueCriterion.endsWith(normalizedCriterion))
+      );
+    });
+    const feedback = compactFeedback(issue?.detail ?? value.reasoning ?? evaluation.summary);
+    return {
+      criterion,
+      score: value.score,
+      max_score: value.max_score,
+      ...(typeof issue?.title === "string" ? { title: issue.title } : {}),
+      ...(feedback ? { feedback } : {}),
+    };
+  });
 }
 
 function hasPerfectSolutionEvaluation(evaluation: unknown): boolean {
@@ -515,8 +626,11 @@ function hasPerfectSolutionEvaluation(evaluation: unknown): boolean {
 
 function qualitySummaryText(details: unknown, theme: Theme): string[] {
   const value = isRecord(details) ? details : {};
-  const testQuality = isRecord(value.testQuality) ? value.testQuality : {};
-  const solutionQuality = isRecord(value.solutionQuality) ? value.solutionQuality : {};
+  const testQualityDetails = isRecord(value.testQuality) ? value.testQuality : undefined;
+  const testQuality = testQualityDetails ?? {};
+  const promptQuality = isRecord(value.promptQuality) ? value.promptQuality : {};
+  const solutionQualityDetails = isRecord(value.solutionQuality) ? value.solutionQuality : undefined;
+  const solutionQuality = solutionQualityDetails ?? {};
   const unfairnessCount =
     typeof testQuality.unfairnessCount === "number"
       ? testQuality.unfairnessCount
@@ -524,17 +638,52 @@ function qualitySummaryText(details: unknown, theme: Theme): string[] {
         ? testQuality.tests.length
         : 0;
   const suggestionCount = Array.isArray(testQuality.coverageSuggestions) ? testQuality.coverageSuggestions.length : 0;
-  const evaluation = solutionQuality.evaluation;
+  const promptComments = Array.isArray(promptQuality.comments) ? promptQuality.comments : [];
+  const promptCommentCount = promptComments.length;
   const testSummary =
-    testQuality.verdict === null ? "skipped" : `${unfairnessCount} unfairness · ${suggestionCount} suggestions`;
-  const solutionSummary =
-    solutionQuality.verdict === null
+    testQuality.verdict === null || testQuality.verdict === undefined
       ? "skipped"
-      : `quality ${scoreText(evaluation, "code_quality")} · comprehensiveness ${scoreText(evaluation, "solution_comprehensiveness")}`;
-  return [
-    `  ${theme.fg("accent", "Test Quality")}  ${theme.fg("muted", testSummary)}`,
-    `  ${theme.fg("accent", "Solution Quality")}  ${theme.fg("muted", solutionSummary)}`,
+      : testQuality.verdict === "PASS"
+        ? "PASS"
+        : typeof testQuality.reason === "string"
+          ? `FAIL · ${testQuality.reason}`
+          : `${unfairnessCount} unfairness · ${suggestionCount} suggestions`;
+  const promptSummary =
+    promptQuality.verdict === null || promptQuality.verdict === undefined
+      ? "skipped"
+      : promptQuality.cached === true
+        ? `${promptQuality.verdict} · cached`
+        : promptQuality.verdict === "PASS"
+          ? "PASS"
+          : typeof promptQuality.reason === "string"
+            ? `${promptQuality.verdict} · ${promptQuality.reason}`
+            : `${promptQuality.verdict} · ${promptCommentCount} major comment${promptCommentCount === 1 ? "" : "s"}`;
+  const solutionFailures = Array.isArray(solutionQuality.failures) ? solutionQuality.failures : [];
+  const solutionSummary =
+    solutionQuality.verdict === null || solutionQuality.verdict === undefined
+      ? "skipped"
+      : solutionQuality.verdict === "PASS"
+        ? "PASS"
+        : typeof solutionQuality.reason === "string"
+          ? `FAIL · ${solutionQuality.reason}`
+          : `${solutionFailures.length} solution-quality issue${solutionFailures.length === 1 ? "" : "s"}`;
+  const promptCommentDetails = promptComments.flatMap((item) =>
+    isRecord(item)
+      ? [
+          `    Category: ${String(item.category ?? "")}`,
+          `    Quote: ${String(item.quote ?? "")}`,
+          `    Suggestion: ${String(item.suggestion ?? "")}`,
+        ]
+      : [],
+  );
+  const lines = [
+    `  ${theme.fg("accent", "Prompt Quality")}  ${theme.fg("muted", promptSummary)}`,
+    ...promptCommentDetails,
   ];
+  if (testQualityDetails) lines.push(`  ${theme.fg("accent", "Test Quality")}  ${theme.fg("muted", testSummary)}`);
+  if (solutionQualityDetails)
+    lines.push(`  ${theme.fg("accent", "Solution Quality")}  ${theme.fg("muted", solutionSummary)}`);
+  return lines;
 }
 
 function parseErrorCount(lines: string[], label: string): number | undefined {
@@ -618,9 +767,12 @@ function patchPrecheckError(result: PatchPrecheckResult): string {
 
 export function registerSubmitShipdTool(pi: ExtensionAPI): void {
   let jobLink: string | undefined;
+  let promptQualitySha: string | undefined;
 
   pi.on("session_start", (_event, ctx) => {
-    jobLink = readSavedJobLink(ctx.sessionManager.getBranch());
+    const entries = ctx.sessionManager.getBranch();
+    jobLink = readSavedJobLink(entries);
+    promptQualitySha = readSavedPromptQualitySha(entries);
   });
 
   pi.registerCommand("shipd:auth", {
@@ -723,21 +875,12 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
     name: QUALITY_CHECK_TOOL_NAME,
     label: "Quality Checks",
     description:
-      "Run create_patches.sh in the current working directory, read agent_prompt.md, test.patch, and solution.patch, " +
-      "run the Fargate patch precheck, then fill the Shipd challenge draft fields, run fresh checks with a Run button, " +
-      "rerun checks marked Stale, and skip current checks. Start Test Quality then Solution Quality in one browser tab. " +
-      "Wait for any started jobs and return agent-focused JSON. details.testQuality contains verdict, coverageSuggestions, an unfairnessCount, and test blocks whose " +
-      'concerns array is non-empty or whose fairness is exactly "Not fair"; Test Quality is PASS only when both filtered arrays are empty. ' +
-      "details.solutionQuality contains verdict and evaluation fields with level and overall_feedback removed; Solution Quality is PASS only when every score equals its max_score. " +
-      "Neither quality result contains completed or skipped. This consumes Shipd " +
-      "tokens and does not click the final challenge-submit button.",
+      "Run the staged Shipd quality checks for the current project. Return compact pass results and concise, actionable failure feedback. Does not submit the challenge.",
     promptSnippet: "Submit the working-directory patches to Shipd",
     promptGuidelines: [
-      "Use quality-check when the user explicitly asks to submit or evaluate the current Shipd task.",
-      "quality-check has no parameters.",
-      "quality-check first runs the Fargate patch precheck; only after all four test phases meet their expectations does it upload the draft to Shipd. It runs fresh checks with a Run button, reruns checks marked Stale after the draft update, skips current checks, then waits using scheduled browser reopen checks.",
-      "Read details.testQuality.coverageSuggestions and details.testQuality.tests for test-quality feedback.",
-      "Read details.solutionQuality.evaluation for the complete solution-quality feedback.",
+      "Use only when the user asks to evaluate the current Shipd task.",
+      "Run the staged prompt, patch-precheck, test, and solution checks; cache only passing prompt hashes in this session.",
+      "Return compact pass verdicts and concise, scenario-specific failure feedback. Never submit the challenge.",
     ],
     parameters: submitShipdParams,
     renderCall(_args, _theme, context) {
@@ -806,9 +949,157 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         onUpdate?.({ content: [{ type: "text", text: "Running create_patches.sh..." }], details: undefined });
         const files = await readSubmissionFiles(pi, ctx.cwd, signal);
         checkCancelled(signal);
+        const promptSha = createHash("sha256").update(files.taskPrompt, "utf8").digest("hex");
+        const promptQualityCached = promptQualitySha === promptSha;
+
+        let precheck: PatchPrecheckResult | null = null;
+        const runQualityStage = async (qualities: readonly QualityName[], forceRun = false): Promise<void> => {
+          const stagePage = page;
+          if (!browser || !stagePage) throw new Error("Shipd quality page was unavailable.");
+          onUpdate?.({
+            content: [{ type: "text", text: `Checking ${qualities.map(displayQualityName).join(" and ")} status...` }],
+            details: undefined,
+          });
+          const initialStatuses = await readQualityStatuses(stagePage, signal, qualities);
+          const isPromptQualityStage = qualities.includes("Task Prompt Quality");
+          const initialWaitMs = isPromptQualityStage ? PROMPT_QUALITY_INITIAL_WAIT_MS : INITIAL_WAIT_MS;
+          const recheckIntervalMs = isPromptQualityStage ? PROMPT_QUALITY_RECHECK_INTERVAL_MS : RECHECK_INTERVAL_MS;
+          const qualitiesToMonitor = initialStatuses
+            .filter((status) => status.busy || status.shouldRun || forceRun)
+            .map((status) => status.quality);
+          for (const quality of qualities) {
+            const status = initialStatuses.find((item) => item.quality === quality);
+            if (!status) throw new Error(`${quality}: quality status was not available after updating the draft.`);
+            if (!status.busy && (status.shouldRun || forceRun)) {
+              await clickAndConfirm(stagePage, quality, signal);
+            }
+          }
+
+          if (qualitiesToMonitor.length === 0) {
+            onUpdate?.({
+              content: [
+                {
+                  type: "text",
+                  text: `No ${qualities.map(displayQualityName).join(" or ")} checks need to run; using current reports.`,
+                },
+              ],
+              details: undefined,
+            });
+            return;
+          }
+
+          onUpdate?.({
+            content: [
+              {
+                type: "text",
+                text: `Quality checks queued (${qualitiesToMonitor.map(displayQualityName).join(", ")}); closing the browser until the first check in ${formatDuration(initialWaitMs)}...`,
+              },
+            ],
+            details: undefined,
+          });
+          const activeBrowser = browser;
+          if (!activeBrowser) throw new Error("Shipd browser was unavailable while waiting for quality checks.");
+          await activeBrowser.close();
+          browser = undefined;
+          page = undefined;
+
+          let nextCheckAt = Date.now() + initialWaitMs;
+          while (true) {
+            const waitMs = nextCheckAt - Date.now();
+            if (waitMs > 0) {
+              onUpdate?.({
+                content: [{ type: "text", text: `Browser closed; next quality check in ${formatDuration(waitMs)}...` }],
+                details: undefined,
+              });
+              await sleep(waitMs, signal);
+            }
+            checkCancelled(signal);
+
+            onUpdate?.({
+              content: [{ type: "text", text: "Reopening Shipd to check quality job status..." }],
+              details: undefined,
+            });
+            const reopened = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
+            browser = reopened.browser;
+            page = reopened.page;
+            const statusPage = page;
+            if (!statusPage) throw new Error("Shipd quality status page was unavailable after reopening.");
+            const statuses = await readQualityStatuses(statusPage, signal, qualitiesToMonitor);
+            if (statuses.every((status) => !status.busy)) break;
+
+            const statusText = statuses
+              .map((status) => `${displayQualityName(status.quality)}: ${status.rowText}`)
+              .join("; ");
+            onUpdate?.({
+              content: [
+                {
+                  type: "text",
+                  text: `Quality jobs still running (${statusText}); closing browser until the next check...`,
+                },
+              ],
+              details: undefined,
+            });
+            const pollingBrowser = browser;
+            if (!pollingBrowser) throw new Error("Shipd browser was unavailable while polling quality checks.");
+            await pollingBrowser.close();
+            browser = undefined;
+            page = undefined;
+            nextCheckAt = Date.now() + recheckIntervalMs;
+          }
+        };
+
+        let promptQuality: JsonRecord;
+        if (promptQualityCached) {
+          promptQuality = { verdict: "PASS", cached: true };
+          onUpdate?.({
+            content: [
+              { type: "text", text: "Prompt Quality already passed for this prompt in this session; skipping it." },
+            ],
+            details: undefined,
+          });
+        } else {
+          onUpdate?.({
+            content: [{ type: "text", text: "Opening Shipd to prepare Prompt Quality..." }],
+            details: undefined,
+          });
+          const initial = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
+          browser = initial.browser;
+          page = initial.page;
+          await fillChallengeFields(page, files, signal);
+          const promptStatuses = await readQualityStatuses(page, signal, ["Task Prompt Quality"]);
+          if (promptStatuses.some((status) => status.busy)) await runQualityStage(["Task Prompt Quality"]);
+          await runQualityStage(["Task Prompt Quality"], true);
+
+          if (!page) throw new Error("Shipd page was closed before Prompt Quality report extraction.");
+          onUpdate?.({ content: [{ type: "text", text: "Extracting Prompt Quality report..." }], details: undefined });
+          const promptReport = (await hasQualityReport(page, "Task Prompt Quality"))
+            ? (await extractQualityReport(page, "Task Prompt Quality", signal)).parsed
+            : undefined;
+          promptQuality = buildPromptQualityResult(promptReport);
+          if (promptQuality.verdict !== "PASS") {
+            const result = { promptQuality };
+            return {
+              content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+              details: result,
+            };
+          }
+
+          promptQualitySha = promptSha;
+          pi.appendEntry(SHIPD_PROMPT_QUALITY_SHA_ENTRY, { sha256: promptSha });
+          await browser?.close().catch(() => undefined);
+          browser = undefined;
+          page = undefined;
+        }
 
         onUpdate?.({
-          content: [{ type: "text", text: "Running patch prechecks before opening Shipd..." }],
+          content: [
+            {
+              type: "text",
+              text: promptQualityCached
+                ? "Prompt Quality passed from this session's SHA cache; running Fargate patch prechecks..."
+                : "Prompt Quality passed; running Fargate patch prechecks...",
+            },
+          ],
           details: undefined,
         });
         precheckDir = await mkdtemp(join(tmpdir(), "shipd-patch-precheck-"));
@@ -819,7 +1110,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           writeFile(join(precheckDir, "test.patch"), files.testPatch, "utf8"),
           writeFile(join(precheckDir, "solution.patch"), files.solutionPatch, "utf8"),
         ]);
-        const precheck = await runFargatePatchPrecheck({
+        precheck = await runFargatePatchPrecheck({
           pi,
           repoDir: ctx.cwd,
           snapshotDir: precheckDir,
@@ -841,108 +1132,34 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         if (!precheck.passed) throw new Error(patchPrecheckError(precheck));
         await rm(precheckDir, { recursive: true, force: true });
         precheckDir = undefined;
-        onUpdate?.({
-          content: [{ type: "text", text: "Patch prechecks passed; opening Shipd and filling draft fields..." }],
-          details: undefined,
-        });
-        checkCancelled(signal);
-        const initial = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
-        browser = initial.browser;
-        page = initial.page;
-        await fillChallengeFields(page, files, signal);
 
         onUpdate?.({
-          content: [{ type: "text", text: "Checking which quality checks are stale..." }],
+          content: [
+            { type: "text", text: "Fargate patch prechecks passed; opening Shipd for Test and Solution Quality..." },
+          ],
           details: undefined,
         });
-        const initialStatuses = await readQualityStatuses(page, signal);
-        const qualitiesToMonitor = initialStatuses
-          .filter((status) => status.busy || status.shouldRun)
-          .map((status) => status.quality);
-        const started: JsonRecord[] = [];
-        for (const quality of QUALITY_NAMES) {
-          const status = initialStatuses.find((item) => item.quality === quality);
-          if (!status) throw new Error(`${quality}: quality status was not available after updating the draft.`);
-          if (status.shouldRun) {
-            started.push(await clickAndConfirm(page, quality, signal));
-          } else if (status.busy) {
-            started.push({ quality, status: "already-running", rowTextAfterConfirm: status.rowText });
-          }
-        }
-
-        if (qualitiesToMonitor.length > 0) {
-          onUpdate?.({
-            content: [
-              {
-                type: "text",
-                text: `Quality checks queued (${qualitiesToMonitor.join(", ")}); closing the browser until the first check in 5 minutes...`,
-              },
-            ],
-            details: undefined,
-          });
-          await browser.close();
-          browser = undefined;
-          page = undefined;
-
-          let nextCheckAt = Date.now() + INITIAL_WAIT_MS;
-          while (true) {
-            const waitMs = nextCheckAt - Date.now();
-            if (waitMs > 0) {
-              onUpdate?.({
-                content: [{ type: "text", text: `Browser closed; next quality check in ${formatDuration(waitMs)}...` }],
-                details: undefined,
-              });
-              await sleep(waitMs, signal);
-            }
-            checkCancelled(signal);
-
-            onUpdate?.({
-              content: [{ type: "text", text: "Reopening Shipd to check quality job status..." }],
-              details: undefined,
-            });
-            const reopened = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
-            browser = reopened.browser;
-            page = reopened.page;
-            const statuses = await readQualityStatuses(page, signal, qualitiesToMonitor);
-            if (statuses.every((status) => !status.busy)) {
-              break;
-            }
-
-            const statusText = statuses.map((status) => `${status.quality}: ${status.rowText}`).join("; ");
-            onUpdate?.({
-              content: [
-                {
-                  type: "text",
-                  text: `Quality jobs still running (${statusText}); closing browser until the next check...`,
-                },
-              ],
-              details: undefined,
-            });
-            await browser.close();
-            browser = undefined;
-            page = undefined;
-            nextCheckAt = Date.now() + RECHECK_INTERVAL_MS;
-          }
-        } else {
-          onUpdate?.({
-            content: [{ type: "text", text: "No quality checks need to run; using the current reports." }],
-            details: undefined,
-          });
-        }
+        const finalPage = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
+        browser = finalPage.browser;
+        page = finalPage.page;
+        if (promptQualityCached) await fillChallengeFields(page, files, signal);
+        await runQualityStage(["Test Quality", "Solution Quality"]);
 
         if (!page) throw new Error("Shipd quality status page was closed before report extraction.");
-        onUpdate?.({ content: [{ type: "text", text: "Extracting quality reports..." }], details: undefined });
-        const reports: ExtractedReport[] = [];
-        for (const quality of QUALITY_NAMES) {
-          if (!(await hasQualityReport(page, quality))) continue;
-          reports.push(await extractQualityReport(page, quality, signal));
-        }
-        const testReport = reports.find((report) => report.quality === "Test Quality")?.parsed;
-        const solutionReport = reports.find((report) => report.quality === "Solution Quality")?.parsed;
-        const result = buildAgentResult(testReport, solutionReport);
+        onUpdate?.({
+          content: [{ type: "text", text: "Extracting Test and Solution Quality reports..." }],
+          details: undefined,
+        });
+        const testReport = (await hasQualityReport(page, "Test Quality"))
+          ? (await extractQualityReport(page, "Test Quality", signal)).parsed
+          : undefined;
+        const solutionReport = (await hasQualityReport(page, "Solution Quality"))
+          ? (await extractQualityReport(page, "Solution Quality", signal)).parsed
+          : undefined;
+        const result = buildAgentResult(testReport, promptQuality, solutionReport);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          details: { ...result, started, precheck },
+          details: result,
         };
       } catch (error) {
         if (signal?.aborted) throw new Error("Cancelled by user.");
