@@ -1,6 +1,6 @@
 {
   "name": "@sreetej510/pi-shipd-checks",
-  "version": "0.10.13",
+  "version": "0.11.0",
   "description": "Pi extension for Shipd checks, behavioral test-gap analysis, and opt-in CoreWeave-backed agent_prompt.md humanization.",
   "type": "module",
   "license": "MIT",
