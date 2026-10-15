@@ -32,10 +32,12 @@ const RECHECK_INTERVAL_MS = 90_000;
 const PROMPT_QUALITY_INITIAL_WAIT_MS = 120_000;
 const PROMPT_QUALITY_RECHECK_INTERVAL_MS = 30_000;
 const UI_TIMEOUT_MS = 5_000;
+const QUALITY_UI_RETRY_ATTEMPTS = 3;
+const QUALITY_UI_RETRY_DELAY_MS = 250;
+const QUALITY_RUN_START_TIMEOUT_MS = 2_000;
 const QUALITY_NAMES = ["Task Prompt Quality", "Test Quality", "Solution Quality"] as const;
 const PROMPT_PRESERVATION_NOTE =
   "Keep agent_prompt.md unchanged if possible—small edits can make it fail. Prefer aligning tests and solution to the prompt; only if the prompt is demonstrably wrong, make the smallest correction while preserving its human style.";
-const AI_DETECTION_THRESHOLD = 0.5;
 
 type QualityName = (typeof QUALITY_NAMES)[number];
 type JsonRecord = Record<string, unknown>;
@@ -356,28 +358,112 @@ async function fillChallengeFields(page: Page, files: SubmissionFiles, signal?: 
   await sleep(1_000, signal);
 }
 
-async function clickAndConfirm(page: Page, quality: QualityName, signal?: AbortSignal): Promise<JsonRecord> {
-  checkCancelled(signal);
+async function qualityRunStartedRowText(
+  page: Page,
+  quality: QualityName,
+  staleBefore: boolean,
+  runButtonBefore: boolean,
+): Promise<string | undefined> {
   const row = qualityRow(page, quality);
-  const initialText = clean(await row.innerText());
-  if (isBusy(initialText))
-    return { quality: displayQualityName(quality), status: "already-running", rowTextAfterConfirm: initialText };
+  const rowText = clean(await row.innerText());
+  const runButtonAfter = await row.locator('button[title^="Run"]').count();
+  if (
+    isBusy(rowText) ||
+    (Boolean(rowText) && staleBefore && !isStale(rowText)) ||
+    (Boolean(rowText) && runButtonBefore && runButtonAfter === 0)
+  ) {
+    return rowText;
+  }
+  return undefined;
+}
 
-  const rerun = row.locator('button[title^="Re-run"]').or(row.locator('button[title^="Run"]'));
-  const count = await rerun.count();
-  if (count !== 1) throw new Error(`${quality}: expected one Run button, found ${count}`);
-  if (!(await rerun.isEnabled())) throw new Error(`${quality}: Run button is disabled.`);
-  const title = await rerun.getAttribute("title");
+async function waitForQualityRunStart(
+  page: Page,
+  quality: QualityName,
+  staleBefore: boolean,
+  runButtonBefore: boolean,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const deadline = Date.now() + QUALITY_RUN_START_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    checkCancelled(signal);
+    const rowText = await qualityRunStartedRowText(page, quality, staleBefore, runButtonBefore);
+    if (rowText !== undefined) return rowText;
+    await sleep(200, signal);
+  }
+  return undefined;
+}
 
-  await rerun.click();
-  const dialog = page.getByRole("dialog").last();
-  await dialog.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
-  const confirmation = clean(await dialog.innerText());
-  const confirm = dialog.getByRole("button", { name: /confirm/i });
-  if ((await confirm.count()) !== 1) throw new Error(`${quality}: rerun confirmation button was not found.`);
-  await confirm.click();
-  await sleep(500, signal);
-  return { quality: displayQualityName(quality), status: "started", rerunTitle: title, confirmation };
+async function clickAndConfirm(page: Page, quality: QualityName, signal?: AbortSignal): Promise<JsonRecord> {
+  let lastFailure = "The Run action did not start the quality check.";
+  for (let attempt = 1; attempt <= QUALITY_UI_RETRY_ATTEMPTS; attempt += 1) {
+    checkCancelled(signal);
+    let staleBefore = false;
+    let runButtonBefore = false;
+    let rerunTitle: string | null = null;
+    let confirmation = "";
+    try {
+      const row = qualityRow(page, quality);
+      const beforeText = clean(await row.innerText());
+      if (isBusy(beforeText)) {
+        return { quality: displayQualityName(quality), status: "already-running", rowTextAfterConfirm: beforeText };
+      }
+      staleBefore = isStale(beforeText);
+      const runButton = row.locator('button[title^="Run"]');
+      const rerunButton = row.locator('button[title^="Re-run"]');
+      runButtonBefore = (await runButton.count()) > 0;
+      if (!staleBefore && !runButtonBefore) {
+        return { quality: displayQualityName(quality), status: "no-longer-stale", rowTextAfterConfirm: beforeText };
+      }
+
+      const rerunCount = await rerunButton.count();
+      const runCount = await runButton.count();
+      const action = rerunCount === 1 ? rerunButton : runButton;
+      const actionCount = rerunCount === 1 ? rerunCount : runCount;
+      if (actionCount !== 1) throw new Error(`${quality}: expected one Run button, found ${actionCount}`);
+      if (!(await action.isEnabled())) throw new Error(`${quality}: Run button is disabled.`);
+      rerunTitle = await action.getAttribute("title");
+
+      await action.click({ timeout: UI_TIMEOUT_MS });
+      const dialog = page.getByRole("dialog").last();
+      await dialog.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
+      confirmation = clean(await dialog.innerText());
+      const confirm = dialog.getByRole("button", { name: /confirm/i });
+      if ((await confirm.count()) !== 1) throw new Error(`${quality}: rerun confirmation button was not found.`);
+      await confirm.click({ timeout: UI_TIMEOUT_MS });
+
+      const startedRowText = await waitForQualityRunStart(page, quality, staleBefore, runButtonBefore, signal);
+      if (startedRowText !== undefined) {
+        return {
+          quality: displayQualityName(quality),
+          status: "started",
+          rerunTitle,
+          confirmation,
+          rowTextAfterConfirm: startedRowText,
+        };
+      }
+      lastFailure = `${quality}: the confirmation was accepted, but the stale status did not clear and no running state appeared.`;
+    } catch (error) {
+      if (signal?.aborted) throw new Error("Cancelled by user.");
+      lastFailure = error instanceof Error ? error.message : String(error);
+    }
+
+    const startedRowText = await qualityRunStartedRowText(page, quality, staleBefore, runButtonBefore).catch(
+      () => undefined,
+    );
+    if (startedRowText !== undefined) {
+      return {
+        quality: displayQualityName(quality),
+        status: "started",
+        rerunTitle,
+        confirmation,
+        rowTextAfterConfirm: startedRowText,
+      };
+    }
+    await page.keyboard.press("Escape").catch(() => undefined);
+    if (attempt < QUALITY_UI_RETRY_ATTEMPTS) await sleep(QUALITY_UI_RETRY_DELAY_MS * attempt, signal);
+  }
+  throw new Error(`${quality}: could not start after ${QUALITY_UI_RETRY_ATTEMPTS} attempts. ${lastFailure}`);
 }
 
 interface QualityStatus {
@@ -404,6 +490,25 @@ async function readQualityStatuses(
     statuses.push({ quality, rowText, busy: isBusy(rowText), shouldRun: hasRunButton || isStale(rowText) });
   }
   return statuses;
+}
+
+async function readQualityStatusesWithRetry(
+  page: Page,
+  signal?: AbortSignal,
+  qualities: readonly QualityName[] = QUALITY_NAMES,
+): Promise<QualityStatus[]> {
+  let lastFailure = "Quality status rows were unavailable.";
+  for (let attempt = 1; attempt <= QUALITY_UI_RETRY_ATTEMPTS; attempt += 1) {
+    checkCancelled(signal);
+    try {
+      return await readQualityStatuses(page, signal, qualities);
+    } catch (error) {
+      if (signal?.aborted) throw new Error("Cancelled by user.");
+      lastFailure = error instanceof Error ? error.message : String(error);
+      if (attempt < QUALITY_UI_RETRY_ATTEMPTS) await sleep(QUALITY_UI_RETRY_DELAY_MS * attempt, signal);
+    }
+  }
+  throw new Error(`Could not read quality status after ${QUALITY_UI_RETRY_ATTEMPTS} attempts. ${lastFailure}`);
 }
 
 async function hasQualityReport(page: Page, quality: QualityName): Promise<boolean> {
@@ -461,6 +566,26 @@ async function extractQualityReport(page: Page, quality: QualityName, signal?: A
   return { quality, parsed };
 }
 
+async function extractQualityReportWithRetry(
+  page: Page,
+  quality: QualityName,
+  signal?: AbortSignal,
+): Promise<ExtractedReport> {
+  let lastFailure = "The report dialog could not be opened.";
+  for (let attempt = 1; attempt <= QUALITY_UI_RETRY_ATTEMPTS; attempt += 1) {
+    checkCancelled(signal);
+    try {
+      return await extractQualityReport(page, quality, signal);
+    } catch (error) {
+      if (signal?.aborted) throw new Error("Cancelled by user.");
+      lastFailure = error instanceof Error ? error.message : String(error);
+      await page.keyboard.press("Escape").catch(() => undefined);
+      if (attempt < QUALITY_UI_RETRY_ATTEMPTS) await sleep(QUALITY_UI_RETRY_DELAY_MS * attempt, signal);
+    }
+  }
+  throw new Error(`${quality}: report dialog failed after ${QUALITY_UI_RETRY_ATTEMPTS} attempts. ${lastFailure}`);
+}
+
 function getMajorPromptComments(evaluation: JsonRecord): JsonRecord[] {
   return Array.isArray(evaluation.comments)
     ? evaluation.comments
@@ -471,6 +596,26 @@ function getMajorPromptComments(evaluation: JsonRecord): JsonRecord[] {
           suggestion: compactFeedback(comment.suggestion, 500) ?? comment.suggestion,
         }))
     : [];
+}
+
+function hasAIGeneratedPromptComment(evaluation: JsonRecord): boolean {
+  return (
+    Array.isArray(evaluation.comments) &&
+    evaluation.comments.some((comment) => {
+      if (!isRecord(comment) || typeof comment.category !== "string") return false;
+      return comment.category.toLowerCase().replace(/[^a-z0-9]/g, "") === "aigenerated";
+    })
+  );
+}
+
+function aiPromptFailure(evaluation: JsonRecord): JsonRecord {
+  const result: JsonRecord = {
+    verdict: "FAIL",
+    reason: "The prompt is flagged as AI in Prompt Quality comments; humanize it using humanize-agent-prompt.",
+  };
+  const comments = getMajorPromptComments(evaluation);
+  if (comments.length > 0) result.comments = comments;
+  return result;
 }
 
 function buildPromptQualityResult(report: QualityReport | undefined): JsonRecord {
@@ -488,17 +633,7 @@ function buildPromptQualityResult(report: QualityReport | undefined): JsonRecord
     };
   }
 
-  const aiDetection = isRecord(evaluation.aiDetection) ? evaluation.aiDetection : {};
-  const fractionAi = aiDetection.fractionAi;
-  if (typeof aiDetection.blocking !== "boolean" || typeof fractionAi !== "number" || !Number.isFinite(fractionAi)) {
-    return { verdict: "FAIL", reason: "Prompt Quality did not report valid AI-detection fields." };
-  }
-  if (aiDetection.blocking === true && fractionAi >= AI_DETECTION_THRESHOLD) {
-    return {
-      verdict: "FAIL",
-      reason: "The prompt is flagged as AI; humanize it using humanize-agent-prompt.",
-    };
-  }
+  if (hasAIGeneratedPromptComment(evaluation)) return aiPromptFailure(evaluation);
 
   const passed = report.verdict === "PASS" && evaluation.verdict === "PASS";
   if (passed) return { verdict: "PASS" };
@@ -529,7 +664,12 @@ function buildAgentResult(
             : item,
         )
     : [];
-  const testPasses = Boolean(testReport) && unfairnessTests.length === 0 && coverageSuggestions.length === 0;
+  const reportedUnfairnessCount =
+    typeof testReport?.unfairTestCount === "number" && Number.isFinite(testReport.unfairTestCount)
+      ? Math.max(0, Math.floor(testReport.unfairTestCount))
+      : 0;
+  const unfairnessCount = Math.max(unfairnessTests.length, reportedUnfairnessCount);
+  const testPasses = Boolean(testReport) && unfairnessCount === 0 && coverageSuggestions.length === 0;
   const testQuality: JsonRecord = !testReport
     ? { verdict: "FAIL", reason: "No completed Test Quality report was available." }
     : testPasses
@@ -537,7 +677,7 @@ function buildAgentResult(
       : {
           verdict: "FAIL",
           ...(coverageSuggestions.length > 0 ? { coverageSuggestions } : {}),
-          unfairnessCount: unfairnessTests.length,
+          unfairnessCount,
           ...(unfairnessTests.length > 0 ? { tests: unfairnessTests } : {}),
         };
   const solutionPasses = Boolean(solutionReport) && hasPerfectSolutionEvaluation(solutionReport?.evaluation);
@@ -953,25 +1093,24 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         const promptQualityCached = promptQualitySha === promptSha;
 
         let precheck: PatchPrecheckResult | null = null;
-        const runQualityStage = async (qualities: readonly QualityName[], forceRun = false): Promise<void> => {
+        const runQualityStage = async (qualities: readonly QualityName[]): Promise<void> => {
           const stagePage = page;
           if (!browser || !stagePage) throw new Error("Shipd quality page was unavailable.");
           onUpdate?.({
             content: [{ type: "text", text: `Checking ${qualities.map(displayQualityName).join(" and ")} status...` }],
             details: undefined,
           });
-          const initialStatuses = await readQualityStatuses(stagePage, signal, qualities);
+          const initialStatuses = await readQualityStatusesWithRetry(stagePage, signal, qualities);
           const isPromptQualityStage = qualities.includes("Task Prompt Quality");
           const initialWaitMs = isPromptQualityStage ? PROMPT_QUALITY_INITIAL_WAIT_MS : INITIAL_WAIT_MS;
           const recheckIntervalMs = isPromptQualityStage ? PROMPT_QUALITY_RECHECK_INTERVAL_MS : RECHECK_INTERVAL_MS;
-          const qualitiesToMonitor = initialStatuses
-            .filter((status) => status.busy || status.shouldRun || forceRun)
-            .map((status) => status.quality);
+          const qualitiesToMonitor = initialStatuses.filter((status) => status.busy).map((status) => status.quality);
           for (const quality of qualities) {
             const status = initialStatuses.find((item) => item.quality === quality);
             if (!status) throw new Error(`${quality}: quality status was not available after updating the draft.`);
-            if (!status.busy && (status.shouldRun || forceRun)) {
-              await clickAndConfirm(stagePage, quality, signal);
+            if (!status.busy && status.shouldRun) {
+              const runResult = await clickAndConfirm(stagePage, quality, signal);
+              if (runResult.status !== "no-longer-stale") qualitiesToMonitor.push(quality);
             }
           }
 
@@ -1024,8 +1163,12 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
             page = reopened.page;
             const statusPage = page;
             if (!statusPage) throw new Error("Shipd quality status page was unavailable after reopening.");
-            const statuses = await readQualityStatuses(statusPage, signal, qualitiesToMonitor);
-            if (statuses.every((status) => !status.busy)) break;
+            let statuses = await readQualityStatusesWithRetry(statusPage, signal, qualitiesToMonitor);
+            for (const status of statuses) {
+              if (!status.busy && status.shouldRun) await clickAndConfirm(statusPage, status.quality, signal);
+            }
+            statuses = await readQualityStatusesWithRetry(statusPage, signal, qualitiesToMonitor);
+            if (statuses.every((status) => !status.busy && !status.shouldRun)) break;
 
             const statusText = statuses
               .map((status) => `${displayQualityName(status.quality)}: ${status.rowText}`)
@@ -1066,14 +1209,12 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           browser = initial.browser;
           page = initial.page;
           await fillChallengeFields(page, files, signal);
-          const promptStatuses = await readQualityStatuses(page, signal, ["Task Prompt Quality"]);
-          if (promptStatuses.some((status) => status.busy)) await runQualityStage(["Task Prompt Quality"]);
-          await runQualityStage(["Task Prompt Quality"], true);
+          await runQualityStage(["Task Prompt Quality"]);
 
           if (!page) throw new Error("Shipd page was closed before Prompt Quality report extraction.");
           onUpdate?.({ content: [{ type: "text", text: "Extracting Prompt Quality report..." }], details: undefined });
           const promptReport = (await hasQualityReport(page, "Task Prompt Quality"))
-            ? (await extractQualityReport(page, "Task Prompt Quality", signal)).parsed
+            ? (await extractQualityReportWithRetry(page, "Task Prompt Quality", signal)).parsed
             : undefined;
           promptQuality = buildPromptQualityResult(promptReport);
           if (promptQuality.verdict !== "PASS") {
@@ -1151,10 +1292,10 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           details: undefined,
         });
         const testReport = (await hasQualityReport(page, "Test Quality"))
-          ? (await extractQualityReport(page, "Test Quality", signal)).parsed
+          ? (await extractQualityReportWithRetry(page, "Test Quality", signal)).parsed
           : undefined;
         const solutionReport = (await hasQualityReport(page, "Solution Quality"))
-          ? (await extractQualityReport(page, "Solution Quality", signal)).parsed
+          ? (await extractQualityReportWithRetry(page, "Solution Quality", signal)).parsed
           : undefined;
         const result = buildAgentResult(testReport, promptQuality, solutionReport);
         return {

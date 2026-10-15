@@ -40,8 +40,8 @@ The agent-callable `quality-check` tool runs `create_patches.sh` in the current 
 `agent_prompt.md`, `test.patch`, and `solution.patch`. It fills the authenticated Shipd draft fields and computes a SHA-256
 of the exact prompt content. The last passing prompt hash is stored as a custom entry in the current chat session. If the
 hash matches, it skips the Shipd Prompt Quality check entirely and reports a cached `PASS`; if it differs or is absent, it
-force-runs Shipd's Task Prompt Quality check even if Shipd labels the existing report current. A new hash is saved only after
-Prompt Quality passes. On failure, only `promptQuality` is returned; there are no Test/Solution results or `stoppedReason`.
+checks the refreshed status after filling the fields and runs only when the check is stale or has a `Run` button. Otherwise it
+uses the current report. A new hash is saved only after Prompt Quality passes. On failure, only `promptQuality` is returned; there are no Test/Solution results or `stoppedReason`.
 Only after Prompt Quality passes or has a matching cached pass does it run the Fargate patch precheck against a clean `HEAD`;
 only if that passes does it run Test Quality and Solution Quality. Those checks run fresh jobs, rerun stale reports, skip
 current reports, and wait for started jobs. It returns only the useful report data:
@@ -49,15 +49,16 @@ current reports, and wait for started jobs. It returns only the useful report da
 `details.testQuality.tests` filtered to blocks whose `concerns` array is non-empty or whose `fairness` is exactly `"Not fair"`,
 `details.promptQuality` and its verdict, reason, and major comments (only `category`, `quote`, and `suggestion`), plus
 `details.solutionQuality.verdict` and its evaluation fields with `level` and `overall_feedback` removed. Fairness-only blocks
-with an empty `concerns` array are marked `Not fully fair`. Test Quality is `PASS` only when both filtered tests and coverage
-suggestions are empty; otherwise it is `FAIL`. Prompt Quality is `PASS` only when the completed report and evaluation
+with an empty `concerns` array are marked `Not fully fair`. Test Quality is `PASS` only when there are no filtered unfair
+tests, reported `unfairTestCount` is zero (when present), and coverage suggestions are empty. Prompt Quality is `PASS` only when the completed report and evaluation
 verdicts are both `PASS`, `requirementCount` is not blocking, and the AI gate does not flag the prompt. The prompt is
-flagged as AI only when `aiDetection.blocking` is `true` and `aiDetection.fractionAi` is at least `0.5`; the prediction
-label is not a gate. A cached Prompt Quality pass is marked
+flagged as AI when a Prompt Quality comment has category `ai_generated`; the major comment details are included with the humanizer guidance. A cached Prompt Quality pass is marked
 `cached: true`. Test and Solution Quality return compact `PASS` results; failures include only actionable feedback. Prompt
 Quality failures return a concise reason or major comments. Returned quality results omit `completed` and `skipped`. Its
 compact UI is labeled `Quality Checks`, shows live elapsed time, and summarizes each stage; it does not print full pass
-criteria in the tool description. It takes no parameters. It uses one fresh headless browser tab at a time: for Prompt Quality
+criteria in the tool description. It takes no parameters. Transient status and report-dialog operations retry up to three
+times; after clicking Run, the tool verifies the stale state clears or the job shows running before it begins polling. It
+uses one fresh headless browser tab at a time: for Prompt Quality
 it checks after 2 minutes, then every 30 seconds; for Test and Solution Quality it checks after 5 minutes, then reopens
 every 90 seconds until those jobs finish, with no client-side overall timeout. If all checks are current, it uses existing
 reports without starting a job. Each browser context blocks images, fonts, and media to reduce memory use. It does not click the final orange
