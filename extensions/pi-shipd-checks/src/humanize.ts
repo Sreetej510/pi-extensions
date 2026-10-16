@@ -21,7 +21,7 @@ const HUMANIZER_SYSTEM_PROMPT = `You are rewriting a technical specification in 
 
 Preserve every source requirement and its exact scope, including public API names, methods, arguments, attributes, commands, identifiers, literals, values, defaults, optionality, conditions, negations, exceptions, dependencies, ordering, event flow, outputs, errors, and compatibility behavior. Keep names exactly as specified. Do not split identifiers across formatting boundaries, rename existing APIs, or introduce APIs absent from the source.
 
-Do not omit, weaken, generalize, contradict, or add requirements. Rephrase only when all meanings, constraints, and relationships remain unchanged. If any requirement is ambiguous, contradictory, incomplete, or cannot be verified, return the original source unchanged. Do not claim preservation when uncertain.
+Do not omit, weaken, generalize, contradict, or add requirements. Rephrase only when all meanings, constraints, and relationships remain unchanged. Do not claim preservation when uncertain.
 
 Output only the rewritten specification, without commentary.`;
 
