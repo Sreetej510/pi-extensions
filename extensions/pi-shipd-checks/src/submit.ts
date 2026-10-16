@@ -598,22 +598,31 @@ function getMajorPromptComments(evaluation: JsonRecord): JsonRecord[] {
     : [];
 }
 
-function hasAIGeneratedPromptComment(evaluation: JsonRecord): boolean {
+function isAIPromptCategory(category: unknown): boolean {
+  if (typeof category !== "string") return false;
+  const normalized = category.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return (
+    normalized === "ai" ||
+    normalized.startsWith("ai") ||
+    normalized.includes("aigenerated") ||
+    /(^|[^a-z0-9])ai([^a-z0-9]|$)/i.test(category)
+  );
+}
+
+function hasAIPromptComment(evaluation: JsonRecord): boolean {
   return (
     Array.isArray(evaluation.comments) &&
-    evaluation.comments.some((comment) => {
-      if (!isRecord(comment) || typeof comment.category !== "string") return false;
-      return comment.category.toLowerCase().replace(/[^a-z0-9]/g, "") === "aigenerated";
-    })
+    evaluation.comments.some((comment) => isRecord(comment) && isAIPromptCategory(comment.category))
   );
 }
 
 function aiPromptFailure(evaluation: JsonRecord): JsonRecord {
   const result: JsonRecord = {
     verdict: "FAIL",
-    reason: "The prompt is flagged as AI in Prompt Quality comments; humanize it using humanize-agent-prompt.",
+    reason:
+      "Prompt Quality flagged this prompt as AI. Use humanize-agent-prompt for a broader rewrite, or make a small targeted manual change if the flag is due to a recent edit.",
   };
-  const comments = getMajorPromptComments(evaluation);
+  const comments = getMajorPromptComments(evaluation).filter((comment) => !isAIPromptCategory(comment.category));
   if (comments.length > 0) result.comments = comments;
   return result;
 }
@@ -633,7 +642,7 @@ function buildPromptQualityResult(report: QualityReport | undefined): JsonRecord
     };
   }
 
-  if (hasAIGeneratedPromptComment(evaluation)) return aiPromptFailure(evaluation);
+  if (hasAIPromptComment(evaluation)) return aiPromptFailure(evaluation);
 
   const passed = report.verdict === "PASS" && evaluation.verdict === "PASS";
   if (passed) return { verdict: "PASS" };

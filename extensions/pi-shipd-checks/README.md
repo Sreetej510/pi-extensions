@@ -47,12 +47,12 @@ only if that passes does it run Test Quality and Solution Quality. Those checks 
 current reports, and wait for started jobs. It returns only the useful report data:
 `details.testQuality.verdict`, `details.testQuality.coverageSuggestions`, `details.testQuality.unfairnessCount`, and
 `details.testQuality.tests` filtered to blocks whose `concerns` array is non-empty or whose `fairness` is exactly `"Not fair"`,
-`details.promptQuality` and its verdict, reason, and major comments (only `category`, `quote`, and `suggestion`), plus
+`details.promptQuality` and its verdict, reason, and major non-AI comments (only `category`, `quote`, and `suggestion`; AI-category comments are omitted), plus
 `details.solutionQuality.verdict` and its evaluation fields with `level` and `overall_feedback` removed. Fairness-only blocks
 with an empty `concerns` array are marked `Not fully fair`. Test Quality is `PASS` only when there are no filtered unfair
 tests, reported `unfairTestCount` is zero (when present), and coverage suggestions are empty. Prompt Quality is `PASS` only when the completed report and evaluation
 verdicts are both `PASS`, `requirementCount` is not blocking, and the AI gate does not flag the prompt. The prompt is
-flagged as AI when a Prompt Quality comment has category `ai_generated`; the major comment details are included with the humanizer guidance. A cached Prompt Quality pass is marked
+flagged as AI when a Prompt Quality comment category identifies AI (for example, `ai_generated`). AI-category quote and suggestion details are omitted; guidance recommends humanizer for a broader rewrite or a small targeted manual edit for a recent change. A cached Prompt Quality pass is marked
 `cached: true`. Test and Solution Quality return compact `PASS` results; failures include only actionable feedback. Prompt
 Quality failures return a concise reason or major comments. Returned quality results omit `completed` and `skipped`. Its
 compact UI is labeled `Quality Checks`, shows live elapsed time, and summarizes each stage; it does not print full pass
