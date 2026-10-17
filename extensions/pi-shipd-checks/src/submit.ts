@@ -342,7 +342,7 @@ async function fillCodeEditor(page: Page, editor: Locator, value: string): Promi
   await page.keyboard.insertText(value);
 }
 
-async function fillChallengeFields(page: Page, files: SubmissionFiles, signal?: AbortSignal): Promise<void> {
+async function uploadChallengeFields(page: Page, files: SubmissionFiles, signal?: AbortSignal): Promise<void> {
   checkCancelled(signal);
   const description = page.locator("#problem-description");
   const testEditor = page.locator('#problem-test-patch [contenteditable="true"][role="textbox"]');
@@ -351,11 +351,13 @@ async function fillChallengeFields(page: Page, files: SubmissionFiles, signal?: 
     if ((await selector.count()) !== 1) throw new Error("Shipd challenge form selectors were not found exactly once.");
   }
 
+  // Populate the entire Shipd draft before reading status or starting any quality check.
   await description.fill(files.taskPrompt);
   await fillCodeEditor(page, testEditor, files.testPatch);
   await fillCodeEditor(page, solutionEditor, files.solutionPatch);
+  await solutionEditor.evaluate((element) => (element as HTMLElement).blur());
   await qualityRow(page, "Task Prompt Quality").hover();
-  await sleep(1_000, signal);
+  await sleep(2_000, signal);
 }
 
 async function qualityRunStartedRowText(
@@ -1217,7 +1219,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           const initial = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
           browser = initial.browser;
           page = initial.page;
-          await fillChallengeFields(page, files, signal);
+          await uploadChallengeFields(page, files, signal);
           await runQualityStage(["Task Prompt Quality"]);
 
           if (!page) throw new Error("Shipd page was closed before Prompt Quality report extraction.");
@@ -1292,7 +1294,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         const finalPage = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
         browser = finalPage.browser;
         page = finalPage.page;
-        if (promptQualityCached) await fillChallengeFields(page, files, signal);
+        if (promptQualityCached) await uploadChallengeFields(page, files, signal);
         await runQualityStage(["Test Quality", "Solution Quality"]);
 
         if (!page) throw new Error("Shipd quality status page was closed before report extraction.");
