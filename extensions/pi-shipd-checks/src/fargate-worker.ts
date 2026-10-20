@@ -1287,19 +1287,40 @@ async function runTestSuite(
       identity,
     );
     const output = `${result.stdout}\n${result.stderr}`.trim();
+    const counts = readJUnitCounts(outputPath);
     return {
       exitCode: result.code,
       passed: result.code === 0 && !result.timedOut,
       durationMs: Date.now() - started,
       output: result.timedOut ? `Test command timed out.\n${output}` : output,
+      totalTests: counts.tests,
+      passedTests: counts.passedTestcases,
+      failedTests: counts.failures,
+      erroredTests: counts.errors,
+      skippedTests: counts.skipped,
       timedOut: result.timedOut,
     };
   } catch (error) {
     const output = error instanceof Error ? error.message : String(error);
-    return { exitCode: 1, passed: false, durationMs: Date.now() - started, output };
+    return {
+      exitCode: 1,
+      passed: false,
+      durationMs: Date.now() - started,
+      output,
+      totalTests: null,
+      passedTests: null,
+      failedTests: null,
+      erroredTests: null,
+      skippedTests: null,
+    };
   } finally {
     if (testHome) rmSync(testHome, { recursive: true, force: true });
   }
+}
+
+function sumKnownTestCounts(values: Array<number | null | undefined>): number | null {
+  if (values.length === 0 || values.some((value) => typeof value !== "number")) return null;
+  return values.reduce<number>((sum, value) => sum + (value ?? 0), 0);
 }
 
 function isTestPath(path: string): boolean {
@@ -1411,8 +1432,28 @@ async function runSolver(
   } catch (caught) {
     const output = `Could not apply or execute the harness tests: ${caught instanceof Error ? caught.message : String(caught)}`;
     error = error ?? output;
-    baseTests = { exitCode: 1, passed: false, durationMs: 0, output };
-    newTests = { exitCode: 1, passed: false, durationMs: 0, output };
+    baseTests = {
+      exitCode: 1,
+      passed: false,
+      durationMs: 0,
+      output,
+      totalTests: null,
+      passedTests: null,
+      failedTests: null,
+      erroredTests: null,
+      skippedTests: null,
+    };
+    newTests = {
+      exitCode: 1,
+      passed: false,
+      durationMs: 0,
+      output,
+      totalTests: null,
+      passedTests: null,
+      failedTests: null,
+      erroredTests: null,
+      skippedTests: null,
+    };
   }
   const testOutput = `=== base (exit ${baseTests.exitCode}) ===\n${baseTests.output}\n\n=== new (exit ${newTests.exitCode}) ===\n${newTests.output}`;
   writeFileSync(join(workspace.solverDir, "agent_output.txt"), agentOutput, "utf-8");
@@ -1432,8 +1473,8 @@ async function runSolver(
     baseTests,
     newTests,
     durationMs: Date.now() - started,
-    totalTests: null,
-    failedTests: null,
+    totalTests: sumKnownTestCounts([baseTests.totalTests, newTests.totalTests]),
+    failedTests: sumKnownTestCounts([baseTests.failedTests, newTests.failedTests]),
     error,
   };
 }

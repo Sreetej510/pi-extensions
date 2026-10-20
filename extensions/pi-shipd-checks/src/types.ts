@@ -212,6 +212,11 @@ export interface SolverTestResult {
   passed: boolean;
   durationMs: number;
   output: string;
+  totalTests?: number | null;
+  passedTests?: number | null;
+  failedTests?: number | null;
+  erroredTests?: number | null;
+  skippedTests?: number | null;
   timedOut?: boolean;
 }
 

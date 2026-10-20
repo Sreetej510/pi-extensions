@@ -105,9 +105,15 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
       for (const s of solvers) {
         const statusIcon = s.passed ? theme.fg("success", "✓") : theme.fg("error", "✗");
         const statusLabel = s.passed ? "both suites passed" : s.status === "ok" ? "test failure" : s.status;
+        const formatTestCounts = (counts: SolverSummaryDetail["baseTestCounts"]) =>
+          counts?.totalTests != null && counts.failedTests != null
+            ? `${counts.failedTests}/${counts.totalTests} failed${counts.erroredTests ? `, ${counts.erroredTests} errors` : ""}`
+            : "counts unavailable";
         const suiteStatus =
-          `base ${s.basePassed === undefined ? "n/a" : s.basePassed ? "PASS" : "FAIL"}, ` +
-          `new ${s.newPassed === undefined ? "n/a" : s.newPassed ? "PASS" : "FAIL"}`;
+          `base ${s.basePassed === undefined ? "n/a" : s.basePassed ? "PASS" : "FAIL"} ` +
+          `(${formatTestCounts(s.baseTestCounts)}), ` +
+          `new ${s.newPassed === undefined ? "n/a" : s.newPassed ? "PASS" : "FAIL"} ` +
+          `(${formatTestCounts(s.newTestCounts)})`;
         addLine(`  ${statusIcon} Agent ${s.index}: ${statusLabel}; ${suiteStatus} (${formatDuration(s.durationMs)})`);
       }
       const passSummary =

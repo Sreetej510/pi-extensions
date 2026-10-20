@@ -83,6 +83,20 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
       failedTests: r.failedTests,
       basePassed: r.baseTests?.passed,
       newPassed: r.newTests?.passed,
+      baseTestCounts: r.baseTests && {
+        totalTests: r.baseTests.totalTests ?? null,
+        passedTests: r.baseTests.passedTests ?? null,
+        failedTests: r.baseTests.failedTests ?? null,
+        erroredTests: r.baseTests.erroredTests ?? null,
+        skippedTests: r.baseTests.skippedTests ?? null,
+      },
+      newTestCounts: r.newTests && {
+        totalTests: r.newTests.totalTests ?? null,
+        passedTests: r.newTests.passedTests ?? null,
+        failedTests: r.newTests.failedTests ?? null,
+        erroredTests: r.newTests.erroredTests ?? null,
+        skippedTests: r.newTests.skippedTests ?? null,
+      },
       error: r.error ?? (r.status === "error" ? r.testOutputTail : undefined),
       artifactsDir: r.artifactsDir,
     }));
@@ -139,6 +153,20 @@ export interface SolverSummaryDetail {
   failedTests: number | null;
   basePassed?: boolean;
   newPassed?: boolean;
+  baseTestCounts?: {
+    totalTests: number | null;
+    passedTests: number | null;
+    failedTests: number | null;
+    erroredTests: number | null;
+    skippedTests: number | null;
+  };
+  newTestCounts?: {
+    totalTests: number | null;
+    passedTests: number | null;
+    failedTests: number | null;
+    erroredTests: number | null;
+    skippedTests: number | null;
+  };
   error?: string;
 }
 export interface RunSummary {
