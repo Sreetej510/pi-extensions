@@ -5,10 +5,11 @@
  */
 
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "off";
+export type ClaudeThinkingLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type Verdict = "PASS" | "FAIL";
 
-/** Model/thinking-level settings for the solver-gap-finder's solver agents (they write code + run shell, a heavier job than the read-only reviewers), plus their own timeout/parallelism knobs. Kept nested under `solverGap` in the same config file rather than a separate one. */
+/** Claude CLI model and execution settings for Fargate solvers, retained under `solverGap` for config compatibility. */
 export type FargateResourceProfile = "small" | "medium" | "large";
 
 export type PatchPrecheckPhase =
@@ -93,14 +94,13 @@ export interface FargateConfig {
 }
 
 export interface SolverGapConfig {
-  provider: string;
+  /** Claude Code CLI model alias or model ID used by the Fargate solvers. */
   modelId: string;
-  thinkingLevel: ThinkingLevel;
+  /** Claude Code CLI solver effort passed explicitly through as `--effort`. */
+  thinkingLevel: ClaudeThinkingLevel;
   timeoutMinutes: number;
   /** Number of parallel solver agents to run. */
   solverCount: number;
-  /** Whether to persist trajectory.json/solution.patch/test output to `.pi/shipd-checks/<runId>/` per run. */
-  saveArtifacts: boolean;
 }
 
 export interface PromptHumanizerConfig {
@@ -112,7 +112,7 @@ export interface PromptHumanizerConfig {
   coreweaveApiKeyFile?: string;
 }
 
-/** Single combined `checks-config.json`: reviewer settings at the top level, solver-gap-finder settings nested. */
+/** Single combined `checks-config.json`: local analysis reviewer settings and Claude benchmark settings. */
 export interface ChecksConfig {
   provider: string;
   modelId: string;
@@ -206,28 +206,64 @@ export interface CommandOption {
   description: string;
 }
 
-/** Outcome of one solver-gap-finder solver agent (writes code + runs shell; sees agent_prompt.md + test.patch, never solution.patch). */
+/** A test-suite run performed by the harness after one Claude CLI solver invocation. */
+export interface SolverTestResult {
+  exitCode: number;
+  passed: boolean;
+  durationMs: number;
+  output: string;
+  timedOut?: boolean;
+}
+
+/** Aggregate token metrics reported by Claude Code or a local Pi model session. */
+export interface TokenUsage {
+  inputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  outputTokens?: number;
+  /** Explicitly reported reasoning/thinking tokens, when the provider exposes them. */
+  thinkingTokens?: number;
+  totalInputTokens?: number;
+  /** Total excluding explicit thinking tokens; otherwise the raw input-plus-output total. */
+  totalTokens?: number;
+  /** Raw input-plus-output total, included when thinking tokens were explicitly reported. */
+  rawTotalTokens?: number;
+  /** Token count in the final API request context, when per-iteration usage is available. */
+  finalContextTokens?: number;
+  peakContextTokens?: number;
+  contextWindow?: number;
+  contextWindowUtilizationPercent?: number;
+  modelCalls?: number;
+  costUsd?: number;
+}
+
+/** Outcome of one isolated Claude CLI solver run; base/new tests are independently verified afterward. */
 export interface SolverRunResult {
   index: number;
-  status: "ok" | "timedOut" | "cancelled" | "error" | "patchFailed";
+  status: "ok" | "timedOut" | "cancelled" | "error";
   passed: boolean;
   diff: string;
   testOutputTail: string;
-  /** Wall-clock time the solver agent + verification took, in ms. */
+  agentOutput?: string;
+  tokenUsage?: TokenUsage;
+  baseTests?: SolverTestResult;
+  newTests?: SolverTestResult;
+  /** Wall-clock time for the one-shot agent invocation and both verification suites, in ms. */
   durationMs: number;
-  /** Test totals parsed from the verifier's JUnit XML output; null when no report was produced. */
   totalTests: number | null;
   failedTests: number | null;
   /** Diagnostic for setup, execution, transport, or other non-test failures. */
   error?: string;
-  /** Dir under `.pi/shipd-checks/<runId>/solver_<index>/` where trajectory.json/solution.patch/test output were saved, if any. */
+  /** Dir under `.pi/shipd-checks/<runId>/solver_<index>/` where diffs and logs were saved, if any. */
   artifactsDir?: string;
 }
 
-/** A behavioral gap surfaced by comparing solver diffs against the real prompt/solution. */
-export interface SolverGap {
-  description: string;
-  justification: string;
-  /** Which solver(s) and what part of their diff grounds this gap. */
-  evidence: string;
+/** Read-only Pi reviewer assessment of all agent solutions and the repository's tests. */
+export interface SolverReviewResult {
+  status: "ok" | "timedOut" | "cancelled" | "error";
+  text: string;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
+  tokenUsage?: TokenUsage;
+  error?: string;
 }

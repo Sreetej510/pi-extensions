@@ -1,8 +1,7 @@
 /**
- * Global config (~/.pi/agent/checks-config.json) for the reviewer model +
- * thinking level, plus the nested solver-gap-finder settings, plus helpers for
- * reading pi's own settings.json (enabled models, shell path) that the
- * config flow and git snapshot step need.
+ * Global config (~/.pi/agent/checks-config.json) for local analysis-agent models,
+ * Claude CLI benchmark settings, and Fargate resources, plus helpers for reading
+ * pi's own settings.json (enabled models, shell path) used by unrelated tools.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -11,6 +10,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
   AnalyzeGapConfig,
   ChecksConfig,
+  ClaudeThinkingLevel,
   FargateConfig,
   FargateResourceProfile,
   FargateResourceUsage,
@@ -28,8 +28,6 @@ export const SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES = 20;
 export const SOLVER_GAP_SOLVER_COUNT_MIN = 1;
 export const SOLVER_GAP_SOLVER_COUNT_MAX = 5;
 export const SOLVER_GAP_DEFAULT_SOLVER_COUNT = 3;
-
-export const SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS = true;
 
 export const ANALYZE_GAP_DEFAULT_ENABLED = false;
 export const ANALYZE_TIMEOUT_MIN_MINUTES = 10;
@@ -175,17 +173,35 @@ export function persistFargateResourceUsage(cwd: string, usage: FargateResourceU
   writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, fargate: next.fargate }, null, 2), "utf-8");
 }
 
-/** The nested `solverGap` section, normalized with sane defaults if partially missing/invalid. */
-export function loadSolverGapConfig(): SolverGapConfig | null {
-  const solverGap = loadChecksConfig()?.solverGap;
-  if (!solverGap?.provider || !solverGap.modelId || !solverGap.thinkingLevel) return null;
+/** Solver settings are independent of Pi model configuration because solvers now use Claude CLI. */
+export function loadSolverGapConfig(): SolverGapConfig {
+  const raw = readRawChecksConfig().solverGap;
+  const solverGap = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Partial<SolverGapConfig>) : {};
+  const timeoutMinutes = Number.isFinite(solverGap.timeoutMinutes)
+    ? Math.min(
+        SOLVER_GAP_TIMEOUT_MAX_MINUTES,
+        Math.max(SOLVER_GAP_TIMEOUT_MIN_MINUTES, solverGap.timeoutMinutes as number),
+      )
+    : SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES;
+  const solverCount = Number.isInteger(solverGap.solverCount)
+    ? Math.min(SOLVER_GAP_SOLVER_COUNT_MAX, Math.max(SOLVER_GAP_SOLVER_COUNT_MIN, solverGap.solverCount as number))
+    : SOLVER_GAP_DEFAULT_SOLVER_COUNT;
+  const thinkingLevels: ClaudeThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
   return {
-    ...solverGap,
-    timeoutMinutes: solverGap.timeoutMinutes > 0 ? solverGap.timeoutMinutes : SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
-    solverCount: solverGap.solverCount > 0 ? solverGap.solverCount : SOLVER_GAP_DEFAULT_SOLVER_COUNT,
-    saveArtifacts:
-      typeof solverGap.saveArtifacts === "boolean" ? solverGap.saveArtifacts : SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
+    modelId: ["haiku", "sonnet", "opus"].includes(solverGap.modelId ?? "") ? (solverGap.modelId as string) : "sonnet",
+    thinkingLevel:
+      solverGap.thinkingLevel && thinkingLevels.includes(solverGap.thinkingLevel) ? solverGap.thinkingLevel : "low",
+    timeoutMinutes,
+    solverCount,
   };
+}
+
+/** Save solver-only settings even when no Pi reviewer model is configured. */
+export function saveSolverGapConfig(solverGap: SolverGapConfig): void {
+  const raw = readRawChecksConfig();
+  const dir = dirname(CONFIG_PATH);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, solverGap }, null, 2), "utf-8");
 }
 
 /** Candidate counts for the humanizer can be configured even when reviewer models are unset. */

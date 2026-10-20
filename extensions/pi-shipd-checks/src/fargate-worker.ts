@@ -1,17 +1,20 @@
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  chownSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join, posix as posixPath } from "node:path";
+import { gzipSync } from "node:zlib";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
-import {
-  createAgentSessionFromServices,
-  createAgentSessionServices,
-  SessionManager,
-} from "@earendil-works/pi-coding-agent";
 import { XMLParser } from "fast-xml-parser";
-import commandCodeProvider from "pi-commandcode-provider";
-import { buildSolverPrompt } from "./prompts.js";
 import { TaskResourceUsageSampler } from "./resource-usage.js";
 import type {
   FargateResourceProfile,
@@ -20,7 +23,8 @@ import type {
   PatchPrecheckResult,
   PatchTestRunResult,
   SolverRunResult,
-  ThinkingLevel,
+  SolverTestResult,
+  TokenUsage,
 } from "./types.js";
 
 type DockerPlan = {
@@ -30,25 +34,28 @@ type DockerPlan = {
   runtimeCommands: string[];
 };
 
-type WorkerSolverResult = SolverRunResult & { trajectory?: unknown[] };
+type WorkerSolverResult = SolverRunResult & {
+  /** Compressed JSONL event stream, transferred to the host for artifact persistence. */
+  agentStepsGzipBase64?: string;
+};
 
 type WorkerMode = "solver" | "patch-precheck";
 
 type WorkerPayload = {
   complete: boolean;
   results: WorkerSolverResult[];
+  phase?: string;
   precheck?: PatchPrecheckResult;
   resourceUsage?: FargateResourceUsage;
   error?: string;
 };
 
 let activeResourceUsage: TaskResourceUsageSampler | undefined;
+let taskPrompt = "";
+let testPatchSource: { kind: "url"; value: string } | { kind: "s3"; bucket: string; key: string } | undefined;
+let testPatchContent: Promise<string> | undefined;
 
-// The standalone worker cannot resolve pi-ai's lazy OAuth modules relative to
-// /tmp after esbuild bundles this file. Register them statically instead.
-registerBunOAuthFlows();
-
-const AGENT_DIR = "/opt/shipd-agent";
+const CLAUDE_CONFIG_DIR = "/opt/shipd-claude";
 const SOLVERS_DIR = "/work/solvers";
 const TAIL_CHARS = 4000;
 const WORKSPACE_PYTHON_WRAPPER = [
@@ -58,10 +65,6 @@ const WORKSPACE_PYTHON_WRAPPER = [
   "fi",
   'exec /usr/local/bin/python "$@"',
 ].join("\n");
-
-// Command Code is a pi provider extension, not a CLI dependency. It is bundled
-// into this standalone worker and registered only when a solver selects it.
-const COMMAND_CODE_PROVIDER = "commandcode";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -74,27 +77,41 @@ function tail(text: string): string {
 }
 
 function loadBootstrap(): WorkerMode {
+  chmodSync("/tmp/shipd-bootstrap.json", 0o600);
   const bootstrap = JSON.parse(readFileSync("/tmp/shipd-bootstrap.json", "utf-8")) as Record<string, unknown>;
+  rmSync("/tmp/shipd-bootstrap.json", { force: true });
+  delete process.env.SHIPD_BOOTSTRAP_URL;
   const mode = bootstrap.mode;
   if (mode !== "solver" && mode !== "patch-precheck") throw new Error("Invalid Fargate bootstrap mode.");
   process.env.SHIPD_MODE = mode;
 
   const directKeys =
     mode === "solver"
-      ? ["bucket", "region", "sourceKey", "authKey", "resultKey"]
+      ? ["bucket", "region", "sourceKey", "authKey", "testPatchKey", "resultKey"]
       : ["bucket", "region", "sourceKey", "resultKey"];
   const directS3 = directKeys.every((key) => typeof bootstrap[key] === "string" && bootstrap[key]);
-  const stringValues = [
-    "planB64",
-    "resourceProfile",
-    ...(mode === "solver" ? ["provider", "modelId", "thinkingLevel"] : []),
-  ];
+  if (mode === "solver") {
+    if (typeof bootstrap.taskPrompt !== "string" || bootstrap.taskPrompt.length === 0)
+      throw new Error("Invalid Fargate bootstrap field: taskPrompt.");
+    taskPrompt = bootstrap.taskPrompt;
+    if (directS3) {
+      testPatchSource = {
+        kind: "s3",
+        bucket: String(bootstrap.bucket),
+        key: String(bootstrap.testPatchKey),
+      };
+    } else if (typeof bootstrap.testPatchUrl === "string" && bootstrap.testPatchUrl.length > 0) {
+      testPatchSource = { kind: "url", value: bootstrap.testPatchUrl };
+    } else {
+      throw new Error("Missing Fargate bootstrap testPatchUrl.");
+    }
+  }
+  const stringValues = ["planB64", "resourceProfile", ...(mode === "solver" ? ["modelId", "thinkingLevel"] : [])];
   const envNames: Record<string, string> = {
     planB64: "SHIPD_PLAN_B64",
-    provider: "SHIPD_PROVIDER",
-    modelId: "SHIPD_MODEL_ID",
-    thinkingLevel: "SHIPD_THINKING_LEVEL",
     resourceProfile: "SHIPD_RESOURCE_PROFILE",
+    modelId: "SHIPD_CLAUDE_MODEL",
+    thinkingLevel: "SHIPD_CLAUDE_EFFORT",
   };
   if (directS3) {
     const directFields = [
@@ -102,6 +119,7 @@ function loadBootstrap(): WorkerMode {
       ["region", "SHIPD_S3_REGION"],
       ["sourceKey", "SHIPD_S3_SOURCE_KEY"],
       ...(mode === "solver" ? [["authKey", "SHIPD_S3_AUTH_KEY"]] : []),
+      ...(mode === "solver" ? [["testPatchKey", "SHIPD_S3_TEST_PATCH_KEY"]] : []),
       ["resultKey", "SHIPD_S3_RESULT_KEY"],
     ] as const;
     for (const [key, envName] of directFields) {
@@ -127,9 +145,16 @@ function loadBootstrap(): WorkerMode {
     if (typeof value !== "string" || value.length === 0) throw new Error(`Invalid Fargate bootstrap field: ${key}.`);
     process.env[envNames[key] as string] = value;
   }
+  if (mode === "solver" && !["low", "medium", "high", "xhigh", "max"].includes(requiredEnv("SHIPD_CLAUDE_EFFORT")))
+    throw new Error("Invalid Claude CLI thinking level.");
   const numericFields = [
     ["timeoutMinutes", "SHIPD_TIMEOUT_MINUTES"],
-    ...(mode === "solver" ? [["solverCount", "SHIPD_SOLVER_COUNT"]] : []),
+    ...(mode === "solver"
+      ? [
+          ["agentTimeoutMinutes", "SHIPD_AGENT_TIMEOUT_MINUTES"],
+          ["solverCount", "SHIPD_SOLVER_COUNT"],
+        ]
+      : []),
   ] as const;
   for (const [key, envName] of numericFields) {
     const value = bootstrap[key];
@@ -177,6 +202,25 @@ async function downloadObject(bucket: string, key: string, destination: string):
   writeFileSync(destination, Buffer.from(body));
 }
 
+async function loadTestPatch(): Promise<string> {
+  const source = testPatchSource;
+  if (!source) throw new Error("The harness test patch is unavailable.");
+  testPatchContent ??= (async () => {
+    if (source.kind === "s3") {
+      const response = await workerS3().send(new GetObjectCommand({ Bucket: source.bucket, Key: source.key }));
+      const text = await response.Body?.transformToString();
+      if (!text) throw new Error("The harness test patch was empty.");
+      return text;
+    }
+    const response = await fetch(source.value);
+    if (!response.ok) throw new Error(`Downloading the harness test patch failed (${response.status}).`);
+    const text = await response.text();
+    if (!text) throw new Error("The harness test patch was empty.");
+    return text;
+  })();
+  return await testPatchContent;
+}
+
 async function upload(url: string, payload: WorkerPayload): Promise<void> {
   const body = JSON.stringify(payload);
   if (directS3Enabled()) {
@@ -206,19 +250,24 @@ async function runCommand(
   cwd: string,
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
-): Promise<{ code: number; stdout: string; stderr: string }> {
+  identity?: { uid: number; gid: number },
+  stdinInput?: string,
+): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> {
   return await new Promise((resolve, reject) => {
     const child = spawn("/bin/bash", ["-c", command], {
       cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
+      ...(identity ? { uid: identity.uid, gid: identity.gid } : {}),
     });
+    child.stdin?.end(stdinInput);
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (result: { code: number; stdout: string; stderr: string }) => {
+    const finish = (result: { code: number; stdout: string; stderr: string; timedOut: boolean }) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
@@ -238,8 +287,9 @@ async function runCommand(
         new Error(`${error instanceof Error ? error.message : String(error)} (cwd=${cwd} exists=${existsSync(cwd)})`),
       );
     });
-    child.once("close", (code) => finish({ code: code ?? 1, stdout, stderr }));
+    child.once("close", (code) => finish({ code: code ?? 1, stdout, stderr, timedOut }));
     timer = setTimeout(() => {
+      timedOut = true;
       if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGTERM");
       else child.kill("SIGTERM");
       setTimeout(() => {
@@ -257,8 +307,9 @@ async function requiredCommand(
   cwd: string,
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
+  stdinInput?: string,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const result = await runCommand(command, cwd, env, timeoutMs);
+  const result = await runCommand(command, cwd, env, timeoutMs, undefined, stdinInput);
   if (result.code !== 0) {
     throw new Error(
       [result.stderr.trim(), result.stdout.trim(), `Remote command: ${command}`].filter(Boolean).join("\n"),
@@ -829,7 +880,7 @@ function isTestScriptChmod(command: string): boolean {
   return /^chmod\s+\S+\s+(?:\S*\/)?test\.sh$/.test(normalized);
 }
 
-async function initializeSource(plan: DockerPlan, env: NodeJS.ProcessEnv): Promise<void> {
+async function initializeSource(plan: DockerPlan, env: NodeJS.ProcessEnv, installClaudeCli: boolean): Promise<void> {
   const archive = "/tmp/shipd-source.tar.gz";
   if (directS3Enabled()) {
     await downloadObject(requiredEnv("SHIPD_S3_BUCKET"), requiredEnv("SHIPD_S3_SOURCE_KEY"), archive);
@@ -858,6 +909,10 @@ async function initializeSource(plan: DockerPlan, env: NodeJS.ProcessEnv): Promi
     if (isTestScriptChmod(command)) continue;
     await requiredCommand(command, plan.workdir, env, 15 * 60 * 1000);
   }
+  if (installClaudeCli) {
+    await requiredCommand("npm install --global @anthropic-ai/claude-code", plan.workdir, env, 10 * 60 * 1000);
+    await requiredCommand("claude --version", plan.workdir, env, 30_000);
+  }
 }
 
 function quote(value: string): string {
@@ -873,198 +928,518 @@ async function prepareSolver(
   index: number,
   plan: DockerPlan,
   env: NodeJS.ProcessEnv,
-): Promise<{
-  solverDir: string;
-  testsAppliedCommit: string;
-  testPatchPaths: string[];
-}> {
+): Promise<{ solverDir: string; baselineCommit: string; identity: { uid: number; gid: number } }> {
   const solverDir = posixPath.join(SOLVERS_DIR, `solver_${index}`);
-  const patchPath = posixPath.join(solverDir, "test.patch");
   const commands = [
     `mkdir -p ${quote(solverDir)}`,
-    `tar --exclude=.git --exclude=solution.patch -cf - -C ${quote(plan.workdir)} . | tar --no-same-owner -xf - -C ${quote(solverDir)}`,
-    `rm -rf ${quote(posixPath.join(solverDir, ".git"))} ${quote(posixPath.join(solverDir, "solution.patch"))} ${quote(patchPath)}`,
+    `tar --exclude=.git --exclude=solution.patch --exclude=test.patch -cf - -C ${quote(plan.workdir)} . | tar --no-same-owner -xf - -C ${quote(solverDir)}`,
+    `rm -rf ${quote(posixPath.join(solverDir, ".git"))}`,
+    `rm -f ${quote(posixPath.join(solverDir, "solution.patch"))} ${quote(posixPath.join(solverDir, "test.patch"))}`,
     `git -C ${quote(solverDir)} init -q`,
-    `git -C ${quote(solverDir)} config user.email solvergap@shipd-checks.local`,
-    `git -C ${quote(solverDir)} config user.name shipd-checks-solver`,
+    `git config --global --add safe.directory ${quote(solverDir)}`,
+    `git -C ${quote(solverDir)} config user.email claude-solver@shipd-checks.local`,
+    `git -C ${quote(solverDir)} config user.name shipd-checks-claude-solver`,
+    `if [ -f ${quote(posixPath.join(solverDir, "test.sh"))} ]; then sed -i 's/\\r$//' ${quote(posixPath.join(solverDir, "test.sh"))}; fi`,
     `git -C ${quote(solverDir)} add -A`,
     `git -C ${quote(solverDir)} commit -q -m baseline --allow-empty`,
-    `cp ${quote(posixPath.join(plan.workdir, "test.patch"))} ${quote(patchPath)}`,
-    `git -C ${quote(solverDir)} apply --recount ${quote(patchPath)}`,
-    `chmod +x ${quote(posixPath.join(solverDir, "test.sh"))}`,
-    `rm -f ${quote(patchPath)}`,
-    `git -C ${quote(solverDir)} add -A`,
-    `git -C ${quote(solverDir)} commit -q -m tests-applied --allow-empty`,
   ];
   await requiredCommand(`set -eu\n${commands.join("\n")}`, "/work", env, 15 * 60 * 1000);
   const testScriptPath = join(solverDir, "test.sh");
   if (existsSync(testScriptPath)) dos2unix(testScriptPath);
+  const identity = findUnprivilegedIdentity(index);
+  await requiredCommand(
+    `chown -R ${identity.uid}:${identity.gid} ${quote(solverDir)} && chmod 700 ${quote(solverDir)}`,
+    "/work",
+    env,
+    60_000,
+  );
   const rev = await requiredCommand(`git -C ${quote(solverDir)} rev-parse HEAD`, "/work", env, 30_000);
-  const patch = readFileSync(join(plan.workdir, "test.patch"), "utf-8");
-  return { solverDir, testsAppliedCommit: rev.stdout.trim(), testPatchPaths: extractPatchPaths(patch) };
+  return { solverDir, baselineCommit: rev.stdout.trim(), identity };
 }
 
-function extractPatchPaths(patch: string): string[] {
-  const paths = new Set<string>();
-  const header = /^diff --git "?a\/(.+?)"? "?b\/(.+?)"?$/gm;
-  for (const match of patch.matchAll(header)) {
-    if (match[1]) paths.add(match[1]);
-    if (match[2]) paths.add(match[2]);
+function findUnprivilegedIdentity(index: number): { uid: number; gid: number } {
+  const users = readFileSync("/etc/passwd", "utf-8")
+    .split(/\r?\n/)
+    .map((line) => {
+      const [name, , uidText, gidText] = line.split(":");
+      return { name, uid: Number(uidText), gid: Number(gidText) };
+    })
+    .filter((user) => Number.isInteger(user.uid) && Number.isInteger(user.gid) && user.uid > 0);
+  const ordered = [
+    ...users.filter((user) => user.name === "nobody"),
+    ...users.filter((user) => user.name !== "nobody").sort((first, second) => first.uid - second.uid),
+  ];
+  const unique = [...new Map(ordered.map((user) => [user.uid, user])).values()];
+  const user = unique[index - 1];
+  if (!user) throw new Error(`Solver ${index} requires a distinct unprivileged account in the Fargate image.`);
+  return { uid: user.uid, gid: user.gid };
+}
+
+function claudeEnvironment(
+  name: string,
+  projectDir: string,
+  identity?: { uid: number; gid: number },
+): NodeJS.ProcessEnv {
+  const sourceCredential = join(CLAUDE_CONFIG_DIR, ".credentials.json");
+  const configDir = join("/tmp", `shipd-claude-${name}`);
+  const homeDir = join("/tmp", `shipd-home-${name}`);
+  rmSync(configDir, { recursive: true, force: true });
+  rmSync(homeDir, { recursive: true, force: true });
+  mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+  const credentialPath = join(configDir, ".credentials.json");
+  copyFileSync(sourceCredential, credentialPath);
+  chmodSync(credentialPath, 0o600);
+  writeFileSync(
+    join(homeDir, ".claude.json"),
+    JSON.stringify({
+      hasCompletedOnboarding: true,
+      hasTrustDialogAccepted: true,
+      projects: { [projectDir]: { hasTrustDialogAccepted: true } },
+    }),
+    { encoding: "utf-8", mode: 0o600 },
+  );
+  if (identity) {
+    const ownership = `${identity.uid}:${identity.gid}`;
+    for (const path of [configDir, homeDir]) {
+      const status = spawnSync("chown", ["-R", ownership, path], { stdio: "ignore" });
+      if (status.status !== 0) throw new Error(`Could not grant Claude access to its isolated ${path} config.`);
+    }
   }
-  return [...paths];
+  const agentEnv = restrictedWorkspaceEnv(process.env);
+  return {
+    ...agentEnv,
+    HOME: homeDir,
+    CLAUDE_CONFIG_DIR: configDir,
+    CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1",
+    CLAUDE_CODE_DISABLE_NON_ESSENTIAL_TRAFFIC: "1",
+  };
+}
+
+function restrictedWorkspaceEnv(sourceEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...sourceEnv };
+  for (const name of [
+    "SHIPD_BOOTSTRAP_URL",
+    "SHIPD_SOURCE_URL",
+    "SHIPD_AUTH_URL",
+    "SHIPD_TEST_PATCH_URL",
+    "SHIPD_RESULT_PUT_URL",
+    "SHIPD_RESULT_GET_URL",
+    "SHIPD_S3_BUCKET",
+    "SHIPD_S3_REGION",
+    "SHIPD_S3_SOURCE_KEY",
+    "SHIPD_S3_AUTH_KEY",
+    "SHIPD_S3_TEST_PATCH_KEY",
+    "SHIPD_S3_RESULT_KEY",
+    "SHIPD_PLAN_B64",
+    "SHIPD_CLAUDE_MODEL",
+    "SHIPD_CLAUDE_EFFORT",
+    "SHIPD_AGENT_TIMEOUT_MINUTES",
+    "SHIPD_SOLVER_COUNT",
+    "SHIPD_RESOURCE_PROFILE",
+    "SHIPD_MODE",
+    "SHIPD_TIMEOUT_MINUTES",
+    "CLAUDE_CONFIG_DIR",
+    "BASH_ENV",
+    "ENV",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "ECS_CONTAINER_METADATA_URI",
+    "ECS_CONTAINER_METADATA_URI_V4",
+  ]) {
+    delete env[name];
+  }
+  return env;
+}
+
+function jsonRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function numericValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function sumUsageField(records: Record<string, unknown>[], field: string): number | undefined {
+  const values = records
+    .map((record) => numericValue(record[field]))
+    .filter((value): value is number => value !== undefined);
+  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : undefined;
+}
+
+function extractClaudeTokenUsage(result: Record<string, unknown>): TokenUsage | undefined {
+  const usage = jsonRecord(result.usage);
+  if (!usage) return undefined;
+  const modelUsage = jsonRecord(result.modelUsage);
+  const models = modelUsage
+    ? Object.values(modelUsage)
+        .map(jsonRecord)
+        .filter((value): value is Record<string, unknown> => Boolean(value))
+    : [];
+  const inputTokens = numericValue(usage.input_tokens) ?? sumUsageField(models, "inputTokens");
+  const cacheReadInputTokens =
+    numericValue(usage.cache_read_input_tokens) ?? sumUsageField(models, "cacheReadInputTokens");
+  const cacheCreationInputTokens =
+    numericValue(usage.cache_creation_input_tokens) ?? sumUsageField(models, "cacheCreationInputTokens");
+  const outputTokens = numericValue(usage.output_tokens) ?? sumUsageField(models, "outputTokens");
+  const outputTokenDetails = jsonRecord(usage.output_tokens_details);
+  const iterations = Array.isArray(usage.iterations)
+    ? usage.iterations.map(jsonRecord).filter((value): value is Record<string, unknown> => Boolean(value))
+    : [];
+  const thinkingTokens =
+    numericValue(outputTokenDetails?.thinking_tokens) ??
+    numericValue(outputTokenDetails?.thinkingTokens) ??
+    numericValue(usage.thinking_tokens) ??
+    numericValue(usage.thinkingTokens) ??
+    sumUsageField(iterations, "thinking_tokens") ??
+    sumUsageField(iterations, "thinkingTokens") ??
+    sumUsageField(models, "thinkingTokens") ??
+    sumUsageField(models, "thinking_tokens") ??
+    numericValue(result.thinking_tokens) ??
+    numericValue(result.thinkingTokens);
+  const hasUsage = [inputTokens, cacheReadInputTokens, cacheCreationInputTokens, outputTokens, thinkingTokens].some(
+    (value) => value !== undefined,
+  );
+  if (!hasUsage) return undefined;
+
+  const input = inputTokens ?? 0;
+  const cacheRead = cacheReadInputTokens ?? 0;
+  const cacheCreation = cacheCreationInputTokens ?? 0;
+  const output = outputTokens ?? 0;
+  const totalInputTokens = input + cacheRead + cacheCreation;
+  const rawTotalTokens = totalInputTokens + output;
+  const deductibleThinkingTokens =
+    outputTokens !== undefined && thinkingTokens !== undefined ? Math.min(thinkingTokens, output) : 0;
+  const totalTokens = rawTotalTokens - deductibleThinkingTokens;
+  const iterationContextSizes = iterations.map(
+    (iteration) =>
+      (numericValue(iteration.input_tokens) ?? 0) +
+      (numericValue(iteration.cache_read_input_tokens) ?? 0) +
+      (numericValue(iteration.cache_creation_input_tokens) ?? 0),
+  );
+  const finalContextTokens = iterationContextSizes.at(-1);
+  const contextWindowValues = models
+    .map((model) => numericValue(model.contextWindow))
+    .filter((value): value is number => value !== undefined);
+  const contextWindow = contextWindowValues.length > 0 ? Math.max(...contextWindowValues) : undefined;
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
+    ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(thinkingTokens !== undefined ? { thinkingTokens } : {}),
+    totalInputTokens,
+    totalTokens,
+    ...(thinkingTokens !== undefined && outputTokens !== undefined ? { rawTotalTokens } : {}),
+    ...(finalContextTokens !== undefined ? { finalContextTokens } : {}),
+    ...(iterationContextSizes.length > 0 ? { peakContextTokens: Math.max(...iterationContextSizes) } : {}),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+    ...(finalContextTokens !== undefined && contextWindow !== undefined
+      ? { contextWindowUtilizationPercent: Number(((finalContextTokens / contextWindow) * 100).toFixed(2)) }
+      : {}),
+    ...(iterations.length > 0 ? { modelCalls: iterations.length } : {}),
+    ...(numericValue(result.total_cost_usd) !== undefined ? { costUsd: numericValue(result.total_cost_usd) } : {}),
+  };
+}
+
+function parseClaudeStreamRecords(stdout: string): Record<string, unknown>[] {
+  return stdout
+    .split(/\r?\n/)
+    .map((line) => {
+      try {
+        return jsonRecord(JSON.parse(line));
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((record): record is Record<string, unknown> => record !== undefined);
+}
+
+function streamAssistantText(records: Record<string, unknown>[]): string | undefined {
+  const text = records.flatMap((record) => {
+    if (record.type !== "assistant") return [];
+    const message = jsonRecord(record.message);
+    if (!Array.isArray(message?.content)) return [];
+    return message.content
+      .map(jsonRecord)
+      .filter((content): content is Record<string, unknown> => content?.type === "text")
+      .map((content) => (typeof content.text === "string" ? content.text : ""));
+  });
+  const joined = text.join("").trim();
+  return joined || undefined;
+}
+
+function sanitizeClaudeStepTrace(stdout: string): string {
+  return stdout
+    .split(/\r?\n/)
+    .map((line) => {
+      try {
+        const record = jsonRecord(JSON.parse(line));
+        if (record?.type !== "assistant") return line;
+        const message = jsonRecord(record.message);
+        if (!Array.isArray(message?.content)) return line;
+        const content = message.content.filter((block) => {
+          const type = jsonRecord(block)?.type;
+          return type !== "thinking" && type !== "redacted_thinking";
+        });
+        return content.length === message.content.length
+          ? line
+          : JSON.stringify({ ...record, message: { ...message, content } });
+      } catch {
+        return line;
+      }
+    })
+    .join("\n");
+}
+
+function parseClaudeOutput(stdout: string, stderr: string): { text: string; tokenUsage?: TokenUsage } {
+  let parsed: Record<string, unknown> | undefined;
+  const trimmed = stdout.trim();
+  try {
+    parsed = jsonRecord(JSON.parse(trimmed));
+  } catch {
+    const records = parseClaudeStreamRecords(stdout);
+    parsed =
+      records
+        .slice()
+        .reverse()
+        .find((record) => record.type === "result") ?? records.at(-1);
+    if (!parsed) {
+      const start = trimmed.indexOf("{");
+      const end = trimmed.lastIndexOf("}");
+      if (start >= 0 && end > start) {
+        try {
+          parsed = jsonRecord(JSON.parse(trimmed.slice(start, end + 1)));
+        } catch {
+          parsed = undefined;
+        }
+      }
+    }
+    if (!parsed) return { text: `${stdout}\n${stderr}`.trim() };
+    const outputText = typeof parsed.result === "string" ? parsed.result : (streamAssistantText(records) ?? trimmed);
+    const text = [outputText, stderr.trim()].filter(Boolean).join("\n");
+    return { text, tokenUsage: extractClaudeTokenUsage(parsed) };
+  }
+  if (!parsed) return { text: `${stdout}\n${stderr}`.trim() };
+  const outputText = typeof parsed.result === "string" ? parsed.result : stdout.trim();
+  const text = [outputText, stderr.trim()].filter(Boolean).join("\n");
+  return { text, tokenUsage: extractClaudeTokenUsage(parsed) };
+}
+
+function claudeInvocation(tools: string, model: string, thinkingLevel: string): string {
+  return [
+    "claude",
+    "--print",
+    "--model",
+    model,
+    "--effort",
+    thinkingLevel,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    "bypassPermissions",
+    "--no-session-persistence",
+    "--tools",
+    tools,
+  ]
+    .map(quote)
+    .join(" ");
+}
+
+async function runTestSuite(
+  solverDir: string,
+  suite: "base" | "new",
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+  identity?: { uid: number; gid: number },
+): Promise<SolverTestResult> {
+  const started = Date.now();
+  let testHome = "";
+  try {
+    testHome = mkdtempSync(join("/tmp", `shipd-test-home-${identity?.uid ?? "root"}-${suite}-`));
+    chmodSync(testHome, 0o700);
+    if (identity) chownSync(testHome, identity.uid, identity.gid);
+    const testCache = join(testHome, ".cache");
+    mkdirSync(testCache, { recursive: true, mode: 0o700 });
+    if (identity) chownSync(testCache, identity.uid, identity.gid);
+    const testEnv: NodeJS.ProcessEnv = { ...env, HOME: testHome, TMPDIR: "/tmp", XDG_CACHE_HOME: testCache };
+    delete testEnv.BASH_ENV;
+    delete testEnv.ENV;
+    const outputPath = join(solverDir, `.shipd-test-${suite}.xml`);
+    const result = await runCommand(
+      `bash test.sh --output_path ${quote(outputPath)} ${suite}`,
+      solverDir,
+      testEnv,
+      timeoutMs,
+      identity,
+    );
+    const output = `${result.stdout}\n${result.stderr}`.trim();
+    return {
+      exitCode: result.code,
+      passed: result.code === 0 && !result.timedOut,
+      durationMs: Date.now() - started,
+      output: result.timedOut ? `Test command timed out.\n${output}` : output,
+      timedOut: result.timedOut,
+    };
+  } catch (error) {
+    const output = error instanceof Error ? error.message : String(error);
+    return { exitCode: 1, passed: false, durationMs: Date.now() - started, output };
+  } finally {
+    if (testHome) rmSync(testHome, { recursive: true, force: true });
+  }
+}
+
+function isTestPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, "/").toLowerCase();
+  const parts = normalized.split("/");
+  const basename = parts.at(-1) ?? "";
+  return (
+    basename === "test.sh" ||
+    basename === "conftest.py" ||
+    parts.some((part) => ["test", "tests", "spec", "specs", "__tests__", "testing"].includes(part)) ||
+    /(^|[._-])test([._-]|$)/.test(basename) ||
+    /(^|[._-])spec([._-]|$)/.test(basename)
+  );
+}
+
+async function applyTestPatch(workdir: string, env: NodeJS.ProcessEnv): Promise<void> {
+  const patch = await loadTestPatch();
+  await requiredCommand("git apply --whitespace=nowarn -", workdir, env, 60_000, patch);
+  const testScriptPath = join(workdir, "test.sh");
+  if (existsSync(testScriptPath)) dos2unix(testScriptPath);
+}
+
+async function restoreChangedTests(solverDir: string, baselineCommit: string, env: NodeJS.ProcessEnv): Promise<void> {
+  const changed = await requiredCommand(
+    `git diff --cached --name-only -z ${quote(baselineCommit)}`,
+    solverDir,
+    env,
+    30_000,
+  );
+  for (const path of changed.stdout.split("\0").filter(isTestPath)) {
+    const existsInBaseline = await runCommand(
+      `git cat-file -e ${quote(`${baselineCommit}:${path}`)}`,
+      solverDir,
+      env,
+      30_000,
+    );
+    if (existsInBaseline.code === 0) {
+      await requiredCommand(
+        `git restore --source ${quote(baselineCommit)} --staged --worktree -- ${quote(path)}`,
+        solverDir,
+        env,
+        30_000,
+      );
+    } else {
+      await runCommand(`git rm -f --cached --ignore-unmatch -- ${quote(path)}`, solverDir, env, 30_000);
+      rmSync(join(solverDir, path), { recursive: true, force: true });
+    }
+  }
 }
 
 async function runSolver(
   index: number,
   workspace: Awaited<ReturnType<typeof prepareSolver>>,
   env: NodeJS.ProcessEnv,
+  taskPromptText: string,
 ): Promise<WorkerSolverResult> {
   const started = Date.now();
-  const provider = requiredEnv("SHIPD_PROVIDER");
-  const modelId = requiredEnv("SHIPD_MODEL_ID");
-  const thinkingLevel = requiredEnv("SHIPD_THINKING_LEVEL") as ThinkingLevel;
-  const timeoutMinutes = Number.parseInt(requiredEnv("SHIPD_TIMEOUT_MINUTES"), 10);
-
-  let outcome: "done" | "timedOut" | "cancelled" | "error" = "error";
-  let trajectory: unknown[] = [];
+  const timeoutMinutes = Number.parseInt(requiredEnv("SHIPD_AGENT_TIMEOUT_MINUTES"), 10);
+  const model = requiredEnv("SHIPD_CLAUDE_MODEL");
+  const thinkingLevel = requiredEnv("SHIPD_CLAUDE_EFFORT");
+  const solverEnv = claudeEnvironment(`solver-${index}`, workspace.solverDir, workspace.identity);
+  let agentOutput = "";
+  let agentStepsGzipBase64: string | undefined;
+  let tokenUsage: TokenUsage | undefined;
+  let status: SolverRunResult["status"] = "error";
+  let error: string | undefined;
   try {
-    const sessionManager = SessionManager.inMemory();
-    let session: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
-    try {
-      const services = await createAgentSessionServices({
-        cwd: workspace.solverDir,
-        agentDir: AGENT_DIR,
-        resourceLoaderOptions:
-          provider === COMMAND_CODE_PROVIDER
-            ? {
-                extensionFactories: [
-                  {
-                    name: "pi-commandcode-provider",
-                    factory: commandCodeProvider,
-                    hidden: true,
-                  },
-                ],
-              }
-            : undefined,
-      });
-      const model = services.modelRuntime.getModel(provider, modelId);
-      if (!model) {
-        const extensionErrors = services.resourceLoader
-          .getExtensions()
-          .errors.map(({ path, error }) => `${path}: ${error}`)
-          .join(" | ");
-        const diagnostics = services.diagnostics.map(({ type, message }) => `${type}: ${message}`).join(" | ");
-        const registeredProviders = services.modelRuntime.getRegisteredProviderIds().join(", ") || "none";
-        throw new Error(
-          `Could not resolve model ${provider}/${modelId} (registered providers: ${registeredProviders}; ` +
-            `diagnostics: ${diagnostics || "none"}; extension errors: ${extensionErrors || "none"}).`,
-        );
-      }
-      ({ session } = await createAgentSessionFromServices({
-        services,
-        sessionManager,
-        model,
-        thinkingLevel: thinkingLevel === "off" ? undefined : (thinkingLevel as never),
-        tools: ["read", "grep", "find", "ls", "write", "edit", "bash"],
-      }));
-      const prompt = session.prompt(buildSolverPrompt());
-      void prompt.catch(() => undefined);
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("__SHIPD_SOLVER_TIMEOUT__")), timeoutMinutes * 60 * 1000);
-      });
-      try {
-        await Promise.race([prompt, timeout]);
-        outcome = "done";
-      } catch (error) {
-        if (error instanceof Error && error.message === "__SHIPD_SOLVER_TIMEOUT__") {
-          outcome = "timedOut";
-          await session.abort().catch(() => undefined);
-        } else {
-          throw error;
-        }
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-    } finally {
-      trajectory = sessionManager.getEntries();
-      if (session) {
-        try {
-          session.dispose();
-        } catch {
-          // Preserve the solver result.
-        }
-      }
-    }
-  } catch (error) {
-    return {
-      index,
-      status: "error",
-      passed: false,
-      diff: "",
-      testOutputTail: error instanceof Error ? error.message : String(error),
-      error: error instanceof Error ? error.message : String(error),
-      durationMs: Date.now() - started,
-      totalTests: null,
-      failedTests: null,
-      trajectory,
-    };
+    const agent = await runCommand(
+      claudeInvocation("Bash", model, thinkingLevel),
+      workspace.solverDir,
+      solverEnv,
+      timeoutMinutes * 60 * 1000,
+      workspace.identity,
+      taskPromptText,
+    );
+    if (agent.stdout) agentStepsGzipBase64 = gzipSync(sanitizeClaudeStepTrace(agent.stdout)).toString("base64");
+    const parsedAgent = parseClaudeOutput(agent.stdout, agent.stderr);
+    agentOutput = parsedAgent.text;
+    tokenUsage = parsedAgent.tokenUsage;
+    status = agent.timedOut ? "timedOut" : agent.code === 0 ? "ok" : "error";
+    if (agent.code !== 0)
+      error = agent.timedOut ? "Claude CLI solver timed out." : `Claude CLI exited with code ${agent.code}.`;
+  } catch (caught) {
+    error = caught instanceof Error ? caught.message : String(caught);
+    agentOutput = error;
+  } finally {
+    rmSync(join("/tmp", `shipd-claude-solver-${index}`), { recursive: true, force: true });
+    rmSync(join("/tmp", `shipd-home-solver-${index}`), { recursive: true, force: true });
   }
 
-  const exclude = [...workspace.testPatchPaths, "agent_prompt.md"].map((path) => `:(exclude)${path}`);
-  const diff = await runCommand(
-    `git add -A && git diff --cached ${quote(workspace.testsAppliedCommit)} -- . ${exclude.map(quote).join(" ")}`,
+  const diffResult = await runCommand(
+    `git add -A && git diff --cached ${quote(workspace.baselineCommit)} -- . ${quote(":(exclude)agent_prompt.md")}`,
     workspace.solverDir,
     env,
     30_000,
   );
-  const outputPath = join(workspace.solverDir, "test_output.xml");
-  const test = await runCommand(
-    `bash test.sh --output_path ${quote(outputPath)} new`,
-    workspace.solverDir,
-    env,
-    (timeoutMinutes + 5) * 60 * 1000,
-  );
-  const testOutput = `${test.stdout}\n${test.stderr}`.trim();
-  writeFileSync(join(workspace.solverDir, "test_output.txt"), testOutput, "utf-8");
-  writeFileSync(join(workspace.solverDir, "trajectory.json"), `${JSON.stringify(trajectory, null, 2)}\n`, "utf-8");
-  const counts = readTestCounts(outputPath);
-  const status: SolverRunResult["status"] = outcome === "done" ? "ok" : outcome;
+  const diff = diffResult.code === 0 ? diffResult.stdout : "";
+  if (diffResult.code !== 0)
+    error = error ?? `Could not capture solver diff: ${diffResult.stderr || diffResult.stdout}`;
+  await restoreChangedTests(workspace.solverDir, workspace.baselineCommit, env);
+  const testTimeoutMs = timeoutMinutes * 60 * 1000;
+  const testEnv = restrictedWorkspaceEnv(env);
+  let baseTests: SolverTestResult;
+  let newTests: SolverTestResult;
+  try {
+    await applyTestPatch(workspace.solverDir, env);
+    baseTests = await runTestSuite(workspace.solverDir, "base", testEnv, testTimeoutMs, workspace.identity);
+    newTests = await runTestSuite(workspace.solverDir, "new", testEnv, testTimeoutMs, workspace.identity);
+  } catch (caught) {
+    const output = `Could not apply or execute the harness tests: ${caught instanceof Error ? caught.message : String(caught)}`;
+    error = error ?? output;
+    baseTests = { exitCode: 1, passed: false, durationMs: 0, output };
+    newTests = { exitCode: 1, passed: false, durationMs: 0, output };
+  }
+  const testOutput = `=== base (exit ${baseTests.exitCode}) ===\n${baseTests.output}\n\n=== new (exit ${newTests.exitCode}) ===\n${newTests.output}`;
+  writeFileSync(join(workspace.solverDir, "agent_output.txt"), agentOutput, "utf-8");
+  writeFileSync(join(workspace.solverDir, "base_test_output.txt"), baseTests.output, "utf-8");
+  writeFileSync(join(workspace.solverDir, "new_test_output.txt"), newTests.output, "utf-8");
+  writeFileSync(join(workspace.solverDir, "solution.diff"), diff, "utf-8");
+
   return {
     index,
     status,
-    passed: status === "ok" && test.code === 0,
-    diff: diff.code === 0 ? diff.stdout : "",
+    passed: status === "ok" && baseTests.passed && newTests.passed,
+    diff,
     testOutputTail: tail(testOutput),
+    agentOutput,
+    ...(agentStepsGzipBase64 ? { agentStepsGzipBase64 } : {}),
+    tokenUsage,
+    baseTests,
+    newTests,
     durationMs: Date.now() - started,
-    totalTests: counts.totalTests,
-    failedTests: counts.failedTests,
-    trajectory,
+    totalTests: null,
+    failedTests: null,
+    error,
   };
-}
-
-function readTestCounts(path: string): { totalTests: number | null; failedTests: number | null } {
-  try {
-    const tag = readFileSync(path, "utf-8").match(/<testsuites\b[^>]*>/i)?.[0];
-    if (!tag) return { totalTests: null, failedTests: null };
-    const get = (name: string) => Number.parseInt(tag.match(new RegExp(`\\b${name}="(\\d+)"`, "i"))?.[1] ?? "", 10);
-    const totalTests = get("tests");
-    const failures = get("failures");
-    const errors = get("errors");
-    return {
-      totalTests: Number.isFinite(totalTests) ? totalTests : null,
-      failedTests: Number.isFinite(failures) ? failures + (Number.isFinite(errors) ? errors : 0) : null,
-    };
-  } catch {
-    return { totalTests: null, failedTests: null };
-  }
 }
 
 async function run(): Promise<void> {
   const mode = loadBootstrap();
-  // pi-commandcode-provider uses pi's agent-dir override for its model cache;
-  // keep that cache beside the auth/settings files downloaded for this task.
-  if (mode === "solver") process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
   const resultUrl = process.env.SHIPD_RESULT_PUT_URL ?? "";
   const resultGetUrl = process.env.SHIPD_RESULT_GET_URL ?? "";
   const resourceProfile = requiredEnv("SHIPD_RESOURCE_PROFILE") as FargateResourceProfile;
@@ -1073,28 +1448,21 @@ async function run(): Promise<void> {
   const existing = await readExistingResult(resultGetUrl);
   const completed = new Map((existing?.results ?? []).map((result) => [result.index, result]));
   const plan = planFromEnv();
+  if (mode === "solver") process.env.CLAUDE_CONFIG_DIR = CLAUDE_CONFIG_DIR;
   const env = resolvedEnvironment(plan);
   if (mode === "solver") {
-    mkdirSync(AGENT_DIR, { recursive: true });
+    mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 });
+    const credentialPath = join(CLAUDE_CONFIG_DIR, ".credentials.json");
     if (directS3Enabled()) {
-      await downloadObject(
-        requiredEnv("SHIPD_S3_BUCKET"),
-        requiredEnv("SHIPD_S3_AUTH_KEY"),
-        join(AGENT_DIR, "auth.json"),
-      );
+      await downloadObject(requiredEnv("SHIPD_S3_BUCKET"), requiredEnv("SHIPD_S3_AUTH_KEY"), credentialPath);
     } else {
-      await download(requiredEnv("SHIPD_AUTH_URL"), join(AGENT_DIR, "auth.json"));
+      await download(requiredEnv("SHIPD_AUTH_URL"), credentialPath);
     }
-    // The host settings may point at a Windows shell. Force the Linux shell
-    // used by the Fargate task without changing the user's local settings.
-    writeFileSync(join(AGENT_DIR, "settings.json"), JSON.stringify({ shellPath: "/bin/bash" }), "utf-8");
+    chmodSync(credentialPath, 0o600);
+    env.CLAUDE_CONFIG_DIR = CLAUDE_CONFIG_DIR;
   }
   mkdirSync("/work", { recursive: true });
-  await initializeSource(plan, env);
-  const sourcePatchPath = join(plan.workdir, "test.patch");
-  const solutionPatchPath = join(plan.workdir, "solution.patch");
-  if (existsSync(sourcePatchPath)) dos2unix(sourcePatchPath);
-  if (existsSync(solutionPatchPath)) dos2unix(solutionPatchPath);
+  await initializeSource(plan, env, mode === "solver");
 
   if (mode === "patch-precheck") {
     const timeoutMinutes = Number.parseInt(requiredEnv("SHIPD_TIMEOUT_MINUTES"), 10);
@@ -1109,8 +1477,6 @@ async function run(): Promise<void> {
   const pendingIndexes = Array.from({ length: solverCount }, (_, index) => index + 1).filter(
     (index) => !completed.has(index),
   );
-  // Prepare the git worktrees serially. Git writes config and object files while
-  // initializing each repository; the solver sessions themselves remain concurrent.
   const workspaces: Array<Awaited<ReturnType<typeof prepareSolver>>> = [];
   for (const index of pendingIndexes) workspaces.push(await prepareSolver(index, plan, env));
   let uploadChain = Promise.resolve();
@@ -1130,7 +1496,7 @@ async function run(): Promise<void> {
     workspaces.map(async (workspace, index) => {
       const solverIndex = pendingIndexes[index];
       if (solverIndex === undefined) throw new Error("Fargate solver workspace index mismatch.");
-      const result = await runSolver(solverIndex, workspace, env);
+      const result = await runSolver(solverIndex, workspace, env, taskPrompt);
       await record(result);
     }),
   );

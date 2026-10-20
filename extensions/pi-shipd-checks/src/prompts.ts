@@ -1,12 +1,6 @@
 /** All prompt text sent to the gap-finder, solution-precheck, reviewer, and solver agents. */
 
-import { SOLVER_GAP_SOLUTIONS_DIRNAME } from "./solvergap.js";
-import {
-  GAP_FINDER_REPORT_TOOL_NAME,
-  REPORT_TOOL_NAME,
-  SOLUTION_AUDIT_TOOL_NAME,
-  SOLVER_GAP_TOOL_NAME,
-} from "./tools.js";
+import { GAP_FINDER_REPORT_TOOL_NAME, REPORT_TOOL_NAME, SOLUTION_AUDIT_TOOL_NAME } from "./tools.js";
 import type { ReviewerRole, ReviewerRoleKey, SolverRunResult } from "./types.js";
 
 const ROLE_FOCUS: Record<ReviewerRoleKey, string> = {
@@ -295,123 +289,60 @@ export function buildSolutionAuditPrompt(
   return parts.join("\n");
 }
 
-// ── Solver gap finder: TDD solver + comparison reviewer ────────────
+// ── Claude CLI benchmark solvers and local Pi fairness reviewer ─────
 
-export function buildSolverPrompt(): string {
-  return [
-    "You are a adversarial tester. Your goal is to find the most minimal, shortcut implementation that makes all " +
-      "new tests pass — not a full, correct solution. This is intentional: we want to discover whether the test " +
-      "suite lets through an implementation that barely satisfies the assertions without properly implementing the " +
-      "prompt's required behavior.",
-    "`agent_prompt.md` in the repo root describes the intended task. Tests for it already exist and are currently " +
-      "failing.",
-    "",
-    "Goal: make ALL of the new tests pass with the least amount of real logic possible.",
-    "1. Run `bash test.sh new` to see the failures and what the tests expect. Read the failing tests carefully — " +
-      "they are the only spec you need to satisfy.",
-    "2. Understand exactly what each test assertion checks. Ask, 'what is the minimum thing I can do — a stub, a " +
-      "hardcoded return, a mockish pass-through, a trivial branch — to satisfy this test?', not 'what does " +
-      "agent_prompt.md intend?'. Skim `agent_prompt.md` only enough to understand what the test file names and " +
-      "assertions refer to, then rely on the test errors to drive what to implement.",
-    "3. Prefer the most minimal implementation possible:",
-    "   - Hardcode a return value if the test expects one.",
-    "   - Add only the code paths a test actually exercises; leave anything untested unimplemented.",
-    "   - Mock the minimum number of dependencies (or none) that the test error forces you to touch.",
-    "   - Use the most direct, trivial, shortcut approach — do not build abstractions, do not handle unobserved edge " +
-      "cases, do not add defensive code.",
-    "4. Before declaring success, also run `bash test.sh base` to confirm your changes cause no regressions. The " +
-      "shortcut must not break existing tests — that would be a false positive from a different angle.",
-    "5. Re-run `bash test.sh new` and iterate until both the new tests and the base tests pass, or you're confident you " +
-      "cannot pass more without adding real logic.",
-    "",
-    "Rules:",
-    "- Do NOT modify the test files or `test.sh`. Only change application/library code.",
-    "- You have shell access — install any dependencies you need.",
-    "- The prompt is not your spec: the tests are. Implement exactly what the tests demand, nothing more. If you " +
-      "can satisfy a test with a hardcoded return, do it.",
-  ].join("\n");
-}
-
-function formatSolverStatusLine(result: SolverRunResult): string {
-  const statusLine =
-    result.status === "ok"
-      ? result.passed
-        ? "PASSED all new tests"
-        : "did NOT pass all new tests"
-      : `did not complete normally (status: ${result.status})`;
+function solverOutcomeLine(result: SolverRunResult): string {
+  const tests = (value: boolean | undefined) => (value === undefined ? "not run" : value ? "PASS" : "FAIL");
   return (
-    `- Solver ${result.index} — ${statusLine} — solution.diff / test_output.txt in ` +
-    `\`${SOLVER_GAP_SOLUTIONS_DIRNAME}/solver_${result.index}/\``
+    `- Agent ${result.index}: process=${result.status}; base=${tests(result.baseTests?.passed)}; ` +
+    `new=${tests(result.newTests?.passed)}; diff=${result.diff ? "present" : "empty"}`
   );
 }
 
-export function buildSolverComparisonPrompt(
+export function buildSolverReviewPrompt(
+  taskPrompt: string,
   solverResults: SolverRunResult[],
-  testRubric: string,
-  gapRules: string,
+  testGuidelines: string,
   fairnessRules: string,
 ): string {
-  const parts = [
-    "You are a strict, skeptical behavioral-gap auditor for a coding-agent benchmark task.",
-    "You are working inside a throwaway, read-only copy of a git repository (this is your current directory). " +
-      "You have access to read/grep/find/ls tools only — you cannot execute code, apply patches, or edit files.",
-    "The repo root contains `agent_prompt.md` (the real task description), `solution.patch` (a unified diff of " +
-      "the real golden/reference solution), and `test.patch` (a unified diff adding the hidden tests).",
+  return [
+    "You are an independent, skeptical reviewer for a coding-agent task benchmark.",
+    "This is a read-only review. The source tree at the current working directory is clean HEAD and no patch has been " +
+      "applied to it. `review_assets/` contains the exact agent_prompt.md, test.patch, an optional reference_solution.patch, " +
+      "standalone copies of new files extracted from test.patch under `proposed_tests/`, and `solver_<index>/` folders " +
+      "with each solver's unapplied `solver_solution.patch`, one-shot output, base/new logs, and result metadata. " +
+      "Inspect the patches as patches; do not apply them. For changed existing tests, compare the test.patch hunk with " +
+      "the clean-HEAD file. The task Dockerfile is not included.",
     "",
-    "Separately, several coding agents ('solvers') were each given the same `agent_prompt.md` plus the failing " +
-      "tests from `test.patch` — but never `solution.patch` — and asked to implement the task TDD-style, iterating " +
-      "with real shell access until the tests passed or they gave up. Each solver's diff and full `test.sh new` " +
-      "output — captured and verified independently by the harness, not self-reported — is saved under " +
-      `\`${SOLVER_GAP_SOLUTIONS_DIRNAME}/solver_<index>/\` (\`solution.diff\`, \`test_output.txt\`), with a ` +
-      `\`${SOLVER_GAP_SOLUTIONS_DIRNAME}/manifest.json\` summary. Use read/grep/find/ls to open exactly what you ` +
-      "need. Status summary:",
+    "Exact task prompt sent as the solver's only first user message:",
+    "--- BEGIN TASK PROMPT ---",
+    taskPrompt,
+    "--- END TASK PROMPT ---",
     "",
-    ...solverResults.map(formatSolverStatusLine),
+    "Agents saw clean HEAD (including any files already committed there) and that exact prompt; no test patch or external task Dockerfile was overlaid. The harness ran " +
+      "`bash test.sh --output_path <file> base` and `bash test.sh --output_path <file> new` after each solver finished. " +
+      "These are harness-captured results, not agent self-reports. Status summary:",
+    ...solverResults.map(solverOutcomeLine),
     "",
-    "Your job: compare the reference `solution.patch` with each solver's `solution.diff` to find concrete " +
-      "BEHAVIORAL GAPS. Keep only a difference where: (a) `agent_prompt.md` explicitly requires the behavior, " +
-      "(b) the solver passed the relevant tests (even if it failed elsewhere), (c) the reference and solver produce observably different behavior for a real " +
-      "edge case or scenario, and (d) a fair public-facing test could distinguish them. The reference solution is " +
-      "evidence for scenarios to inspect, never a specification by itself.",
+    "Review the tests for fairness against the exact requirements in `review_assets/agent_prompt.md`, and review all " +
+      "solver patches and results. Do not read entire test logs directly: use search/grep to locate failures, errors, " +
+      "assertions, and summaries, then read only the relevant ranges to conserve context. For each failed or incomplete " +
+      "agent, decide whether the evidence points to: (1) an incorrect or incomplete solution relative to the prompt, " +
+      "(2) an unfair, defective, or prompt-misaligned test, (3) an execution/setup failure unrelated to task quality, " +
+      "or (4) insufficient evidence. A failed test alone does not prove that the test is unfair; cite the relevant " +
+      "prompt text, test behavior, diff, and output.",
+    "The optional reference_solution.patch is context only, not a specification; do not infer requirements from it " +
+      "that the prompt does not state. Consider whether the tests' setup, assumptions, fixtures, expected values, and " +
+      "base/new separation are discoverable and reasonable for an agent working from clean HEAD and the exact prompt.",
     "",
-    "How to work:",
-    "1. Read `agent_prompt.md` sentence by sentence and note every distinct requirement, constraint, and " +
-      "prohibition.",
-    "2. Read `solution.patch` to see how the reference solution satisfies those requirements.",
-    "3. For each solver, read its `solution.diff` and compare it against the reference behavior. " +
-      "Look specifically for a solver shortcut, missed constraint, edge case, or side effect that the PROMPT " +
-      "requires, where the solver still passes because the tests do not observe the behavioral difference.",
-    "4. A solver that did not pass the full suite may still provide evidence for a completed, relevant part of its " +
-      "diff, but only when its test output shows the failure is unrelated to that behavior (or shows the relevant " +
-      "tests already passed). Do not treat its failing behavior as a gap, and do not infer gaps from a hypothetical " +
-      "wrong implementation.",
-    "5. Treat multiple solvers converging on the same divergent-but-passing shortcut as stronger evidence of a " +
-      "real gap, not proof it's acceptable — the tests are what's under scrutiny, not majority solver behavior.",
+    "Use this test-quality checklist as guidance:",
+    testGuidelines,
     "",
-    "The `# Gaps in tests` section of `rules.md` is authoritative for candidate gaps:",
-    gapRules,
-    "- Every gap must be evidenced by an actual, cited solver diff and a contrasting reference behavior. For a " +
-      "solver that failed the full suite, also cite its test output showing that the relevant behavior already passed " +
-      "or is unrelated to the failure. Cite the prompt sentence that makes the behavioral difference required; do " +
-      "not report a gap that is purely theoretical or based only on the reference implementation.",
-    "- It is fine, and expected, to submit an empty list if the solvers that passed all converged on behavior " +
-      "equivalent to the reference solution with no material gaps.",
-    "- Do not self-censor for volume, but do not pad the list either — only include what you can concretely " +
-      "justify with cited evidence.",
-    "",
-    "For reference, here is the checklist for the tests focus area (use it to calibrate what good coverage looks " +
-      "like, not as a list of gaps to report verbatim):",
-    testRubric,
-    "",
-    "Apply the `# Fairness vs. unfairness` rules from `rules.md` before retaining any candidate:",
+    "Apply these fairness rules:",
     fairnessRules,
-  ];
-
-  parts.push(
     "",
-    `When you are done, call the \`${SOLVER_GAP_TOOL_NAME}\` tool exactly once with your final list (which may ` +
-      "be empty). That tool call is your only way to report a result.",
-  );
-
-  return parts.join("\n");
+    "Return a concise Markdown report with: an overall assessment; concrete fairness findings (or say none found); " +
+      "a per-agent outcome table; and prompt/test/diff/log evidence for every attribution. Clearly label uncertain " +
+      "conclusions. Do not edit files or run commands.",
+  ].join("\n");
 }

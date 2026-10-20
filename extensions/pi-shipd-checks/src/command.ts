@@ -1,13 +1,13 @@
-/** The `/checks` command: configuration and solver-based gap finding. */
+/** The `/checks` command: settings and the `solve` Claude CLI benchmark. */
 
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, Spacer, Text } from "@earendil-works/pi-tui";
-import { runSolverComparisonReviewer } from "./agents.js";
+import { runSolverReview } from "./agents.js";
 import {
   ANALYZE_DEFAULT_TIMEOUT_MINUTES,
   ANALYZE_TIMEOUT_MAX_MINUTES,
@@ -19,32 +19,31 @@ import {
   loadEnabledModelRefs,
   loadSolverGapConfig,
   persistFargateResourceUsage,
-  SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
-  SOLVER_GAP_DEFAULT_SOLVER_COUNT,
-  SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
   SOLVER_GAP_SOLVER_COUNT_MAX,
   SOLVER_GAP_SOLVER_COUNT_MIN,
   SOLVER_GAP_TIMEOUT_MAX_MINUTES,
   SOLVER_GAP_TIMEOUT_MIN_MINUTES,
   saveChecksConfig,
+  saveSolverGapConfig,
   setAnalyzeProjectEnabled,
   splitProviderModel,
 } from "./config.js";
-import { runFargateSolverGapFinder } from "./fargate-runner.js";
+import { runFargateClaudeBenchmark } from "./fargate-runner.js";
 import { snapshotGitHead } from "./git.js";
 import { PROGRESS_WIDGET_KEY, renderProgressLines } from "./progress.js";
 import { buildRunSummary, formatLocalTimestamp, loadExistingReport, mergeReport, REQUIRED_FILES } from "./report.js";
-import { loadFairnessRules, loadGapRules, loadTestGuidelines } from "./rubric.js";
-import { writeSolverSolutionsToDisk } from "./solvergap.js";
+import { loadFairnessRules, loadTestGuidelines } from "./rubric.js";
+import { SOLVER_ARTIFACTS_DIRNAME } from "./solvergap.js";
 import { endReview, isReviewInProgress, startReview } from "./state.js";
 import { analyzeToolSettingChanged } from "./tool-sync.js";
 import type {
   AnalyzeGapConfig,
+  ChecksConfig,
+  ClaudeThinkingLevel,
   CommandOption,
   FargateResourceUsage,
-  GapStageResult,
-  SolverGap,
   SolverGapConfig,
+  SolverReviewResult,
   SolverRunResult,
   ThinkingLevel,
 } from "./types.js";
@@ -52,15 +51,15 @@ import type {
 export const CANCEL_SHORTCUT_LABEL = "Ctrl+Shift+X";
 
 const COMMAND_COMPLETIONS: readonly CommandOption[] = [
-  { value: "--config", label: "--config", description: "Configure reviewer, solver, and analysis models" },
   {
-    value: "--solver-gap-finder",
-    label: "--solver-gap-finder",
-    description: "Use TDD solver attempts to find behavioral gaps",
+    value: "--config",
+    label: "--config",
+    description: "Configure local Pi reviewer, analysis tools, and Claude solvers",
   },
+  { value: "solve", label: "solve", description: "Run Claude agents on agent_prompt.md" },
 ];
 
-const COMMAND_MENU_OPTIONS = ["config", "solver-gap-finder"] as const;
+const COMMAND_MENU_OPTIONS = ["config", "solve"] as const;
 
 function getArgumentCompletions(prefix: string) {
   const trimmed = prefix.trimStart();
@@ -126,15 +125,6 @@ function supportedThinkingLevelsFor(ctx: ExtensionCommandContext, provider: stri
   return getSupportedThinkingLevels(model);
 }
 
-const DEFAULT_SOLVER_GAP: SolverGapConfig = {
-  provider: "",
-  modelId: "",
-  thinkingLevel: "off",
-  timeoutMinutes: SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES,
-  solverCount: SOLVER_GAP_DEFAULT_SOLVER_COUNT,
-  saveArtifacts: SOLVER_GAP_DEFAULT_SAVE_ARTIFACTS,
-};
-
 const DEFAULT_ANALYZE_GAP: AnalyzeGapConfig = {
   provider: "",
   modelId: "",
@@ -153,13 +143,12 @@ function getAnalyzeGapConfig(current: ChecksConfigLike | null): AnalyzeGapConfig
 }
 
 type ConfigRowId =
+  | "solver-model"
+  | "solvergap-thinking"
   | "reviewer-model"
   | "reviewer-thinking"
-  | "solver-model"
-  | "solver-thinking"
   | "solvergap-timeout"
   | "solvergap-solver-count"
-  | "solvergap-save-artifacts"
   | "analyze-enabled"
   | "analyze-timeout"
   | "analyze-gap-model"
@@ -183,9 +172,6 @@ function buildConfigRows(
   analyzeGap: AnalyzeGapConfig,
 ): ConfigRow[] {
   const reviewerLevels = current ? supportedThinkingLevelsFor(ctx, current.provider, current.modelId) : ["off"];
-  const solverGapLevels = solverGap.provider
-    ? supportedThinkingLevelsFor(ctx, solverGap.provider, solverGap.modelId)
-    : ["off"];
   const analyzeGapLevels = analyzeGap.provider
     ? supportedThinkingLevelsFor(ctx, analyzeGap.provider, analyzeGap.modelId)
     : ["off"];
@@ -193,17 +179,18 @@ function buildConfigRows(
     {
       id: "solver-model",
       section: "Solver",
-      label: "Solver model",
-      value: solverGap.provider ? `${solverGap.provider}/${solverGap.modelId}` : "not set",
-      kind: "model",
+      label: "Solver model (Claude)",
+      value: solverGap.modelId,
+      kind: "cycle",
+      values: ["haiku", "sonnet", "opus"],
     },
     {
-      id: "solver-thinking",
+      id: "solvergap-thinking",
       section: "Solver",
-      label: "Solver thinking",
+      label: "Thinking level",
       value: solverGap.thinkingLevel,
       kind: "cycle",
-      values: solverGapLevels,
+      values: ["low", "medium", "high", "xhigh", "max"],
     },
     {
       id: "solvergap-timeout",
@@ -227,24 +214,16 @@ function buildConfigRows(
       ),
     },
     {
-      id: "solvergap-save-artifacts",
-      section: "Solver",
-      label: "Save artifacts",
-      value: solverGap.saveArtifacts ? "on" : "off",
-      kind: "cycle",
-      values: ["on", "off"],
-    },
-    {
       id: "reviewer-model",
       section: "Solver",
-      label: "Reviewer model",
+      label: "Local reviewer model (Pi)",
       value: current ? `${current.provider}/${current.modelId}` : "not set",
       kind: "model",
     },
     {
       id: "reviewer-thinking",
       section: "Solver",
-      label: "Reviewer thinking",
+      label: "Local reviewer thinking",
       value: current?.thinkingLevel ?? "off",
       kind: "cycle",
       values: reviewerLevels,
@@ -310,7 +289,7 @@ class ConfigMenuComponent {
     this.rows = buildConfigRows(
       ctx,
       loadChecksConfig(),
-      loadChecksConfig()?.solverGap ?? DEFAULT_SOLVER_GAP,
+      loadSolverGapConfig(),
       getAnalyzeGapConfig(loadChecksConfig()),
     );
   }
@@ -318,12 +297,7 @@ class ConfigMenuComponent {
   /** Recompute rows from the latest saved config (used after a model picker returns) without resetting selection. */
   refresh() {
     const current = loadChecksConfig();
-    this.rows = buildConfigRows(
-      this.ctx,
-      current,
-      current?.solverGap ?? DEFAULT_SOLVER_GAP,
-      getAnalyzeGapConfig(current),
-    );
+    this.rows = buildConfigRows(this.ctx, current, loadSolverGapConfig(), getAnalyzeGapConfig(current));
     this.selectedIndex = Math.min(this.selectedIndex, this.rows.length - 1);
   }
 
@@ -373,25 +347,44 @@ class ConfigMenuComponent {
       }
       if (!row.values || row.values.length === 0) return;
       const current = loadChecksConfig();
-      if (!current) {
-        this.ctx.ui.notify("Set the reviewer model first — it's required before solver settings", "warning");
-        return;
-      }
-      const solverGap = current.solverGap ?? DEFAULT_SOLVER_GAP;
-      const analyzeGap = getAnalyzeGapConfig(current);
+      const solverGap = loadSolverGapConfig();
       const currentIndex = row.values.indexOf(row.value);
       const nextValue = row.values[(currentIndex + 1) % row.values.length];
       if (nextValue === undefined) return;
+      if (row.id === "solver-model") {
+        saveSolverGapConfig({ ...solverGap, modelId: nextValue });
+        this.refresh();
+        this.onCycleSaved();
+        return;
+      }
+      if (row.id === "solvergap-timeout") {
+        saveSolverGapConfig({ ...solverGap, timeoutMinutes: Number.parseInt(nextValue, 10) });
+        this.refresh();
+        this.onCycleSaved();
+        return;
+      }
+      if (row.id === "solvergap-solver-count") {
+        saveSolverGapConfig({ ...solverGap, solverCount: Number.parseInt(nextValue, 10) });
+        this.refresh();
+        this.onCycleSaved();
+        return;
+      }
+      if (row.id === "solvergap-thinking") {
+        saveSolverGapConfig({ ...solverGap, thinkingLevel: nextValue as ClaudeThinkingLevel });
+        this.refresh();
+        this.onCycleSaved();
+        return;
+      }
+      if (!current) {
+        this.ctx.ui.notify(
+          "Set the local Pi reviewer model first — it's required before analysis-tool settings",
+          "warning",
+        );
+        return;
+      }
+      const analyzeGap = getAnalyzeGapConfig(current);
       if (row.id === "reviewer-thinking") {
         saveChecksConfig({ ...current, thinkingLevel: nextValue as ThinkingLevel, solverGap, analyzeGap });
-      } else if (row.id === "solver-thinking") {
-        saveChecksConfig({ ...current, solverGap: { ...solverGap, thinkingLevel: nextValue as ThinkingLevel } });
-      } else if (row.id === "solvergap-timeout") {
-        saveChecksConfig({ ...current, solverGap: { ...solverGap, timeoutMinutes: Number.parseInt(nextValue, 10) } });
-      } else if (row.id === "solvergap-solver-count") {
-        saveChecksConfig({ ...current, solverGap: { ...solverGap, solverCount: Number.parseInt(nextValue, 10) } });
-      } else if (row.id === "solvergap-save-artifacts") {
-        saveChecksConfig({ ...current, solverGap: { ...solverGap, saveArtifacts: nextValue === "on" } });
       } else if (row.id === "analyze-enabled") {
         setAnalyzeProjectEnabled(this.ctx.cwd, nextValue === "on");
       } else if (row.id === "analyze-timeout") {
@@ -458,11 +451,11 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
     if (!activated) return;
 
     const current = loadChecksConfig();
-    const solverGap = current?.solverGap ?? DEFAULT_SOLVER_GAP;
+    const solverGap = loadSolverGapConfig();
     const analyzeGap = getAnalyzeGapConfig(current);
 
     if (activated === "reviewer-model") {
-      const picked = await pickModelOnly(ctx, current, "Select reviewer model");
+      const picked = await pickModelOnly(ctx, current, "Select local Pi reviewer model");
       if (!picked) continue;
       const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
       const thinkingLevel = levels.includes(current?.thinkingLevel ?? "off")
@@ -476,27 +469,13 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
         enabledProjects: current?.enabledProjects ?? loadAnalyzeEnabledProjects(),
         enableAnalyzeTool: current?.enableAnalyzeTool,
       });
-      ctx.ui.notify(`Reviewer model saved: ${picked.provider}/${picked.modelId}`, "info");
-      continue;
-    }
-
-    if (activated === "solver-model") {
-      if (!current) {
-        ctx.ui.notify("Set the reviewer model first — it's required before solver settings.", "warning");
-        continue;
-      }
-      const picked = await pickModelOnly(ctx, solverGap.provider ? solverGap : null, "Select solver model");
-      if (!picked) continue;
-      const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
-      const thinkingLevel = levels.includes(solverGap.thinkingLevel) ? solverGap.thinkingLevel : (levels[0] ?? "off");
-      saveChecksConfig({ ...current, solverGap: { ...solverGap, ...picked, thinkingLevel } });
-      ctx.ui.notify(`Solver model saved: ${picked.provider}/${picked.modelId}`, "info");
+      ctx.ui.notify(`Local Pi reviewer model saved: ${picked.provider}/${picked.modelId}`, "info");
       continue;
     }
 
     if (activated === "analyze-gap-model") {
       if (!current) {
-        ctx.ui.notify("Set the reviewer model first — it's required before analyze-tool settings.", "warning");
+        ctx.ui.notify("Set the local Pi reviewer model first — it's required before analyze-tool settings.", "warning");
         continue;
       }
       const picked = await pickModelOnly(ctx, analyzeGap.provider ? analyzeGap : null, "Select gap-finder model");
@@ -509,77 +488,157 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
   }
 }
 
+function extractNewFilesFromPatch(patchText: string): Array<{ path: string; content: string }> {
+  const files: Array<{ path: string; content: string }> = [];
+  const sections = patchText.split(/(?=^diff --git )/m).filter((section) => section.startsWith("diff --git "));
+  for (const section of sections) {
+    if (!/^new file mode /m.test(section)) continue;
+    const patchPath = section.match(/^\+\+\+ b\/(.+)$/m)?.[1];
+    if (!patchPath) continue;
+    const normalizedPath = patchPath.replace(/\\/g, "/");
+    if (
+      normalizedPath.startsWith("/") ||
+      /^[A-Za-z]:/.test(normalizedPath) ||
+      normalizedPath.split("/").some((part) => part === ".." || part === "")
+    ) {
+      throw new Error(`Unsafe new-file path in test.patch: ${patchPath}`);
+    }
+    const content: string[] = [];
+    const hasNoFinalNewline = section.includes("\\ No newline at end of file");
+    let inHunk = false;
+    for (const line of section.split(/\r?\n/)) {
+      if (line.startsWith("@@")) {
+        inHunk = true;
+        continue;
+      }
+      if (!inHunk || line === "" || line.startsWith("\\ No newline at end of file")) continue;
+      if (line.startsWith("+")) content.push(line.slice(1));
+      else if (line.startsWith("diff --git ")) break;
+      else throw new Error(`Unexpected non-addition line in new test.patch file ${patchPath}.`);
+    }
+    const fileContent = content.join("\n");
+    files.push({ path: normalizedPath, content: hasNoFinalNewline ? fileContent : `${fileContent}\n` });
+  }
+  return files;
+}
+
+function prepareLocalSolverReviewWorkspace(repoDir: string, workspaceDir: string, results: SolverRunResult[]): void {
+  for (const file of ["agent_prompt.md", "test.patch", "solution.patch", "Dockerfile"]) {
+    rmSync(join(workspaceDir, file), { recursive: true, force: true });
+  }
+  const assetsDir = join(workspaceDir, "review_assets");
+  mkdirSync(assetsDir, { recursive: true });
+  copyFileSync(join(repoDir, "agent_prompt.md"), join(assetsDir, "agent_prompt.md"));
+  const testPatch = readFileSync(join(repoDir, "test.patch"), "utf-8");
+  copyFileSync(join(repoDir, "test.patch"), join(assetsDir, "test.patch"));
+  if (existsSync(join(repoDir, "solution.patch"))) {
+    copyFileSync(join(repoDir, "solution.patch"), join(assetsDir, "reference_solution.patch"));
+  }
+  for (const file of extractNewFilesFromPatch(testPatch)) {
+    const path = join(assetsDir, "proposed_tests", file.path);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, file.content, "utf-8");
+  }
+
+  for (const result of results) {
+    const dir = join(assetsDir, `solver_${result.index}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "solver_solution.patch"), result.diff, "utf-8");
+    writeFileSync(join(dir, "agent_output.txt"), result.agentOutput ?? "", "utf-8");
+    writeFileSync(join(dir, "base_test_output.txt"), result.baseTests?.output ?? "not run", "utf-8");
+    writeFileSync(join(dir, "new_test_output.txt"), result.newTests?.output ?? "not run", "utf-8");
+    writeFileSync(
+      join(dir, "result.json"),
+      `${JSON.stringify(
+        {
+          index: result.index,
+          status: result.status,
+          passed: result.passed,
+          baseTests: result.baseTests && { passed: result.baseTests.passed, exitCode: result.baseTests.exitCode },
+          newTests: result.newTests && { passed: result.newTests.passed, exitCode: result.newTests.exitCode },
+          error: result.error,
+          tokenUsage: result.tokenUsage,
+        },
+        null,
+        2,
+      )}\n`,
+      "utf-8",
+    );
+  }
+}
+
 export function registerChecksCommand(pi: ExtensionAPI) {
   pi.registerCommand("checks", {
-    description: "Configure checks or run the solver-based behavioral gap finder.",
+    description: "Configure checks or run the solve benchmark for agent_prompt.md.",
     getArgumentCompletions,
     handler: async (args, ctx) => {
       let sub = args.trim();
       if (!sub) {
         const choice = await ctx.ui.select("Choose a checks action", [...COMMAND_MENU_OPTIONS]);
         if (!choice) return;
-        sub = `--${choice}`;
+        sub = choice === "config" ? "--config" : choice;
       }
       const tokens = [...new Set(sub.split(/\s+/).filter(Boolean))];
       const known = new Set(COMMAND_COMPLETIONS.map((option) => option.value));
       const unknown = tokens.filter((token) => !known.has(token));
       if (unknown.length) {
         ctx.ui.notify(
-          `Unknown option(s): ${unknown.join(", ")}. Run /checks with no arguments to see options.`,
+          `Unknown argument(s): ${unknown.join(", ")}. Run /checks with no arguments to see options.`,
           "warning",
         );
         return;
       }
       if (tokens.includes("--config")) {
-        if (tokens.length > 1) ctx.ui.notify("--config cannot be combined with other options.", "warning");
+        if (tokens.length > 1) ctx.ui.notify("--config must be used alone.", "warning");
         else await runConfigFlow(pi, ctx);
         return;
       }
-      const runSolverGapFinder = tokens.includes("--solver-gap-finder");
-      if (!runSolverGapFinder) return;
+      if (tokens.length !== 1 || tokens[0] !== "solve") {
+        ctx.ui.notify("Run `/checks solve` to solve and review this task.", "warning");
+        return;
+      }
+      const runClaudeBenchmark = true;
       if (isReviewInProgress()) {
         ctx.ui.notify("A checks run is already in progress.", "warning");
         return;
       }
-      const config = loadChecksConfig();
-      if (!config) {
-        ctx.ui.notify("No gap-finder model configured. Run /checks --config first.", "error");
-        return;
-      }
-      const model = ctx.modelRegistry.find(config.provider, config.modelId);
-      if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
+      const reviewerConfig = loadChecksConfig();
+      const config: ChecksConfig = reviewerConfig ?? {
+        provider: "claude-cli",
+        modelId: "default",
+        thinkingLevel: "off",
+      };
+      const reviewerModel = reviewerConfig
+        ? ctx.modelRegistry.find(reviewerConfig.provider, reviewerConfig.modelId)
+        : ctx.model;
+      if (!reviewerModel || (reviewerConfig && !ctx.modelRegistry.hasConfiguredAuth(reviewerModel))) {
         ctx.ui.notify(
-          "Configured behavioral gap-finder model is unavailable or unauthenticated. Run /checks --config.",
+          "Configure an authenticated local Pi reviewer model in `/checks --config` before running `/checks solve`.",
           "error",
         );
         return;
       }
-      const missing = REQUIRED_FILES.filter((file) => !existsSync(join(ctx.cwd, file)));
+      const reviewerThinkingLevel = reviewerConfig?.thinkingLevel ?? "off";
+      const reviewerModelName = `${reviewerModel.provider}/${reviewerModel.id}`;
+      const reviewerContextWindow = Number.isFinite(reviewerModel.contextWindow)
+        ? reviewerModel.contextWindow
+        : undefined;
+      const missing = [...REQUIRED_FILES, "Dockerfile", "test.patch"].filter(
+        (file) => !existsSync(join(ctx.cwd, file)),
+      );
       if (missing.length) {
         ctx.ui.notify(`Missing required file(s): ${missing.join(", ")}`, "error");
         return;
       }
-      let solverConfig: SolverGapConfig | null = null;
-      let solverModel: unknown;
-      if (runSolverGapFinder) {
-        solverConfig = loadSolverGapConfig();
-        if (!solverConfig || !existsSync(join(ctx.cwd, "test.sh"))) {
-          ctx.ui.notify("Configure solver gap finder and provide test.sh before running it.", "error");
-          return;
-        }
-        solverModel = ctx.modelRegistry.find(solverConfig.provider, solverConfig.modelId);
-        if (!solverModel || !ctx.modelRegistry.hasConfiguredAuth(solverModel as never)) {
-          ctx.ui.notify("Configured solver gap-finder model is unavailable or unauthenticated.", "error");
-          return;
-        }
-      }
+      const solverConfig: SolverGapConfig = loadSolverGapConfig();
+      const taskPrompt = readFileSync(join(ctx.cwd, "agent_prompt.md"), "utf-8");
       const abort = startReview();
-      const solverCount = solverConfig?.solverCount ?? 0;
+      const solverCount = solverConfig.solverCount;
       const total = solverCount + 1;
       const progressStartedAt = Date.now();
-      let progressLabel = runSolverGapFinder ? "preparing image" : "preparing clean snapshot";
+      let progressLabel = "preparing image";
       let progressDone = 0;
-      let progressShowBar = !runSolverGapFinder;
+      let progressShowBar = false;
       const updateProgress = (label = progressLabel, done = progressDone, showBar = progressShowBar) => {
         progressLabel = label;
         progressDone = done;
@@ -603,15 +662,11 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           return;
         }
         if (abort.signal.aborted) return;
-        for (const file of REQUIRED_FILES) copyFileSync(join(ctx.cwd, file), join(dir, file));
-        const testRubric = loadTestGuidelines();
-        const gapRules = loadGapRules();
-        const fairnessRules = loadFairnessRules();
         let completed = 0;
         let solverResults: SolverRunResult[] = [];
+        let solverReview: SolverReviewResult | undefined;
         let fargateResourceUsage: FargateResourceUsage | undefined;
-        let comparison: GapStageResult<SolverGap> = { status: "ok", gaps: [] };
-        if (runSolverGapFinder && solverConfig) {
+        if (runClaudeBenchmark && solverConfig) {
           if (abort.signal.aborted) {
             ctx.ui.notify("checks: cancelled.", "warning");
             return;
@@ -624,11 +679,13 @@ export function registerChecksCommand(pi: ExtensionAPI) {
               return result ? `${index + 1}${result.passed ? "✓" : "✗"}` : `${index + 1}…`;
             }).join(" ");
           const renderSolverProgress = (phase: string) => {
-            if (phase === "running agents") remoteStarted = true;
-            const showBar = remoteStarted && (phase === "running agents" || phase === "finalizing");
+            if (phase === "running agents" || phase === "reviewing solutions") remoteStarted = true;
+            const showBar =
+              remoteStarted &&
+              (phase === "running agents" || phase === "reviewing solutions" || phase === "finalizing");
             const label = phase === "running agents" ? `${phase} (${solverStatusText()})` : phase;
-            const solverResults = [...completedSolvers.values()];
-            updateProgress(label, completed + solverResults.length, showBar);
+            const currentResults = [...completedSolvers.values()];
+            updateProgress(label, completed + currentResults.length, showBar);
           };
           const recordSolverProgress = (results: SolverRunResult[]) => {
             for (const result of results) completedSolvers.set(result.index, result);
@@ -640,10 +697,11 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           };
           renderSolverProgress("preparing image");
           const runId = formatLocalTimestamp().replace(/[:.]/g, "-");
-          solverResults = await runFargateSolverGapFinder({
+          const solverRun = await runFargateClaudeBenchmark({
             pi,
             repoDir: ctx.cwd,
             snapshotDir: dir,
+            taskPrompt,
             config,
             solverConfig,
             cancelSignal: abort.signal,
@@ -655,24 +713,48 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             },
             onPhase: renderSolverProgress,
           });
+          solverResults = solverRun.results;
+          fargateResourceUsage = solverRun.resourceUsage ?? fargateResourceUsage;
           if (abort.signal.aborted) {
             ctx.ui.notify("checks: cancelled.", "warning");
             return;
           }
-          if (solverResults.some((result) => result.status !== "patchFailed" && result.status !== "error")) {
-            renderSolverProgress("finalizing");
-            writeSolverSolutionsToDisk(dir, solverResults);
-            comparison = await runSolverComparisonReviewer({
+          renderSolverProgress("reviewing solutions");
+          try {
+            prepareLocalSolverReviewWorkspace(ctx.cwd, dir, solverResults);
+            const review = await runSolverReview({
               tempDir: dir,
-              model,
-              thinkingLevel: config.thinkingLevel,
+              model: reviewerModel,
+              thinkingLevel: reviewerThinkingLevel,
+              contextWindow: reviewerContextWindow,
+              taskPrompt,
               solverResults,
-              testRubric,
-              gapRules,
-              fairnessRules,
+              testGuidelines: loadTestGuidelines(),
+              fairnessRules: loadFairnessRules(),
               cancelSignal: abort.signal,
             });
+            solverReview = { ...review, model: reviewerModelName, thinkingLevel: reviewerThinkingLevel };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            solverReview = {
+              status: "error",
+              text: message,
+              model: reviewerModelName,
+              thinkingLevel: reviewerThinkingLevel,
+              error: message,
+            };
           }
+          if (abort.signal.aborted) {
+            ctx.ui.notify("checks: cancelled.", "warning");
+            return;
+          }
+          const runDir = join(ctx.cwd, SOLVER_ARTIFACTS_DIRNAME, runId);
+          mkdirSync(runDir, { recursive: true });
+          writeFileSync(
+            join(runDir, "fairness_review.md"),
+            solverReview.text || solverReview.error || "No reviewer output.",
+            "utf-8",
+          );
           completed += 1;
           renderSolverProgress("finalizing");
           if (fargateResourceUsage) persistFargateResourceUsage(ctx.cwd, fargateResourceUsage);
@@ -681,24 +763,27 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             return;
           }
         }
+        const reportConfig: ChecksConfig = {
+          ...config,
+          provider: "claude-cli",
+          modelId: solverConfig.modelId,
+          thinkingLevel: "off",
+        };
         const merged = mergeReport({
           existingReport: loadExistingReport(join(ctx.cwd, "shipd_report.json")),
-          config,
+          config: reportConfig,
           runGapFinder: false,
           testGaps: [],
           gapAnalysisIncomplete: false,
           gapFinderStatus: "ok",
           gapFilterStatus: "ok",
-          runSolverGapFinder,
+          runClaudeBenchmark,
+          solverConfig,
           solverResults,
           fargateResourceUsage,
-          solverGaps: comparison.gaps,
-          solverGapAnalysisIncomplete:
-            runSolverGapFinder &&
-            (solverResults.some((result) => result.status === "error") || comparison.status !== "ok"),
-          solverComparisonStatus: comparison.status,
+          solverReview,
         });
-        const summary = buildRunSummary({ merged, runGapFinder: false, runSolverGapFinder });
+        const summary = buildRunSummary({ merged, runGapFinder: false, runClaudeBenchmark });
         pi.sendMessage({
           customType: "shipd_checks_report",
           content: summary.content,

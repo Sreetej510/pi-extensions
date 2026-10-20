@@ -4,22 +4,15 @@ A [pi](https://github.com/earendil-works/pi) coding agent extension for benchmar
 
 ## What it does
 
-For `/checks`:
+For `/checks solve`:
 
-1. Snapshots the current git `HEAD` into a throwaway temp directory (via
-   `git archive HEAD | tar -x`) — it never touches your working directory, staged, or
-   uncommitted changes.
-2. Copies `agent_prompt.md`, `solution.patch`, and `test.patch` from your project root into
-   that temp dir.
-3. Optionally runs the solver gap finder: several (configurable, default 3) TDD-style solver
-   agents, each in its own throwaway git repo with `test.patch` and `agent_prompt.md` applied
-   (never `solution.patch`), given write/edit/bash access to iterate until `./test.sh new`
-   passes or they give up. The extension independently re-verifies each solver's result and
-   compares passing solver diffs with the reference to surface behavioral gaps.
-4. Runs solver workers in one AWS ECS Fargate Spot task when enabled, with the source snapshot
-   and partial results in S3. A Spot interruption retries the task and resumes completed
-   solver indexes.
-5. Posts a chat summary and merges solver results into `shipd_report.json` in your project root.
+1. Snapshots only the current git `HEAD` into a throwaway temp directory; the source checkout is never modified.
+2. Sends the exact contents of `agent_prompt.md` as each solver's sole first user message. No prompt file, task Dockerfile, `test.patch`, `solution.patch`, or uncommitted test files are overlaid into a solver workspace. The Dockerfile is used only by the harness to provision the Fargate environment.
+3. Runs several configurable (default 3) independent Claude Code CLI solver invocations in parallel, each with its own isolated clean-HEAD workspace and only the `Bash` tool enabled. Captures each solver's `stream-json` trace of assistant and tool events (not private chain-of-thought). There is no test-driven repair loop, and the test patch remains unavailable until that solver exits.
+4. After a solver finishes, the harness applies `test.patch` to its workspace, then runs `bash test.sh --output_path <file> base` and `bash test.sh --output_path <file> new` as an unprivileged user with a fresh writable `HOME` and cache. It captures both full logs.
+5. After all solvers exit and their tests run, the read-only local Pi reviewer receives an untouched clean-HEAD tree plus `agent_prompt.md`, all patch files, standalone copies of new test files, each solver's patch, and every solver's test logs. No patch is applied in the review workspace.
+6. Runs the Claude CLI solvers inside one AWS ECS Fargate Spot task. A Spot interruption retries the task and resumes completed solver indexes. The local Claude Code login file is transferred through private, server-side-encrypted S3 objects, then run objects are deleted.
+7. Posts a chat summary and logs results in `.pi/shipd-checks/<runId>/`, including `agent_steps.jsonl` per solver, and `shipd_report.json` in your project root.
 
 The agent-callable `gap-finder` tool runs one exhaustive read-only agent over the prompt, repository, and tests. It
 reviews requirements sentence by sentence, performs its own evidence and fairness check, and returns confirmed
@@ -74,30 +67,28 @@ Shipd tokens; do not run overlapping invocations for the same challenge.
 
 ## Commands
 
-`--config` must be used alone; solver-gap-finder is the only `/checks` run mode. The gap-finder, solution-precheck, and prompt-humanizer tools are enabled per project with `/analyze:on`.
+`/checks solve` runs the benchmark using `agent_prompt.md`; it requires that prompt file, `Dockerfile`, and `test.patch` (which supplies `test.sh` and the test files). The solver sees only clean `HEAD` plus the prompt text; the harness applies `test.patch` after the solver exits. `solution.patch` is not required by the solver; when present, the local reviewer receives it as the task-author reference patch. `/checks --config` is separate and configures the local Pi reviewer/analysis models and Claude solver settings. The gap-finder, solution-precheck, and prompt-humanizer tools are enabled per project with `/analyze:on`.
 
 | Command | Effect |
 |---|---|
-| `/checks` | Open a menu with config and solver-gap-finder options |
-| `/checks --config` | Configure reviewer, solver, and analysis models |
-| `/checks --solver-gap-finder` | Run several solver agents TDD-style against `agent_prompt.md` + `test.patch`, then compare their solutions to the real solution to find gaps |
+| `/checks` | Open a menu for settings or `solve` |
+| `/checks solve` | Run isolated Claude CLI solvers and base/new tests, then use a local Pi reviewer to assess test fairness and failed agents |
+| `/checks --config` | Configure local Pi reviewer/analysis models, Solver model (Claude), Claude solver effort, timeout, and parallel agent count |
 | `/shipd:auth` | Open a browser for first-time Shipd sign-in and save the session |
 | `/shipd:link <url>` | Save the Shipd job link for the current chat session |
 | `/analyze:on` | Enable the gap-finder, solution-precheck, and prompt-humanizer tools for the current project |
 | `/analyze:off` | Disable the gap-finder, solution-precheck, and prompt-humanizer tools for the current project |
 
-**Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run. Cancellation is propagated to active solver sessions and their spawned shell/test process trees; post-cancel verification, comparison, and artifact writing are skipped.
+**Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run, stopping its active Fargate task or local Pi review. A cancelled run skips final report writing.
 
 ## Configuration
 
 `/checks --config` opens the row-based settings menu with two sections:
 
-- **Solver**: reviewer model and thinking level for the final solver-result reviewer, plus the
-  solver model, thinking level, timeout, parallel solver count, and artifact-saving setting.
-- **Analysis Tools**: timeout, model, and thinking level shared by the agent-callable gap-finder and
-  solution-precheck tools. The timeout applies to each read-only agent. These are stored under
-  `analyzeGap.timeoutMinutes`, `analyzeGap.provider`, `analyzeGap.modelId`, and
-  `analyzeGap.thinkingLevel`. Fargate resources are selected automatically and are not configurable in this menu.
+- **Solver**: Solver model (Claude: `haiku`, `sonnet`, or `opus`), solver effort (`low`, `medium`, `high`, `xhigh`, or `max`), one-shot timeout, parallel agent count, and the local Pi reviewer model/thinking level. Solver effort defaults to `low` when unset and is passed explicitly to Claude. Diffs, agent output, `agent_steps.jsonl` traces, base/new logs, and the local reviewer assessment are saved under `.pi/shipd-checks/<runId>/` and summarized in `shipd_report.json`.
+- **Analysis Tools**: timeout, model, and thinking level for the separate agent-callable gap-finder and solution-precheck tools. The timeout applies to each read-only agent. These are stored under `analyzeGap.timeoutMinutes`, `analyzeGap.provider`, `analyzeGap.modelId`, and `analyzeGap.thinkingLevel`. Fargate resources are selected automatically and are not configurable in this menu.
+
+For each Claude solver, `shipd_report.json` records CLI-reported input/cache/output token totals, final and peak request-context token counts, context-window size/utilization, API-call count, and cost when available. When the CLI explicitly reports thinking tokens, `totalTokens` subtracts them from raw input-plus-output; otherwise it remains the raw total. The raw total is also recorded when a subtraction is made. The local Pi reviewer records session usage when the provider reports it. Per-agent, reviewer, and aggregate usage appears once under `solverTokenUsage`; `solverRunSummary` contains outcomes, while `solverReview` contains the assessment and reviewer model settings.
 
 The humanizer candidate counts are configured separately in `~/.pi/agent/checks-config.json`. `candidateCount` controls
 how many drafts are requested from CoreWeave (1–10); `topCount` controls the maximum returned (1–10, capped at
@@ -154,8 +145,8 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
    }
    ```
 
-   The task role is required for long-running jobs because temporary presigned URLs can expire
-   while dependencies or agents are running.
+   The task role is recommended for long-running jobs because temporary presigned URLs can expire
+   while dependencies or agents are running; it is needed if a run may exceed the URL lifetime.
 
 3. Create an ECS execution role trusted by `ecs-tasks.amazonaws.com`, attach the AWS-managed
    `service-role/AmazonECSTaskExecutionRolePolicy`, and create the CloudWatch log group. The
@@ -183,14 +174,12 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
    on later runs (unless `projectProfiles` already overrides the repository). They upgrade when
    normalized CPU is at least 95% for more than seven minutes, downgrade when CPU is at least 95%
    for under two minutes, and otherwise retain the profile. Only the selected next profile is
-   written to `projectProfiles`; CPU telemetry is included in `shipd_report.json` for solver-gap
-   runs, but no telemetry history is retained. Quality patch prechecks always use the `medium`
+   written to `projectProfiles`; CPU telemetry is included in `shipd_report.json` for Claude
+   benchmark runs, but no telemetry history is retained. Quality patch prechecks always use the `medium`
    profile and do not update adaptive sizing. Set `projectProfiles` to override solver-gap
    resources per repository: `{"C:/path/to/repo":"large"}`.
 
-5. Restart pi, use `/checks --config` to select the solver and reviewer models, then run
-   `/checks --solver-gap-finder`. Projects need `Dockerfile`, `agent_prompt.md`,
-   `solution.patch`, `test.patch`, and `test.sh`.
+5. Sign in to Claude Code locally so `%USERPROFILE%\\.claude\\.credentials.json` exists. The Fargate runner copies that login file for this run; it does not upload Pi's `auth.json`. Configure the Solver model (Claude), thinking/effort level, count, and timeout in `/checks --config`, then run `/checks solve`. Projects need `Dockerfile`, `agent_prompt.md`, and `test.patch`, which should add `test.sh` with `--output_path <file> base` and `--output_path <file> new` modes. A task role is recommended for runs that may exceed the 55-minute pre-signed URL lifetime.
 
 Use `/analyze:on` and `/analyze:off` to control the gap-finder, solution-precheck, and prompt-humanizer tools per project, like HPC. The
 enabled project list is stored alongside the other settings in `~/.pi/agent/checks-config.json`.
@@ -245,11 +234,11 @@ Or, for local development, point at the entry point directly:
 | `src/index.ts` | Extension entry point: message renderer, cancel shortcut, command registration |
 | `src/submit.ts` | `quality-check`: Playwright draft filling, sequential quality checks, scheduled polling, and report extraction |
 | `src/command.ts` | The `/checks` command: argument parsing, `--config` flow, run orchestration |
-| `src/agents.ts` | Spawns and races the gap-finder, solution-precheck, reviewer, and solver agent sessions |
-| `src/solvergap.ts` | Local solver result persistence and comparison artifacts |
+| `src/agents.ts` | Spawns and races local Pi gap-finder, solution-precheck, and benchmark-review sessions |
+| `src/solvergap.ts` | Benchmark artifact-directory constant |
 | `src/fargate-docker.ts` | Supported Dockerfile parsing for remote solver setup |
-| `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration for solver, patch-precheck, and batched detector tasks; retries and cleanup |
-| `src/fargate-worker.ts` | ESM worker that runs solver workspaces or patch prechecks in the shared task |
+| `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration for Claude CLI benchmark runs, patch-prechecks, and detector tasks; retries and cleanup |
+| `src/fargate-worker.ts` | ESM worker that runs isolated Claude CLI solvers or patch prechecks in the shared task |
 | `src/resource-usage.ts` | Container CPU sampling for adaptive profile selection |
 | `src/prompts.ts` | All prompt text sent to those agents |
 | `src/tools.ts` | Custom tools the agents call to submit their structured results |

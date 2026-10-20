@@ -1,8 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+  chmodSync,
+  copyFileSync,
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import {
   DescribeSecurityGroupsCommand,
   DescribeSubnetsCommand,
@@ -33,7 +43,6 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-  CONFIG_PATH,
   FARGATE_PREQUALITY_PROFILE,
   HUMANIZER_MAX_CANDIDATE_COUNT,
   HUMANIZER_MIN_CANDIDATE_COUNT,
@@ -56,15 +65,16 @@ const WORKER_S3_NAME = "fargate-worker.mjs";
 const URL_EXPIRY_SECONDS = 55 * 60;
 const POLL_MS = 5000;
 
-interface WorkerSolverResult extends SolverRunResult {
-  trajectory?: unknown[];
-}
+type WorkerSolverResult = SolverRunResult & {
+  agentStepsGzipBase64?: string;
+};
 
 type WorkerMode = "solver" | "patch-precheck";
 
 interface WorkerPayload {
   complete: boolean;
   results: WorkerSolverResult[];
+  phase?: string;
   precheck?: PatchPrecheckResult;
   resourceUsage?: FargateResourceUsage;
   error?: string;
@@ -101,6 +111,7 @@ async function runFargateWorker(opts: {
   pi: ExtensionAPI;
   repoDir: string;
   snapshotDir: string;
+  taskPrompt?: string;
   config: ChecksConfig;
   mode: WorkerMode;
   solverConfig?: SolverGapConfig;
@@ -113,11 +124,17 @@ async function runFargateWorker(opts: {
   onPhase?: (phase: string) => void;
 }): Promise<WorkerPayload> {
   if (opts.cancelSignal.aborted) throw new Error("Cancelled by user.");
-  opts.onPhase?.("preparing image");
+  let lastReportedPhase: string | undefined;
+  const reportPhase = (phase: string | undefined) => {
+    if (!phase || phase === lastReportedPhase) return;
+    lastReportedPhase = phase;
+    opts.onPhase?.(phase);
+  };
+  reportPhase("preparing image");
   const dockerfilePath = join(opts.repoDir, "Dockerfile");
   if (!existsSync(dockerfilePath))
     throw new Error(
-      `Fargate ${opts.mode === "solver" ? "solver gap finder" : "patch precheck"} requires Dockerfile in the project root.`,
+      `Fargate ${opts.mode === "solver" ? "Claude benchmark" : "patch precheck"} requires Dockerfile in the project root.`,
     );
   const plan = parseFargateDockerfile(readFileSync(dockerfilePath, "utf-8"));
   const fargateConfig = loadFargateConfigFromChecks(opts.config, opts.repoDir, opts.mode);
@@ -127,8 +144,8 @@ async function runFargateWorker(opts: {
   const archivePath = join(tmpdir(), `.shipd-fargate-source-${randomUUID()}.tar.gz`);
   const workerPath = findWorkerPath();
   const solverConfig = opts.solverConfig;
-  const authPath = opts.mode === "solver" ? join(dirnameOfConfig(), "auth.json") : undefined;
-  const workerAuthPath = authPath ? join(tmpdir(), `.shipd-fargate-auth-${randomUUID()}.json`) : undefined;
+  const authPath = opts.mode === "solver" ? findClaudeCredentialsPath() : undefined;
+  const workerAuthPath = authPath ? join(tmpdir(), `.shipd-fargate-claude-${randomUUID()}.json`) : undefined;
 
   let taskArn: string | undefined;
   let taskCluster: string | undefined;
@@ -147,22 +164,31 @@ async function runFargateWorker(opts: {
 
   const keys = {
     source: `runs/${opts.runId}/source.tar.gz`,
+    testPatch: `runs/${opts.runId}/test.patch`,
     worker: `runs/${opts.runId}/${WORKER_S3_NAME}`,
-    auth: `runs/${opts.runId}/auth.json`,
+    auth: `runs/${opts.runId}/claude-credentials.json`,
     bootstrap: `runs/${opts.runId}/bootstrap.json`,
     result: `runs/${opts.runId}/result.json`,
   };
   try {
     if (opts.mode === "solver" && !solverConfig) throw new Error("Fargate solver configuration is missing.");
-    if (authPath && !existsSync(authPath)) throw new Error(`Missing Pi auth file: ${authPath}`);
+    if (opts.mode === "solver" && !opts.taskPrompt) throw new Error("The task prompt is empty or unavailable.");
+    const testPatchPath = join(opts.repoDir, "test.patch");
+    if (opts.mode === "solver" && !existsSync(testPatchPath))
+      throw new Error("Missing test.patch; it is applied only after each solver finishes.");
+    if (authPath && !existsSync(authPath))
+      throw new Error(
+        `Missing Claude Code login credentials: ${authPath}. Sign in to Claude Code on this machine first.`,
+      );
     const context = await resolveAwsContext(clients, fargateConfig, region);
     cleanupBucket = context.bucket;
     taskCluster = context.cluster;
     await createSourceArchive(opts.pi, opts.snapshotDir, archivePath, opts.cancelSignal, opts.mode === "solver");
     await putFile(clients.s3, context.bucket, keys.source, archivePath, "application/gzip");
+    if (opts.mode === "solver") await putFile(clients.s3, context.bucket, keys.testPatch, testPatchPath, "text/plain");
     await putFile(clients.s3, context.bucket, keys.worker, workerPath, "text/javascript");
-    if (authPath && workerAuthPath && solverConfig) {
-      createWorkerAuthFile(authPath, solverConfig.provider, workerAuthPath);
+    if (authPath && workerAuthPath) {
+      prepareClaudeCredentials(authPath, workerAuthPath);
       await putFile(clients.s3, context.bucket, keys.auth, workerAuthPath, "application/json");
     }
 
@@ -175,19 +201,21 @@ async function runFargateWorker(opts: {
       region,
       fargateConfig,
     );
+    const agentTimeoutMinutes =
+      opts.mode === "solver" ? Math.max(1, Math.floor(solverConfig?.timeoutMinutes ?? 20)) : 0;
     const timeoutMinutes =
       opts.mode === "solver"
-        ? Math.max(1, Math.floor(solverConfig?.timeoutMinutes ?? 1))
+        ? Math.max(10, agentTimeoutMinutes * 4 + 15)
         : Math.max(1, Math.floor(opts.precheckTimeoutMinutes ?? 20));
     const solverCount = opts.mode === "solver" ? Math.max(1, Math.floor(solverConfig?.solverCount ?? 1)) : 0;
     const directS3 = Boolean(fargateConfig.taskRoleArn);
     const maxRetries = Math.min(3, Math.max(0, Math.floor(fargateConfig.maxRetries ?? 1)));
     let lastFailure = "Fargate task did not produce a result.";
-    opts.onPhase?.("requesting sandbox");
+    reportPhase("requesting sandbox");
     let recoveredResults: WorkerSolverResult[] = [];
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       if (opts.cancelSignal.aborted) throw new Error("Cancelled by user.");
-      opts.onPhase?.("requesting sandbox");
+      reportPhase("requesting sandbox");
       // Re-sign every URL for every Spot attempt. AWS login credentials are
       // temporary, so a URL created for an interrupted attempt may expire
       // before the replacement task starts.
@@ -205,6 +233,12 @@ async function runFargateWorker(opts: {
         directS3 || !authPath
           ? undefined
           : await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: context.bucket, Key: keys.auth }), {
+              expiresIn: URL_EXPIRY_SECONDS,
+            });
+      const testPatchUrl =
+        opts.mode !== "solver" || directS3
+          ? undefined
+          : await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: context.bucket, Key: keys.testPatch }), {
               expiresIn: URL_EXPIRY_SECONDS,
             });
       const resultPutUrl = directS3
@@ -225,6 +259,7 @@ async function runFargateWorker(opts: {
           workerUrl,
           sourceUrl,
           authUrl,
+          testPatchUrl,
           resultPutUrl,
           resultGetUrl,
           ...(directS3
@@ -233,16 +268,18 @@ async function runFargateWorker(opts: {
                 region,
                 sourceKey: keys.source,
                 ...(authPath ? { authKey: keys.auth } : {}),
+                ...(opts.mode === "solver" ? { testPatchKey: keys.testPatch } : {}),
                 resultKey: keys.result,
               }
             : {}),
           mode: opts.mode,
           planB64: Buffer.from(JSON.stringify(plan), "utf-8").toString("base64url"),
-          ...(solverConfig
+          ...(opts.mode === "solver"
             ? {
-                provider: solverConfig.provider,
-                modelId: solverConfig.modelId,
-                thinkingLevel: solverConfig.thinkingLevel,
+                modelId: solverConfig?.modelId ?? "sonnet",
+                thinkingLevel: solverConfig?.thinkingLevel ?? "low",
+                agentTimeoutMinutes,
+                taskPrompt: opts.taskPrompt,
               }
             : {}),
           timeoutMinutes,
@@ -282,10 +319,10 @@ async function runFargateWorker(opts: {
       taskCluster = context.cluster;
       if (!taskArn) {
         lastFailure = failure ?? "Fargate could not place the Spot task.";
-        opts.onPhase?.("requesting sandbox");
+        reportPhase("requesting sandbox");
         continue;
       }
-      opts.onPhase?.("sandbox created");
+      reportPhase("sandbox created");
       const payload = await waitForTask(
         clients.ecs,
         context.cluster,
@@ -293,11 +330,12 @@ async function runFargateWorker(opts: {
         () => readResultObject(clients.s3, context.bucket, keys.result),
         timeoutMinutes,
         opts.cancelSignal,
-        (results, resourceUsage) => {
+        (results, resourceUsage, phase) => {
           if (opts.mode === "solver") opts.onSolverProgress?.(results);
           if (resourceUsage) opts.onResourceUsage?.(resourceUsage);
+          reportPhase(phase);
         },
-        () => opts.onPhase?.(opts.mode === "solver" ? "running agents" : "running patch prechecks"),
+        () => reportPhase(opts.mode === "solver" ? "running agents" : "running patch prechecks"),
         () => {
           stoppedByUs = true;
         },
@@ -306,7 +344,7 @@ async function runFargateWorker(opts: {
       if (payload?.resourceUsage) opts.onResourceUsage?.(payload.resourceUsage);
       if (opts.mode === "patch-precheck") {
         if (payload?.complete && !payload.error && payload.precheck) {
-          opts.onPhase?.("finalizing");
+          reportPhase("finalizing");
           return payload;
         }
         lastFailure = payload?.error ?? lastFailure;
@@ -314,7 +352,7 @@ async function runFargateWorker(opts: {
         recoveredResults = mergeSolverResults(recoveredResults, payload?.results ?? []);
         opts.onSolverProgress?.(recoveredResults);
         if (payload?.complete && !payload.error && recoveredResults.length >= solverCount) {
-          opts.onPhase?.("finalizing");
+          reportPhase("finalizing");
           return { ...payload, results: recoveredResults };
         }
         lastFailure = payload?.error ?? lastFailure;
@@ -354,10 +392,11 @@ async function runFargateWorker(opts: {
   }
 }
 
-export async function runFargateSolverGapFinder(opts: {
+export async function runFargateClaudeBenchmark(opts: {
   pi: ExtensionAPI;
   repoDir: string;
   snapshotDir: string;
+  taskPrompt: string;
   config: ChecksConfig;
   solverConfig: SolverGapConfig;
   cancelSignal: AbortSignal;
@@ -366,11 +405,11 @@ export async function runFargateSolverGapFinder(opts: {
   onSolverProgress?: (results: SolverRunResult[]) => void;
   onResourceUsage?: (usage: FargateResourceUsage) => void;
   onPhase?: (phase: string) => void;
-}): Promise<SolverRunResult[]> {
+}): Promise<{ results: SolverRunResult[]; resourceUsage?: FargateResourceUsage }> {
   const payload = await runFargateWorker({ ...opts, mode: "solver" });
-  const results = await persistResults(opts, payload.results, opts.solverConfig.saveArtifacts);
+  const results = await persistResults(opts, payload.results);
   for (const result of results) opts.onSolverCompleted?.(result);
-  return results;
+  return { results, resourceUsage: payload.resourceUsage };
 }
 
 function enforcePreSolutionPassInvariant(precheck: PatchPrecheckResult): PatchPrecheckResult {
@@ -591,9 +630,9 @@ function loadFargateConfigFromChecks(config: ChecksConfig, repoDir: string, mode
   return projectProfile ? { ...fargate, resourceProfile: projectProfile } : fargate;
 }
 
-function dirnameOfConfig(): string {
-  const slash = Math.max(CONFIG_PATH.lastIndexOf("/"), CONFIG_PATH.lastIndexOf("\\"));
-  return slash >= 0 ? CONFIG_PATH.slice(0, slash) : ".";
+function findClaudeCredentialsPath(): string {
+  const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude");
+  return join(configDir, ".credentials.json");
 }
 
 function findWorkerPath(): string {
@@ -612,56 +651,31 @@ async function createSourceArchive(
   sourceDir: string,
   archivePath: string,
   cancelSignal: AbortSignal,
-  excludeSolutionPatch: boolean,
+  excludeBenchmarkPatches: boolean,
 ): Promise<void> {
   const forceLocal = process.platform === "win32" ? "--force-local " : "";
-  const solutionExclusion = excludeSolutionPatch ? "--exclude=./solution.patch " : "";
-  const command = `tar ${forceLocal}${solutionExclusion}-czf ${bashQuote(toSlashPath(archivePath))} -C ${bashQuote(toSlashPath(sourceDir))} .`;
+  const patchExclusions = excludeBenchmarkPatches
+    ? "--exclude=./solution.patch --exclude=./test.patch --exclude=./agent_prompt.md "
+    : "";
+  const command = `tar ${forceLocal}${patchExclusions}-czf ${bashQuote(toSlashPath(archivePath))} -C ${bashQuote(toSlashPath(sourceDir))} .`;
   const shell = process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "bash";
   const result = await pi.exec(shell, ["-c", command], { cwd: sourceDir, timeout: 120_000, signal: cancelSignal });
   if (cancelSignal.aborted) throw new Error("Cancelled by user.");
   if (result.code !== 0) throw new Error(result.stderr?.trim() || "Could not create the Fargate source archive.");
 }
 
-function createWorkerAuthFile(sourcePath: string, provider: string, destinationPath: string): void {
-  let parsed: unknown;
+function prepareClaudeCredentials(sourcePath: string, destinationPath: string): void {
   try {
-    parsed = JSON.parse(readFileSync(sourcePath, "utf-8"));
+    const parsed: unknown = JSON.parse(readFileSync(sourcePath, "utf-8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      throw new Error("credentials file must contain a JSON object");
   } catch (error) {
-    throw new Error(`Could not read Pi auth file: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `Could not read Claude Code credentials: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("Could not prepare Fargate auth: auth.json must contain an object.");
-  }
-
-  const auth = parsed as Record<string, unknown>;
-  let credential = auth[provider];
-  if (provider === "commandcode") {
-    if (typeof credential === "string") credential = { type: "api_key", key: credential };
-    if (credential === undefined) credential = auth["command-code"];
-    if (typeof credential === "string") credential = { type: "api_key", key: credential };
-    if (credential === undefined && typeof auth.apiKey === "string") {
-      credential = { type: "api_key", key: auth.apiKey };
-    }
-  }
-  if (credential === undefined) {
-    writeFileSync(destinationPath, "{}\n", { encoding: "utf-8", mode: 0o600 });
-    return;
-  }
-  if (typeof credential !== "object" || credential === null || Array.isArray(credential)) {
-    throw new Error(`Invalid credential for provider "${provider}" in ${sourcePath}.`);
-  }
-  if (provider === "commandcode") {
-    const commandCodeCredential = credential as Record<string, unknown>;
-    if (commandCodeCredential.type === "api") {
-      credential = { ...commandCodeCredential, type: "api_key" };
-    }
-  }
-
-  writeFileSync(destinationPath, JSON.stringify({ [provider]: credential }, null, 2), {
-    encoding: "utf-8",
-    mode: 0o600,
-  });
+  copyFileSync(sourcePath, destinationPath);
+  chmodSync(destinationPath, 0o600);
 }
 
 async function putFile(s3: S3Client, bucket: string, key: string, path: string, contentType: string): Promise<void> {
@@ -785,7 +799,7 @@ async function registerTaskDefinition(
           command: [
             "bash",
             "-lc",
-            "python -c \"import os,urllib.request; urllib.request.urlretrieve(os.environ['SHIPD_BOOTSTRAP_URL'],'/tmp/shipd-bootstrap.json')\" && python -c \"import json,urllib.request; b=json.load(open('/tmp/shipd-bootstrap.json')); urllib.request.urlretrieve(b['workerUrl'],'/tmp/shipd-fargate-worker.mjs')\" && exec node /tmp/shipd-fargate-worker.mjs",
+            "python -c \"import os,urllib.request; urllib.request.urlretrieve(os.environ['SHIPD_BOOTSTRAP_URL'],'/tmp/shipd-bootstrap.json')\" && chmod 600 /tmp/shipd-bootstrap.json && python -c \"import json,urllib.request; b=json.load(open('/tmp/shipd-bootstrap.json')); urllib.request.urlretrieve(b['workerUrl'],'/tmp/shipd-fargate-worker.mjs')\" && exec node /tmp/shipd-fargate-worker.mjs",
           ],
           ...(config.executionRoleArn
             ? {
@@ -828,7 +842,7 @@ async function waitForTask(
   getResult: () => Promise<WorkerPayload | undefined>,
   timeoutMinutes: number,
   cancelSignal: AbortSignal,
-  onPayload: (results: SolverRunResult[], resourceUsage?: FargateResourceUsage) => void,
+  onPayload: (results: SolverRunResult[], resourceUsage?: FargateResourceUsage, phase?: string) => void,
   onRunning: () => void,
   markStopped: () => void,
 ): Promise<WorkerPayload | undefined> {
@@ -846,7 +860,7 @@ async function waitForTask(
     const payload = await getResult();
     if (payload) {
       lastPayload = payload;
-      onPayload(payload.results, payload.resourceUsage);
+      onPayload(payload.results, payload.resourceUsage, payload.phase);
       if (payload.complete) return payload;
     }
     const described = await ecs.send(new DescribeTasksCommand({ cluster, tasks: [taskArn] }));
@@ -858,7 +872,7 @@ async function waitForTask(
     if (task?.lastStatus === "STOPPED") {
       const final = await getResult();
       if (final) {
-        onPayload(final.results, final.resourceUsage);
+        onPayload(final.results, final.resourceUsage, final.phase);
         return final;
       }
       const reason = task.stoppedReason ?? task.containers?.[0]?.reason ?? "Fargate task stopped without a result.";
@@ -896,18 +910,27 @@ async function readJsonObject(s3: S3Client, bucket: string, key: string): Promis
 async function persistResults(
   opts: { repoDir: string; runId: string },
   remoteResults: WorkerSolverResult[],
-  saveArtifacts: boolean,
 ): Promise<SolverRunResult[]> {
   return remoteResults.map((remote) => {
-    const { trajectory, ...result } = remote;
-    if (saveArtifacts) {
-      const dir = join(opts.repoDir, SOLVER_ARTIFACTS_DIRNAME, opts.runId, `solver_${remote.index}`);
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "trajectory.json"), `${JSON.stringify(trajectory ?? [], null, 2)}\n`, "utf-8");
-      writeFileSync(join(dir, "solution.patch"), remote.diff, "utf-8");
-      writeFileSync(join(dir, "test_output.txt"), remote.testOutputTail, "utf-8");
-      result.artifactsDir = dir;
+    const { agentStepsGzipBase64, ...result } = remote;
+    const dir = join(opts.repoDir, SOLVER_ARTIFACTS_DIRNAME, opts.runId, `solver_${remote.index}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "solution.diff"), remote.diff, "utf-8");
+    writeFileSync(join(dir, "agent_output.txt"), remote.agentOutput ?? "", "utf-8");
+    if (agentStepsGzipBase64) {
+      try {
+        writeFileSync(join(dir, "agent_steps.jsonl"), gunzipSync(Buffer.from(agentStepsGzipBase64, "base64")));
+      } catch (error) {
+        writeFileSync(
+          join(dir, "agent_steps_error.txt"),
+          `Could not decompress the agent-step trace: ${error instanceof Error ? error.message : String(error)}`,
+          "utf-8",
+        );
+      }
     }
+    writeFileSync(join(dir, "base_test_output.txt"), remote.baseTests?.output ?? "not run", "utf-8");
+    writeFileSync(join(dir, "new_test_output.txt"), remote.newTests?.output ?? "not run", "utf-8");
+    result.artifactsDir = dir;
     return result;
   });
 }

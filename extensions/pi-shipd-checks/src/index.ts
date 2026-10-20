@@ -1,46 +1,37 @@
 /**
  * Shipd Checks Extension for pi
  *
- * Behavioral test-gap finding, prompt humanization, and post-implementation solution-quality prechecking for a task's
- * agent_prompt.md, tests, and repository source,
- * with an optional solver-based gap finder and an agent-callable Shipd submission tool.
+ * Behavioral test-gap finding, prompt humanization, and post-implementation solution-quality prechecking, plus a
+ * Claude CLI benchmark runner for tasks described by `agent_prompt.md`.
  *
- * Flow:
- *   1. Snapshot the current git HEAD (no working-dir mutation) into a temp dir
- *      via `git archive HEAD | tar -x` (see git.ts).
- *   2. Copy agent_prompt.md, solution.patch, test.patch from the project root
- *      into that temp dir.
- *   3. (/checks --solver-gap-finder) Run TDD solver agents and compare their
- *      passing implementations to the reference behavior.
- *   4. (gap-finder / solution-precheck) Run one read-only agent for behavioral
- *      gap finding or solution-quality prechecking.
- *   5. Post a one-line chat message and merge solver results into
- *      shipd_report.json in the project root.
+ * Benchmark flow:
+ *   1. Snapshot git HEAD without touching the working tree; copy only agent_prompt.md as task input.
+ *   2. Run independent Claude CLI solvers in Fargate, then execute base/new tests and save their logs.
+ *   3. Run a read-only local Pi reviewer over the prompt, patched tests, all diffs, and all results.
+ *   4. Post the assessment and merge benchmark results into shipd_report.json.
  *
  * Commands:
- *   /analyze:on           enable the agent-callable test-analysis tool for this project
- *   /analyze:off          disable the agent-callable test-analysis tool for this project
- *   /shipd:auth           open a browser for first-time Shipd sign-in
- *   /shipd:link <url>     save the Shipd job link for this chat session
- *   /checks               open a menu for config or solver-gap-finder
- *   /checks --config      set reviewer and analysis models
- *   /checks --solver-gap-finder  run several TDD solver agents, then compare their solutions to find gaps
+ *   /analyze:on             enable agent-callable analysis tools for this project
+ *   /analyze:off            disable agent-callable analysis tools for this project
+ *   /shipd:auth             open a browser for first-time Shipd sign-in
+ *   /shipd:link <url>       save the Shipd job link for this chat session
+ *   /checks                 open a menu for config or solve
+ *   /checks --config        configure local reviewer/analysis models and Claude solver settings
+ *   /checks solve           run Claude solvers, base/new tests, and a fairness review
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.
  *
  * File layout:
  *   index.ts     extension entry point (this file) — renderer, shortcut, command registration
- *   command.ts   /checks command: arg parsing, --config flow, run orchestration
- *   agents.ts     spawns/races the gap-finder, solution-precheck, reviewer, and solver agent sessions
- *   prompts.ts    all prompt text sent to those agents
- *   tools.ts      custom tools agents call to submit structured results
- *   rubric.ts     embedded guidelines/fairness rubric text + section loaders
- *   roles.ts      the 3 reviewer roles (description/tests/solution) metadata
- *   report.ts     shipd_report.json load/merge/summary logic
- *   config.ts     ~/.pi/agent/checks-config.json + settings.json helpers
- *   git.ts        clean git HEAD snapshot into a scratch directory
- *   progress.ts   progress-bar widget rendering
- *   state.ts      shared "run in progress" / cancel state
- *   types.ts      shared TypeScript types
+ *   command.ts   /checks command: argument parsing, settings, and run orchestration
+ *   agents.ts    local Pi gap-finder, solution-precheck, and benchmark-review sessions
+ *   prompts.ts   task and reviewer prompt text
+ *   fargate-runner.ts/worker.ts remote Claude solver/test execution and report transport
+ *   report.ts    shipd_report.json load/merge/summary logic
+ *   config.ts    ~/.pi/agent/checks-config.json + settings.json helpers
+ *   git.ts       clean git HEAD snapshot into a scratch directory
+ *   progress.ts  progress-bar widget rendering
+ *   state.ts     shared "run in progress" / cancel state
+ *   types.ts     shared TypeScript types
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -82,9 +73,10 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
   pi.registerMessageRenderer<{
     gapsCount?: number;
     showGaps?: boolean;
-    showSolverGaps?: boolean;
+    showClaudeBenchmark?: boolean;
     solverDetails?: SolverSummaryDetail[];
-    solverGapsCount?: number;
+    solverReviewStatus?: "ok" | "timedOut" | "error";
+    solverReviewText?: string;
   }>("shipd_checks_report", (message, _options, theme) => {
     const details = message.details ?? {};
     const container = new Container();
@@ -105,27 +97,31 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
       );
     }
 
-    if (details.showSolverGaps) {
+    if (details.showClaudeBenchmark) {
       const solvers = details.solverDetails ?? [];
       const passCount = solvers.filter((s) => s.passed).length;
-      const gapsCount = details.solverGapsCount ?? 0;
-
       container.addChild(new Spacer(1));
-      addLine(theme.bold(theme.fg("accent", "Solver gap finder")));
+      addLine(theme.bold(theme.fg("accent", "Claude agent run")));
       for (const s of solvers) {
         const statusIcon = s.passed ? theme.fg("success", "✓") : theme.fg("error", "✗");
-        const statusLabel = s.passed ? "passed" : s.status === "ok" ? "failed tests" : s.status;
-        addLine(`  ${statusIcon} Solver ${s.index}: ${statusLabel} (${formatDuration(s.durationMs)})`);
+        const statusLabel = s.passed ? "both suites passed" : s.status === "ok" ? "test failure" : s.status;
+        const suiteStatus =
+          `base ${s.basePassed === undefined ? "n/a" : s.basePassed ? "PASS" : "FAIL"}, ` +
+          `new ${s.newPassed === undefined ? "n/a" : s.newPassed ? "PASS" : "FAIL"}`;
+        addLine(`  ${statusIcon} Agent ${s.index}: ${statusLabel}; ${suiteStatus} (${formatDuration(s.durationMs)})`);
       }
       const passSummary =
         passCount === solvers.length && solvers.length > 0
-          ? theme.fg("success", `${passCount}/${solvers.length} solvers passed`)
-          : theme.fg("warning", `${passCount}/${solvers.length} solvers passed`);
-      const gapsSummary =
-        gapsCount > 0
-          ? theme.fg("warning", `${gapsCount} behavioral gap(s) found`)
-          : theme.fg("success", "no behavioral gaps found");
-      addLine(`  ${passSummary}, ${gapsSummary}`);
+          ? theme.fg("success", `${passCount}/${solvers.length} agents passed both suites`)
+          : theme.fg("warning", `${passCount}/${solvers.length} agents passed both suites`);
+      const reviewStatus = details.solverReviewStatus ?? "not completed";
+      addLine(`  ${passSummary}; reviewer ${reviewStatus}`);
+      if (details.solverReviewText) {
+        const reviewText = details.solverReviewText.slice(0, 1200).trim();
+        addLine(
+          `  Reviewer assessment: ${reviewText}${details.solverReviewText.length > 1200 ? "… (full report in shipd_report.json)" : ""}`,
+        );
+      }
     }
 
     if (!wroteSection) {

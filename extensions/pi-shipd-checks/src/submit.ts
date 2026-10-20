@@ -32,6 +32,8 @@ const RECHECK_INTERVAL_MS = 90_000;
 const PROMPT_QUALITY_INITIAL_WAIT_MS = 120_000;
 const PROMPT_QUALITY_RECHECK_INTERVAL_MS = 30_000;
 const UI_TIMEOUT_MS = 5_000;
+const CHALLENGE_FORM_TIMEOUT_MS = 30_000;
+const CHALLENGE_FORM_POLL_INTERVAL_MS = 200;
 const QUALITY_UI_RETRY_ATTEMPTS = 3;
 const QUALITY_UI_RETRY_DELAY_MS = 250;
 const QUALITY_RUN_START_TIMEOUT_MS = 2_000;
@@ -221,12 +223,6 @@ function qualityRow(page: Page, quality: QualityName): Locator {
   return qualityLabel(page, quality).locator("..");
 }
 
-function qualityPopover(page: Page, quality: QualityName): Locator {
-  // The popover is rendered in a portal, so scope it by its quality heading
-  // instead of globally selecting whichever row was hovered most recently.
-  return page.locator("div.fixed").filter({ hasText: quality }).last();
-}
-
 function isBusy(rowText: string): boolean {
   return /(?:starting|queued|pending|running|processing|reviewing|finalizing|building|evaluating|checking|\d+%)/i.test(
     rowText,
@@ -345,12 +341,29 @@ async function fillCodeEditor(page: Page, editor: Locator, value: string): Promi
 async function uploadChallengeFields(page: Page, files: SubmissionFiles, signal?: AbortSignal): Promise<void> {
   checkCancelled(signal);
   const description = page.locator("#problem-description");
-  const testEditor = page.locator('#problem-test-patch [contenteditable="true"][role="textbox"]');
-  const solutionEditor = page.locator('#problem-solution-patch [contenteditable="true"][role="textbox"]');
-  for (const selector of [description, testEditor, solutionEditor]) {
-    if ((await selector.count()) !== 1) throw new Error("Shipd challenge form selectors were not found exactly once.");
+  const testEditor = page.locator('#problem-test-patch [contenteditable="true"], #problem-test-patch textarea');
+  const solutionEditor = page.locator(
+    '#problem-solution-patch [contenteditable="true"], #problem-solution-patch textarea',
+  );
+  const fields = [description, testEditor, solutionEditor];
+  const fieldNames = ["Task Prompt", "Test Patch", "Solution Patch"];
+  const deadline = Date.now() + CHALLENGE_FORM_TIMEOUT_MS;
+  let counts = await Promise.all(fields.map((field) => field.count()));
+  while (
+    counts.some((count) => count !== 1) ||
+    !(await Promise.all(fields.map((field) => field.isVisible().catch(() => false)))).every(Boolean)
+  ) {
+    checkCancelled(signal);
+    if (Date.now() >= deadline) {
+      const diagnostics = counts.map((count, index) => `${fieldNames[index]}: ${count}`).join(", ");
+      throw new Error(`Shipd challenge form fields did not become visible exactly once (${diagnostics}).`);
+    }
+    await sleep(CHALLENGE_FORM_POLL_INTERVAL_MS, signal);
+    counts = await Promise.all(fields.map((field) => field.count()));
   }
 
+  // CodeMirror editors mount asynchronously after the challenge page hydrates.
+  // Wait for the labeled fields instead of assuming they exist after navigation's fixed delay.
   // Populate the entire Shipd draft before reading status or starting any quality check.
   await description.fill(files.taskPrompt);
   await fillCodeEditor(page, testEditor, files.testPatch);
@@ -522,12 +535,20 @@ async function hasQualityReport(page: Page, quality: QualityName): Promise<boole
 
 async function getQualityExpander(page: Page, quality: QualityName): Promise<Locator> {
   await qualityRow(page, quality).hover();
-  const popover = qualityPopover(page, quality);
-  await popover.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
-  const expanders = popover.locator('button[title="Expand to full view"]');
+  // The report preview is portal-rendered; locate its accessible control rather than
+  // depending on the preview's Tailwind positioning class (for example, `div.fixed`).
+  const expanders = page.locator(
+    'button[title="Expand to full view"]:visible, button[aria-label="Expand to full view"]:visible',
+  );
+  await expanders.first().waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
   const count = await expanders.count();
-  if (count !== 1) throw new Error(`${quality}: expected one quality expander, found ${count}`);
-  return expanders.first();
+  if (count !== 1) throw new Error(`${quality}: expected one visible quality expander, found ${count}`);
+  const expander = expanders.first();
+  const previewText = clean(await expander.locator("xpath=..").innerText());
+  if (!previewText.includes(quality)) {
+    throw new Error(`${quality}: the visible report preview did not match the hovered row.`);
+  }
+  return expander;
 }
 
 async function extractQualityReport(page: Page, quality: QualityName, signal?: AbortSignal): Promise<ExtractedReport> {
