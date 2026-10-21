@@ -1,15 +1,6 @@
 import { randomUUID } from "node:crypto";
-import {
-  chmodSync,
-  copyFileSync,
-  createReadStream,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { chmodSync, createReadStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
@@ -144,8 +135,10 @@ async function runFargateWorker(opts: {
   const archivePath = join(tmpdir(), `.shipd-fargate-source-${randomUUID()}.tar.gz`);
   const workerPath = findWorkerPath();
   const solverConfig = opts.solverConfig;
-  const authPath = opts.mode === "solver" ? findClaudeCredentialsPath() : undefined;
-  const workerAuthPath = authPath ? join(tmpdir(), `.shipd-fargate-claude-${randomUUID()}.json`) : undefined;
+  const claudeTokenPath = opts.mode === "solver" ? findClaudeOAuthTokenPath(solverConfig) : undefined;
+  const workerClaudeTokenPath = claudeTokenPath
+    ? join(tmpdir(), `.shipd-fargate-claude-token-${randomUUID()}.txt`)
+    : undefined;
 
   let taskArn: string | undefined;
   let taskCluster: string | undefined;
@@ -166,7 +159,7 @@ async function runFargateWorker(opts: {
     source: `runs/${opts.runId}/source.tar.gz`,
     testPatch: `runs/${opts.runId}/test.patch`,
     worker: `runs/${opts.runId}/${WORKER_S3_NAME}`,
-    auth: `runs/${opts.runId}/claude-credentials.json`,
+    claudeToken: `runs/${opts.runId}/claude-oauth-token.txt`,
     bootstrap: `runs/${opts.runId}/bootstrap.json`,
     result: `runs/${opts.runId}/result.json`,
   };
@@ -176,10 +169,12 @@ async function runFargateWorker(opts: {
     const testPatchPath = join(opts.repoDir, "test.patch");
     if (opts.mode === "solver" && !existsSync(testPatchPath))
       throw new Error("Missing test.patch; it is applied only after each solver finishes.");
-    if (authPath && !existsSync(authPath))
+    if (!claudeTokenPath && opts.mode === "solver")
       throw new Error(
-        `Missing Claude Code login credentials: ${authPath}. Sign in to Claude Code on this machine first.`,
+        "Missing Claude OAuth token file path. Set solverGap.claudeOAuthTokenFile in checks-config.json or CLAUDE_CODE_OAUTH_TOKEN_FILE.",
       );
+    if (claudeTokenPath && !existsSync(claudeTokenPath))
+      throw new Error(`Claude OAuth token file not found: ${claudeTokenPath}. Check the configured path.`);
     const context = await resolveAwsContext(clients, fargateConfig, region);
     cleanupBucket = context.bucket;
     taskCluster = context.cluster;
@@ -187,9 +182,9 @@ async function runFargateWorker(opts: {
     await putFile(clients.s3, context.bucket, keys.source, archivePath, "application/gzip");
     if (opts.mode === "solver") await putFile(clients.s3, context.bucket, keys.testPatch, testPatchPath, "text/plain");
     await putFile(clients.s3, context.bucket, keys.worker, workerPath, "text/javascript");
-    if (authPath && workerAuthPath) {
-      prepareClaudeCredentials(authPath, workerAuthPath);
-      await putFile(clients.s3, context.bucket, keys.auth, workerAuthPath, "application/json");
+    if (claudeTokenPath && workerClaudeTokenPath) {
+      prepareClaudeOAuthToken(claudeTokenPath, workerClaudeTokenPath);
+      await putFile(clients.s3, context.bucket, keys.claudeToken, workerClaudeTokenPath, "text/plain");
     }
 
     bootstrapPath = join(tmpdir(), `.shipd-fargate-bootstrap-${randomUUID()}.json`);
@@ -229,10 +224,10 @@ async function runFargateWorker(opts: {
         : await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: context.bucket, Key: keys.source }), {
             expiresIn: URL_EXPIRY_SECONDS,
           });
-      const authUrl =
-        directS3 || !authPath
+      const claudeTokenUrl =
+        directS3 || !claudeTokenPath
           ? undefined
-          : await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: context.bucket, Key: keys.auth }), {
+          : await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: context.bucket, Key: keys.claudeToken }), {
               expiresIn: URL_EXPIRY_SECONDS,
             });
       const testPatchUrl =
@@ -258,7 +253,7 @@ async function runFargateWorker(opts: {
         `${JSON.stringify({
           workerUrl,
           sourceUrl,
-          authUrl,
+          claudeTokenUrl,
           testPatchUrl,
           resultPutUrl,
           resultGetUrl,
@@ -267,7 +262,7 @@ async function runFargateWorker(opts: {
                 bucket: context.bucket,
                 region,
                 sourceKey: keys.source,
-                ...(authPath ? { authKey: keys.auth } : {}),
+                ...(claudeTokenPath ? { claudeTokenKey: keys.claudeToken } : {}),
                 ...(opts.mode === "solver" ? { testPatchKey: keys.testPatch } : {}),
                 resultKey: keys.result,
               }
@@ -385,7 +380,7 @@ async function runFargateWorker(opts: {
     try {
       rmSync(archivePath, { force: true });
       if (bootstrapPath) rmSync(bootstrapPath, { force: true });
-      if (workerAuthPath) rmSync(workerAuthPath, { force: true });
+      if (workerClaudeTokenPath) rmSync(workerClaudeTokenPath, { force: true });
     } catch {
       // Best effort cleanup.
     }
@@ -630,9 +625,8 @@ function loadFargateConfigFromChecks(config: ChecksConfig, repoDir: string, mode
   return projectProfile ? { ...fargate, resourceProfile: projectProfile } : fargate;
 }
 
-function findClaudeCredentialsPath(): string {
-  const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude");
-  return join(configDir, ".credentials.json");
+function findClaudeOAuthTokenPath(solverConfig?: SolverGapConfig): string | undefined {
+  return process.env.CLAUDE_CODE_OAUTH_TOKEN_FILE?.trim() || solverConfig?.claudeOAuthTokenFile?.trim() || undefined;
 }
 
 function findWorkerPath(): string {
@@ -664,17 +658,19 @@ async function createSourceArchive(
   if (result.code !== 0) throw new Error(result.stderr?.trim() || "Could not create the Fargate source archive.");
 }
 
-function prepareClaudeCredentials(sourcePath: string, destinationPath: string): void {
+function prepareClaudeOAuthToken(sourcePath: string, destinationPath: string): void {
+  let token: string;
   try {
-    const parsed: unknown = JSON.parse(readFileSync(sourcePath, "utf-8"));
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
-      throw new Error("credentials file must contain a JSON object");
+    token = readFileSync(sourcePath, "utf-8").trim();
   } catch (error) {
     throw new Error(
-      `Could not read Claude Code credentials: ${error instanceof Error ? error.message : String(error)}`,
+      `Could not read the configured Claude OAuth token file: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  copyFileSync(sourcePath, destinationPath);
+  if (!token) throw new Error(`The configured Claude OAuth token file is empty: ${sourcePath}.`);
+  if (/\s/.test(token))
+    throw new Error(`The configured Claude OAuth token file must contain only the token: ${sourcePath}.`);
+  writeFileSync(destinationPath, token, { encoding: "utf-8", mode: 0o600 });
   chmodSync(destinationPath, 0o600);
 }
 

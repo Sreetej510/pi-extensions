@@ -101,6 +101,8 @@ export interface SolverGapConfig {
   timeoutMinutes: number;
   /** Number of parallel solver agents to run. */
   solverCount: number;
+  /** Optional local file containing a Claude setup-token for Fargate solver runs. */
+  claudeOAuthTokenFile?: string;
 }
 
 export interface PromptHumanizerConfig {

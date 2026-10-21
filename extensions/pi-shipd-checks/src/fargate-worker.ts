@@ -1,15 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import {
-  chmodSync,
-  chownSync,
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, posix as posixPath } from "node:path";
 import { gzipSync } from "node:zlib";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
@@ -87,7 +77,7 @@ function loadBootstrap(): WorkerMode {
 
   const directKeys =
     mode === "solver"
-      ? ["bucket", "region", "sourceKey", "authKey", "testPatchKey", "resultKey"]
+      ? ["bucket", "region", "sourceKey", "claudeTokenKey", "testPatchKey", "resultKey"]
       : ["bucket", "region", "sourceKey", "resultKey"];
   const directS3 = directKeys.every((key) => typeof bootstrap[key] === "string" && bootstrap[key]);
   if (mode === "solver") {
@@ -118,7 +108,7 @@ function loadBootstrap(): WorkerMode {
       ["bucket", "SHIPD_S3_BUCKET"],
       ["region", "SHIPD_S3_REGION"],
       ["sourceKey", "SHIPD_S3_SOURCE_KEY"],
-      ...(mode === "solver" ? [["authKey", "SHIPD_S3_AUTH_KEY"]] : []),
+      ...(mode === "solver" ? [["claudeTokenKey", "SHIPD_S3_CLAUDE_TOKEN_KEY"]] : []),
       ...(mode === "solver" ? [["testPatchKey", "SHIPD_S3_TEST_PATCH_KEY"]] : []),
       ["resultKey", "SHIPD_S3_RESULT_KEY"],
     ] as const;
@@ -130,7 +120,7 @@ function loadBootstrap(): WorkerMode {
   } else {
     const transportFields = [
       ["sourceUrl", "SHIPD_SOURCE_URL"],
-      ...(mode === "solver" ? [["authUrl", "SHIPD_AUTH_URL"]] : []),
+      ...(mode === "solver" ? [["claudeTokenUrl", "SHIPD_CLAUDE_TOKEN_URL"]] : []),
       ["resultPutUrl", "SHIPD_RESULT_PUT_URL"],
       ["resultGetUrl", "SHIPD_RESULT_GET_URL"],
     ] as const;
@@ -199,7 +189,26 @@ async function downloadObject(bucket: string, key: string, destination: string):
   const response = await workerS3().send(new GetObjectCommand({ Bucket: bucket, Key: key }));
   const body = await response.Body?.transformToByteArray();
   if (!body) throw new Error(`S3 object was empty: s3://${bucket}/${key}`);
-  writeFileSync(destination, Buffer.from(body));
+  writeFileSync(destination, Buffer.from(body), { mode: 0o600 });
+}
+
+async function downloadClaudeOAuthToken(): Promise<string> {
+  const tokenPath = "/tmp/shipd-claude-oauth-token";
+  try {
+    if (directS3Enabled()) {
+      await downloadObject(requiredEnv("SHIPD_S3_BUCKET"), requiredEnv("SHIPD_S3_CLAUDE_TOKEN_KEY"), tokenPath);
+    } else {
+      const response = await fetch(requiredEnv("SHIPD_CLAUDE_TOKEN_URL"));
+      if (!response.ok) throw new Error(`Claude OAuth token download failed (${response.status}).`);
+      writeFileSync(tokenPath, Buffer.from(await response.arrayBuffer()), { mode: 0o600 });
+    }
+    chmodSync(tokenPath, 0o600);
+    const token = readFileSync(tokenPath, "utf-8").trim();
+    if (!token || /\s/.test(token)) throw new Error("The Claude OAuth token file is empty or invalid.");
+    return token;
+  } finally {
+    rmSync(tokenPath, { force: true });
+  }
 }
 
 async function loadTestPatch(): Promise<string> {
@@ -880,6 +889,33 @@ function isTestScriptChmod(command: string): boolean {
   return /^chmod\s+\S+\s+(?:\S*\/)?test\.sh$/.test(normalized);
 }
 
+let setprivPath: string | undefined;
+
+async function ensureSetpriv(plan: DockerPlan, env: NodeJS.ProcessEnv): Promise<string> {
+  const existing = await runCommand("command -v setpriv", plan.workdir, env, 30_000);
+  if (existing.code === 0 && existing.stdout.trim()) return existing.stdout.trim();
+  const install = [
+    "set -eu",
+    "if command -v apt-get >/dev/null 2>&1; then",
+    "  apt-get update -qq",
+    "  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq util-linux",
+    "elif command -v apk >/dev/null 2>&1; then",
+    "  apk add --no-cache util-linux",
+    "elif command -v dnf >/dev/null 2>&1; then",
+    "  dnf install -y util-linux",
+    "elif command -v yum >/dev/null 2>&1; then",
+    "  yum install -y util-linux",
+    "elif command -v zypper >/dev/null 2>&1; then",
+    "  zypper --non-interactive install util-linux",
+    "else",
+    '  echo "Claude solver isolation requires setpriv; install util-linux in the project Dockerfile." >&2',
+    "  exit 1",
+    "fi",
+  ].join("\n");
+  await requiredCommand(install, plan.workdir, env, 10 * 60 * 1000);
+  return (await requiredCommand("command -v setpriv", plan.workdir, env, 30_000)).stdout.trim();
+}
+
 async function initializeSource(plan: DockerPlan, env: NodeJS.ProcessEnv, installClaudeCli: boolean): Promise<void> {
   const archive = "/tmp/shipd-source.tar.gz";
   if (directS3Enabled()) {
@@ -910,6 +946,7 @@ async function initializeSource(plan: DockerPlan, env: NodeJS.ProcessEnv, instal
     await requiredCommand(command, plan.workdir, env, 15 * 60 * 1000);
   }
   if (installClaudeCli) {
+    setprivPath = await ensureSetpriv(plan, env);
     await requiredCommand("npm install --global @anthropic-ai/claude-code", plan.workdir, env, 10 * 60 * 1000);
     await requiredCommand("claude --version", plan.workdir, env, 30_000);
   }
@@ -978,18 +1015,20 @@ function findUnprivilegedIdentity(index: number): { uid: number; gid: number } {
 function claudeEnvironment(
   name: string,
   projectDir: string,
-  identity?: { uid: number; gid: number },
+  oauthToken: string,
+  identity: { uid: number; gid: number },
 ): NodeJS.ProcessEnv {
-  const sourceCredential = join(CLAUDE_CONFIG_DIR, ".credentials.json");
   const configDir = join("/tmp", `shipd-claude-${name}`);
   const homeDir = join("/tmp", `shipd-home-${name}`);
+  const shellDir = join("/tmp", `shipd-shell-${name}`);
+  const shellPath = join(shellDir, "bash");
+  if (!setprivPath) throw new Error("The solver subprocess identity wrapper is unavailable.");
   rmSync(configDir, { recursive: true, force: true });
   rmSync(homeDir, { recursive: true, force: true });
+  rmSync(shellDir, { recursive: true, force: true });
   mkdirSync(configDir, { recursive: true, mode: 0o700 });
   mkdirSync(homeDir, { recursive: true, mode: 0o700 });
-  const credentialPath = join(configDir, ".credentials.json");
-  copyFileSync(sourceCredential, credentialPath);
-  chmodSync(credentialPath, 0o600);
+  mkdirSync(shellDir, { recursive: true, mode: 0o755 });
   writeFileSync(
     join(homeDir, ".claude.json"),
     JSON.stringify({
@@ -999,18 +1038,28 @@ function claudeEnvironment(
     }),
     { encoding: "utf-8", mode: 0o600 },
   );
-  if (identity) {
-    const ownership = `${identity.uid}:${identity.gid}`;
-    for (const path of [configDir, homeDir]) {
-      const status = spawnSync("chown", ["-R", ownership, path], { stdio: "ignore" });
-      if (status.status !== 0) throw new Error(`Could not grant Claude access to its isolated ${path} config.`);
-    }
+  const ownership = `${identity.uid}:${identity.gid}`;
+  for (const path of [configDir, homeDir]) {
+    const status = spawnSync("chown", ["-R", ownership, path], { stdio: "ignore" });
+    if (status.status !== 0) throw new Error(`Could not grant Claude access to its isolated ${path} config.`);
   }
+  const shellWrapper = [
+    "#!/bin/bash",
+    'if [[ "$1" == "--version" ]]; then exec /bin/bash "$@"; fi',
+    `exec ${quote(setprivPath)} --reuid=${identity.uid} --regid=${identity.gid} --clear-groups -- /usr/bin/env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN_FILE -u CLAUDE_CONFIG_DIR -u CLAUDE_CODE_SUBPROCESS_ENV_SCRUB /bin/bash "$@"`,
+  ].join("\n");
+  writeFileSync(shellPath, `${shellWrapper}\n`, { encoding: "utf-8", mode: 0o755 });
+  chmodSync(shellPath, 0o755);
   const agentEnv = restrictedWorkspaceEnv(process.env);
   return {
     ...agentEnv,
     HOME: homeDir,
     CLAUDE_CONFIG_DIR: configDir,
+    CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
+    // Fargate blocks the user namespaces that Claude's bwrap-based scrub needs.
+    // The trusted shell wrapper instead strips credentials and drops to the solver UID.
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0",
+    CLAUDE_CODE_SHELL: shellPath,
     CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1",
     CLAUDE_CODE_DISABLE_NON_ESSENTIAL_TRAFFIC: "1",
   };
@@ -1021,14 +1070,14 @@ function restrictedWorkspaceEnv(sourceEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   for (const name of [
     "SHIPD_BOOTSTRAP_URL",
     "SHIPD_SOURCE_URL",
-    "SHIPD_AUTH_URL",
+    "SHIPD_CLAUDE_TOKEN_URL",
     "SHIPD_TEST_PATCH_URL",
     "SHIPD_RESULT_PUT_URL",
     "SHIPD_RESULT_GET_URL",
     "SHIPD_S3_BUCKET",
     "SHIPD_S3_REGION",
     "SHIPD_S3_SOURCE_KEY",
-    "SHIPD_S3_AUTH_KEY",
+    "SHIPD_S3_CLAUDE_TOKEN_KEY",
     "SHIPD_S3_TEST_PATCH_KEY",
     "SHIPD_S3_RESULT_KEY",
     "SHIPD_PLAN_B64",
@@ -1040,6 +1089,9 @@ function restrictedWorkspaceEnv(sourceEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv
     "SHIPD_MODE",
     "SHIPD_TIMEOUT_MINUTES",
     "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_SHELL",
+    "CLAUDE_CODE_SHELL_PREFIX",
+    "CLAUDE_CODE_OAUTH_TOKEN_FILE",
     "BASH_ENV",
     "ENV",
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -1249,9 +1301,9 @@ function claudeInvocation(tools: string, model: string, thinkingLevel: string): 
     "--output-format",
     "stream-json",
     "--verbose",
-    "--permission-mode",
-    "bypassPermissions",
     "--no-session-persistence",
+    "--allowedTools",
+    tools,
     "--tools",
     tools,
   ]
@@ -1371,29 +1423,49 @@ async function restoreChangedTests(solverDir: string, baselineCommit: string, en
   }
 }
 
+async function verifySolverShellIsolation(
+  solverDir: string,
+  env: NodeJS.ProcessEnv,
+  identity: { uid: number; gid: number },
+): Promise<void> {
+  const shellPath = env.CLAUDE_CODE_SHELL;
+  if (!shellPath) throw new Error("Claude solver shell isolation is not configured.");
+  const checks = [
+    `test "$(id -u)" = ${identity.uid}`,
+    `test -z "\${CLAUDE_CODE_OAUTH_TOKEN+x}"`,
+    `test -z "\${CLAUDE_CODE_OAUTH_TOKEN_FILE+x}"`,
+    `test -z "\${CLAUDE_CONFIG_DIR+x}"`,
+  ].join(" && ");
+  const result = await runCommand(`${quote(shellPath)} -c ${quote(checks)}`, solverDir, env, 30_000);
+  if (result.code !== 0)
+    throw new Error("Claude solver shell failed its unprivileged-UID and credential-isolation preflight.");
+}
+
 async function runSolver(
   index: number,
   workspace: Awaited<ReturnType<typeof prepareSolver>>,
   env: NodeJS.ProcessEnv,
   taskPromptText: string,
+  claudeOAuthToken: string,
 ): Promise<WorkerSolverResult> {
   const started = Date.now();
   const timeoutMinutes = Number.parseInt(requiredEnv("SHIPD_AGENT_TIMEOUT_MINUTES"), 10);
   const model = requiredEnv("SHIPD_CLAUDE_MODEL");
   const thinkingLevel = requiredEnv("SHIPD_CLAUDE_EFFORT");
-  const solverEnv = claudeEnvironment(`solver-${index}`, workspace.solverDir, workspace.identity);
+  const solverEnv = claudeEnvironment(`solver-${index}`, workspace.solverDir, claudeOAuthToken, workspace.identity);
   let agentOutput = "";
   let agentStepsGzipBase64: string | undefined;
   let tokenUsage: TokenUsage | undefined;
   let status: SolverRunResult["status"] = "error";
   let error: string | undefined;
   try {
+    await verifySolverShellIsolation(workspace.solverDir, solverEnv, workspace.identity);
     const agent = await runCommand(
       claudeInvocation("Bash", model, thinkingLevel),
       workspace.solverDir,
       solverEnv,
       timeoutMinutes * 60 * 1000,
-      workspace.identity,
+      undefined,
       taskPromptText,
     );
     if (agent.stdout) agentStepsGzipBase64 = gzipSync(sanitizeClaudeStepTrace(agent.stdout)).toString("base64");
@@ -1409,6 +1481,7 @@ async function runSolver(
   } finally {
     rmSync(join("/tmp", `shipd-claude-solver-${index}`), { recursive: true, force: true });
     rmSync(join("/tmp", `shipd-home-solver-${index}`), { recursive: true, force: true });
+    rmSync(join("/tmp", `shipd-shell-solver-${index}`), { recursive: true, force: true });
   }
 
   const diffResult = await runCommand(
@@ -1493,13 +1566,6 @@ async function run(): Promise<void> {
   const env = resolvedEnvironment(plan);
   if (mode === "solver") {
     mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 });
-    const credentialPath = join(CLAUDE_CONFIG_DIR, ".credentials.json");
-    if (directS3Enabled()) {
-      await downloadObject(requiredEnv("SHIPD_S3_BUCKET"), requiredEnv("SHIPD_S3_AUTH_KEY"), credentialPath);
-    } else {
-      await download(requiredEnv("SHIPD_AUTH_URL"), credentialPath);
-    }
-    chmodSync(credentialPath, 0o600);
     env.CLAUDE_CONFIG_DIR = CLAUDE_CONFIG_DIR;
   }
   mkdirSync("/work", { recursive: true });
@@ -1520,6 +1586,7 @@ async function run(): Promise<void> {
   );
   const workspaces: Array<Awaited<ReturnType<typeof prepareSolver>>> = [];
   for (const index of pendingIndexes) workspaces.push(await prepareSolver(index, plan, env));
+  const claudeOAuthToken = await downloadClaudeOAuthToken();
   let uploadChain = Promise.resolve();
   const record = (result: WorkerSolverResult): Promise<void> => {
     completed.set(result.index, result);
@@ -1537,7 +1604,7 @@ async function run(): Promise<void> {
     workspaces.map(async (workspace, index) => {
       const solverIndex = pendingIndexes[index];
       if (solverIndex === undefined) throw new Error("Fargate solver workspace index mismatch.");
-      const result = await runSolver(solverIndex, workspace, env, taskPrompt);
+      const result = await runSolver(solverIndex, workspace, env, taskPrompt, claudeOAuthToken);
       await record(result);
     }),
   );

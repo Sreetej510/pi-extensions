@@ -187,12 +187,17 @@ export function loadSolverGapConfig(): SolverGapConfig {
     ? Math.min(SOLVER_GAP_SOLVER_COUNT_MAX, Math.max(SOLVER_GAP_SOLVER_COUNT_MIN, solverGap.solverCount as number))
     : SOLVER_GAP_DEFAULT_SOLVER_COUNT;
   const thinkingLevels: ClaudeThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
+  const claudeOAuthTokenFile =
+    typeof solverGap.claudeOAuthTokenFile === "string" && solverGap.claudeOAuthTokenFile.trim()
+      ? solverGap.claudeOAuthTokenFile.trim()
+      : undefined;
   return {
     modelId: ["haiku", "sonnet", "opus"].includes(solverGap.modelId ?? "") ? (solverGap.modelId as string) : "sonnet",
     thinkingLevel:
       solverGap.thinkingLevel && thinkingLevels.includes(solverGap.thinkingLevel) ? solverGap.thinkingLevel : "low",
     timeoutMinutes,
     solverCount,
+    ...(claudeOAuthTokenFile ? { claudeOAuthTokenFile } : {}),
   };
 }
 
