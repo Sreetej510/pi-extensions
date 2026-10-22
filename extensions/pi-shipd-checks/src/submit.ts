@@ -37,6 +37,7 @@ const CHALLENGE_FORM_POLL_INTERVAL_MS = 200;
 const QUALITY_UI_RETRY_ATTEMPTS = 3;
 const QUALITY_UI_RETRY_DELAY_MS = 250;
 const QUALITY_RUN_START_TIMEOUT_MS = 2_000;
+const QUALITY_ACTION_READY_TIMEOUT_MS = 30_000;
 const QUALITY_NAMES = ["Task Prompt Quality", "Test Quality", "Solution Quality"] as const;
 const PROMPT_PRESERVATION_NOTE =
   "Keep agent_prompt.md unchanged if possible—small edits can make it fail. Prefer aligning tests and solution to the prompt; only if the prompt is demonstrably wrong, make the smallest correction while preserving its human style.";
@@ -436,7 +437,36 @@ async function clickAndConfirm(page: Page, quality: QualityName, signal?: AbortS
       const action = rerunCount === 1 ? rerunButton : runButton;
       const actionCount = rerunCount === 1 ? rerunCount : runCount;
       if (actionCount !== 1) throw new Error(`${quality}: expected one Run button, found ${actionCount}`);
-      if (!(await action.isEnabled())) throw new Error(`${quality}: Run button is disabled.`);
+      // Shipd keeps the Run/Re-run title while disabling the button during job
+      // startup. Give its status update time to arrive instead of failing (or
+      // clicking again) after three near-instant disabled-button retries.
+      const actionReadyDeadline = Date.now() + QUALITY_ACTION_READY_TIMEOUT_MS;
+      while (!(await action.isEnabled())) {
+        checkCancelled(signal);
+        const startedRowText = await qualityRunStartedRowText(page, quality, staleBefore, runButtonBefore);
+        if (startedRowText !== undefined) {
+          return {
+            quality: displayQualityName(quality),
+            status: "already-running",
+            rowTextAfterConfirm: startedRowText,
+          };
+        }
+        if (Date.now() >= actionReadyDeadline) {
+          const title = await action.getAttribute("title");
+          throw new Error(`${quality}: Run button remained disabled for 30 seconds${title ? ` (${title})` : ""}.`);
+        }
+        await sleep(200, signal);
+      }
+      // The button may become enabled in the same update that exposes the
+      // running state. Check again before spending tokens on another run.
+      const startedBeforeClick = await qualityRunStartedRowText(page, quality, staleBefore, runButtonBefore);
+      if (startedBeforeClick !== undefined) {
+        return {
+          quality: displayQualityName(quality),
+          status: "already-running",
+          rowTextAfterConfirm: startedBeforeClick,
+        };
+      }
       rerunTitle = await action.getAttribute("title");
 
       await action.click({ timeout: UI_TIMEOUT_MS });
