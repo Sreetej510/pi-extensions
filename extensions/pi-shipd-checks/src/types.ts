@@ -105,6 +105,17 @@ export interface SolverGapConfig {
   claudeOAuthTokenFile?: string;
 }
 
+export interface AutoReviewConfig {
+  /** Claude Code CLI model alias or model ID used by the local Auto Review reviewers. */
+  modelId: string;
+  /** Claude Code CLI reviewer effort passed through as `--effort`. */
+  thinkingLevel: ClaudeThinkingLevel;
+  /** Timeout for each reviewer invocation. */
+  timeoutMinutes: number;
+  /** Number of reviewer invocations run at the same time. */
+  concurrency: number;
+}
+
 export interface PromptHumanizerConfig {
   /** Number of humanizer drafts to request from CoreWeave (1–10). */
   candidateCount?: number;
@@ -121,6 +132,8 @@ export interface ChecksConfig {
   thinkingLevel: ThinkingLevel;
   fargate?: FargateConfig;
   solverGap?: SolverGapConfig;
+  /** Local Claude CLI settings for `/checks --autoreview`. */
+  autoReview?: AutoReviewConfig;
   /** Project folders where the agent-callable analysis tools are enabled. */
   enabledProjects?: string[];
   /** Legacy global setting retained for migration. */

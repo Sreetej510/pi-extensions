@@ -17,13 +17,15 @@
  *   /shipd:link <url>       save the Shipd job link for this chat session
  *   /checks                 open a menu for config or solve
  *   /checks --config        configure local reviewer/analysis models and Claude solver settings
- *   /checks solve           run Claude solvers, base/new tests, and a fairness review
+ *   /checks --solve         run Claude solvers, base/new tests, and a fairness review
+ *   /checks --autoreview    local Claude CLI replica of the hosted Auto Review (tests + solution)
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.
  *
  * File layout:
  *   index.ts     extension entry point (this file) — renderer, shortcut, command registration
  *   command.ts   /checks command: argument parsing, settings, and run orchestration
  *   agents.ts    local Pi gap-finder, solution-precheck, and benchmark-review sessions
+ *   autoreview*.ts  /checks --autoreview: Claude CLI reviewers, synthesis, verdict; prompts and hosted calibration data
  *   prompts.ts   task and reviewer prompt text
  *   fargate-runner.ts/worker.ts remote Claude solver/test execution and report transport
  *   report.ts    shipd_report.json load/merge/summary logic
@@ -36,6 +38,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Spacer, Text } from "@earendil-works/pi-tui";
+import type { AutoReviewSummary } from "./autoreview.js";
 import { registerChecksCommand } from "./command.js";
 import { PROGRESS_WIDGET_KEY } from "./progress.js";
 import type { SolverSummaryDetail } from "./report.js";
@@ -134,6 +137,44 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
       container.addChild(new Text(theme.fg("dim", "  nothing to report"), 0, 0));
     }
 
+    return container;
+  });
+
+  pi.registerMessageRenderer<AutoReviewSummary>("shipd_autoreview_report", (message, _options, theme) => {
+    const summary = message.details;
+    const container = new Container();
+    container.addChild(new Text(theme.bold(theme.fg("accent", "Auto Review (local)")), 0, 0));
+    if (!summary) {
+      container.addChild(new Text(theme.fg("dim", "  nothing to report"), 0, 0));
+      return container;
+    }
+    const color = (verdict: string) =>
+      verdict === "PASS" ? "success" : verdict === "BLOCK" || verdict === "FAIL" ? "error" : "warning";
+    container.addChild(new Text(`  ${theme.bold(theme.fg(color(summary.verdict), summary.verdict))}`, 0, 0));
+    container.addChild(
+      new Text(
+        `  Test Quality ${theme.fg(color(summary.testQuality), summary.testQuality)} (${summary.notFairCount}/${summary.testsGraded} Not fair) · ` +
+          `Solution Quality ${theme.fg(color(summary.solutionQuality), summary.solutionQuality)}`,
+        0,
+        0,
+      ),
+    );
+    container.addChild(
+      new Text(
+        `  ${summary.high.length} gating HIGH, ${summary.mediumCount} MEDIUM; reviewers ${summary.reviewersOk}/${summary.reviewersTotal} ok; ` +
+          `${summary.counterTests} counter-tests in the report (${formatDuration(summary.durationMs)})`,
+        0,
+        0,
+      ),
+    );
+    for (const finding of summary.high.slice(0, 12)) {
+      const text = finding.text.length > 240 ? `${finding.text.slice(0, 240)}…` : finding.text;
+      container.addChild(new Text(theme.fg("error", `  ✗ ${finding.as || finding.area}: ${text}`), 0, 0));
+    }
+    if (summary.high.length > 12) {
+      container.addChild(new Text(theme.fg("dim", `  … ${summary.high.length - 12} more in the report`), 0, 0));
+    }
+    container.addChild(new Text(theme.fg("dim", `  report: ${summary.reportPath}`), 0, 0));
     return container;
   });
 

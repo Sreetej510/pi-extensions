@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
   AnalyzeGapConfig,
+  AutoReviewConfig,
   ChecksConfig,
   ClaudeThinkingLevel,
   FargateConfig,
@@ -28,6 +29,13 @@ export const SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES = 20;
 export const SOLVER_GAP_SOLVER_COUNT_MIN = 1;
 export const SOLVER_GAP_SOLVER_COUNT_MAX = 5;
 export const SOLVER_GAP_DEFAULT_SOLVER_COUNT = 3;
+
+export const AUTO_REVIEW_TIMEOUT_MIN_MINUTES = 10;
+export const AUTO_REVIEW_TIMEOUT_MAX_MINUTES = 90;
+export const AUTO_REVIEW_DEFAULT_TIMEOUT_MINUTES = 40;
+export const AUTO_REVIEW_CONCURRENCY_MIN = 1;
+export const AUTO_REVIEW_CONCURRENCY_MAX = 8;
+export const AUTO_REVIEW_DEFAULT_CONCURRENCY = 4;
 
 export const ANALYZE_GAP_DEFAULT_ENABLED = false;
 export const ANALYZE_TIMEOUT_MIN_MINUTES = 10;
@@ -207,6 +215,36 @@ export function saveSolverGapConfig(solverGap: SolverGapConfig): void {
   const dir = dirname(CONFIG_PATH);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, solverGap }, null, 2), "utf-8");
+}
+
+/** Local Claude CLI Auto Review settings; independent of Pi model configuration like the solver settings. */
+export function loadAutoReviewConfig(): AutoReviewConfig {
+  const raw = readRawChecksConfig().autoReview;
+  const autoReview = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Partial<AutoReviewConfig>) : {};
+  const timeoutMinutes = Number.isFinite(autoReview.timeoutMinutes)
+    ? Math.min(
+        AUTO_REVIEW_TIMEOUT_MAX_MINUTES,
+        Math.max(AUTO_REVIEW_TIMEOUT_MIN_MINUTES, autoReview.timeoutMinutes as number),
+      )
+    : AUTO_REVIEW_DEFAULT_TIMEOUT_MINUTES;
+  const concurrency = Number.isInteger(autoReview.concurrency)
+    ? Math.min(AUTO_REVIEW_CONCURRENCY_MAX, Math.max(AUTO_REVIEW_CONCURRENCY_MIN, autoReview.concurrency as number))
+    : AUTO_REVIEW_DEFAULT_CONCURRENCY;
+  const thinkingLevels: ClaudeThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
+  return {
+    modelId: ["haiku", "sonnet", "opus"].includes(autoReview.modelId ?? "") ? (autoReview.modelId as string) : "opus",
+    thinkingLevel:
+      autoReview.thinkingLevel && thinkingLevels.includes(autoReview.thinkingLevel) ? autoReview.thinkingLevel : "high",
+    timeoutMinutes,
+    concurrency,
+  };
+}
+
+export function saveAutoReviewConfig(autoReview: AutoReviewConfig): void {
+  const raw = readRawChecksConfig();
+  const dir = dirname(CONFIG_PATH);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, autoReview }, null, 2), "utf-8");
 }
 
 /** Candidate counts for the humanizer can be configured even when reviewer models are unset. */

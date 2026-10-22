@@ -1,4 +1,4 @@
-/** The `/checks` command: settings and the `solve` Claude CLI benchmark. */
+/** The `/checks` command: settings, the `solve` Claude CLI benchmark, and the local `autoreview`. */
 
 import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -8,13 +8,19 @@ import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-wor
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, Spacer, Text } from "@earendil-works/pi-tui";
 import { runSolverReview } from "./agents.js";
+import { runAutoReviewCommand } from "./autoreview.js";
 import {
   ANALYZE_DEFAULT_TIMEOUT_MINUTES,
   ANALYZE_TIMEOUT_MAX_MINUTES,
   ANALYZE_TIMEOUT_MIN_MINUTES,
+  AUTO_REVIEW_CONCURRENCY_MAX,
+  AUTO_REVIEW_CONCURRENCY_MIN,
+  AUTO_REVIEW_TIMEOUT_MAX_MINUTES,
+  AUTO_REVIEW_TIMEOUT_MIN_MINUTES,
   getSupportedThinkingLevels,
   isAnalyzeToolEnabled,
   loadAnalyzeEnabledProjects,
+  loadAutoReviewConfig,
   loadChecksConfig,
   loadEnabledModelRefs,
   loadSolverGapConfig,
@@ -23,6 +29,7 @@ import {
   SOLVER_GAP_SOLVER_COUNT_MIN,
   SOLVER_GAP_TIMEOUT_MAX_MINUTES,
   SOLVER_GAP_TIMEOUT_MIN_MINUTES,
+  saveAutoReviewConfig,
   saveChecksConfig,
   saveSolverGapConfig,
   setAnalyzeProjectEnabled,
@@ -30,6 +37,7 @@ import {
 } from "./config.js";
 import { runFargateClaudeBenchmark } from "./fargate-runner.js";
 import { snapshotGitHead } from "./git.js";
+import { extractNewFilesFromPatch } from "./patch.js";
 import { PROGRESS_WIDGET_KEY, renderProgressLines } from "./progress.js";
 import { buildRunSummary, formatLocalTimestamp, loadExistingReport, mergeReport, REQUIRED_FILES } from "./report.js";
 import { loadFairnessRules, loadTestGuidelines } from "./rubric.js";
@@ -38,6 +46,7 @@ import { endReview, isReviewInProgress, startReview } from "./state.js";
 import { analyzeToolSettingChanged } from "./tool-sync.js";
 import type {
   AnalyzeGapConfig,
+  AutoReviewConfig,
   ChecksConfig,
   ClaudeThinkingLevel,
   CommandOption,
@@ -56,27 +65,25 @@ const COMMAND_COMPLETIONS: readonly CommandOption[] = [
     label: "--config",
     description: "Configure local Pi reviewer, analysis tools, and Claude solvers",
   },
-  { value: "solve", label: "solve", description: "Run Claude agents on agent_prompt.md" },
+  { value: "--solve", label: "--solve", description: "Run Claude agents on agent_prompt.md" },
+  {
+    value: "--autoreview",
+    label: "--autoreview",
+    description: "Run the local Claude CLI Auto Review of test.patch and solution.patch",
+  },
 ];
 
-const COMMAND_MENU_OPTIONS = ["config", "solve"] as const;
+const COMMAND_MENU_OPTIONS = ["config", "solve", "autoreview"] as const;
 
+/** Every action is used alone, so nothing completes once one is typed. */
 function getArgumentCompletions(prefix: string) {
   const trimmed = prefix.trimStart();
   const trailing = /\s$/.test(trimmed);
   const tokens = trimmed.trimEnd().split(/\s+/).filter(Boolean);
   const current = trailing ? "" : (tokens.at(-1) ?? "");
-  const used = new Set(trailing ? tokens : tokens.slice(0, -1));
+  const used = trailing ? tokens : tokens.slice(0, -1);
   const base = trailing ? trimmed : trimmed.slice(0, trimmed.length - current.length);
-  const hasConfig = used.has("--config");
-  const hasOther = [...used].some((token) => token !== "--config");
-  const matches = COMMAND_COMPLETIONS.filter(
-    (option) =>
-      !used.has(option.value) &&
-      !hasConfig &&
-      !(hasOther && option.value === "--config") &&
-      option.value.startsWith(current),
-  );
+  const matches = used.length ? [] : COMMAND_COMPLETIONS.filter((option) => option.value.startsWith(current));
   return matches.length ? matches.map((option) => ({ ...option, value: `${base}${option.value}` })) : null;
 }
 
@@ -152,11 +159,15 @@ type ConfigRowId =
   | "analyze-enabled"
   | "analyze-timeout"
   | "analyze-gap-model"
-  | "analyze-gap-thinking";
+  | "analyze-gap-thinking"
+  | "autoreview-model"
+  | "autoreview-effort"
+  | "autoreview-timeout"
+  | "autoreview-concurrency";
 
 interface ConfigRow {
   id: ConfigRowId;
-  section: "Solver" | "Analysis Tools";
+  section: "Solver" | "Auto Review" | "Analysis Tools";
   label: string;
   value: string;
   /** "model" rows open a picker (closes the menu, then reopens it); "cycle" rows step through `values` in place. */
@@ -170,6 +181,7 @@ function buildConfigRows(
   current: ChecksConfigLike | null,
   solverGap: SolverGapConfig,
   analyzeGap: AnalyzeGapConfig,
+  autoReview: AutoReviewConfig = loadAutoReviewConfig(),
 ): ConfigRow[] {
   const reviewerLevels = current ? supportedThinkingLevelsFor(ctx, current.provider, current.modelId) : ["off"];
   const analyzeGapLevels = analyzeGap.provider
@@ -230,6 +242,44 @@ function buildConfigRows(
       value: current?.thinkingLevel ?? "off",
       kind: "cycle",
       values: reviewerLevels,
+    },
+    {
+      id: "autoreview-model",
+      section: "Auto Review",
+      label: "Reviewer model (Claude)",
+      value: autoReview.modelId,
+      kind: "cycle",
+      values: ["haiku", "sonnet", "opus"],
+    },
+    {
+      id: "autoreview-effort",
+      section: "Auto Review",
+      label: "Reviewer effort",
+      value: autoReview.thinkingLevel,
+      kind: "cycle",
+      values: ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      id: "autoreview-timeout",
+      section: "Auto Review",
+      label: "Timeout per reviewer",
+      value: `${autoReview.timeoutMinutes} min`,
+      kind: "cycle",
+      values: Array.from(
+        { length: Math.floor((AUTO_REVIEW_TIMEOUT_MAX_MINUTES - AUTO_REVIEW_TIMEOUT_MIN_MINUTES) / 10) + 1 },
+        (_, i) => AUTO_REVIEW_TIMEOUT_MIN_MINUTES + i * 10,
+      ).map((v) => `${v} min`),
+    },
+    {
+      id: "autoreview-concurrency",
+      section: "Auto Review",
+      label: "Parallel reviewers",
+      value: String(autoReview.concurrency),
+      kind: "cycle",
+      values: Array.from(
+        { length: AUTO_REVIEW_CONCURRENCY_MAX - AUTO_REVIEW_CONCURRENCY_MIN + 1 },
+        (_, i) => `${AUTO_REVIEW_CONCURRENCY_MIN + i}`,
+      ),
     },
     {
       id: "analyze-enabled",
@@ -372,6 +422,17 @@ class ConfigMenuComponent {
         this.onCycleSaved();
         return;
       }
+      if (row.id.startsWith("autoreview-")) {
+        const autoReview = loadAutoReviewConfig();
+        if (row.id === "autoreview-model") autoReview.modelId = nextValue;
+        else if (row.id === "autoreview-effort") autoReview.thinkingLevel = nextValue as ClaudeThinkingLevel;
+        else if (row.id === "autoreview-timeout") autoReview.timeoutMinutes = Number.parseInt(nextValue, 10);
+        else autoReview.concurrency = Number.parseInt(nextValue, 10);
+        saveAutoReviewConfig(autoReview);
+        this.refresh();
+        this.onCycleSaved();
+        return;
+      }
       if (row.id === "solvergap-thinking") {
         saveSolverGapConfig({ ...solverGap, thinkingLevel: nextValue as ClaudeThinkingLevel });
         this.refresh();
@@ -491,40 +552,6 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
   }
 }
 
-function extractNewFilesFromPatch(patchText: string): Array<{ path: string; content: string }> {
-  const files: Array<{ path: string; content: string }> = [];
-  const sections = patchText.split(/(?=^diff --git )/m).filter((section) => section.startsWith("diff --git "));
-  for (const section of sections) {
-    if (!/^new file mode /m.test(section)) continue;
-    const patchPath = section.match(/^\+\+\+ b\/(.+)$/m)?.[1];
-    if (!patchPath) continue;
-    const normalizedPath = patchPath.replace(/\\/g, "/");
-    if (
-      normalizedPath.startsWith("/") ||
-      /^[A-Za-z]:/.test(normalizedPath) ||
-      normalizedPath.split("/").some((part) => part === ".." || part === "")
-    ) {
-      throw new Error(`Unsafe new-file path in test.patch: ${patchPath}`);
-    }
-    const content: string[] = [];
-    const hasNoFinalNewline = section.includes("\\ No newline at end of file");
-    let inHunk = false;
-    for (const line of section.split(/\r?\n/)) {
-      if (line.startsWith("@@")) {
-        inHunk = true;
-        continue;
-      }
-      if (!inHunk || line === "" || line.startsWith("\\ No newline at end of file")) continue;
-      if (line.startsWith("+")) content.push(line.slice(1));
-      else if (line.startsWith("diff --git ")) break;
-      else throw new Error(`Unexpected non-addition line in new test.patch file ${patchPath}.`);
-    }
-    const fileContent = content.join("\n");
-    files.push({ path: normalizedPath, content: hasNoFinalNewline ? fileContent : `${fileContent}\n` });
-  }
-  return files;
-}
-
 function prepareLocalSolverReviewWorkspace(repoDir: string, workspaceDir: string, results: SolverRunResult[]): void {
   for (const file of ["agent_prompt.md", "test.patch", "solution.patch", "Dockerfile"]) {
     rmSync(join(workspaceDir, file), { recursive: true, force: true });
@@ -586,14 +613,14 @@ function prepareLocalSolverReviewWorkspace(repoDir: string, workspaceDir: string
 
 export function registerChecksCommand(pi: ExtensionAPI) {
   pi.registerCommand("checks", {
-    description: "Configure checks or run the solve benchmark for agent_prompt.md.",
+    description: "Configure checks, run the solve benchmark, or run the local Auto Review.",
     getArgumentCompletions,
     handler: async (args, ctx) => {
       let sub = args.trim();
       if (!sub) {
         const choice = await ctx.ui.select("Choose a checks action", [...COMMAND_MENU_OPTIONS]);
         if (!choice) return;
-        sub = choice === "config" ? "--config" : choice;
+        sub = `--${choice}`;
       }
       const tokens = [...new Set(sub.split(/\s+/).filter(Boolean))];
       const known = new Set(COMMAND_COMPLETIONS.map((option) => option.value));
@@ -605,13 +632,16 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         );
         return;
       }
-      if (tokens.includes("--config")) {
-        if (tokens.length > 1) ctx.ui.notify("--config must be used alone.", "warning");
-        else await runConfigFlow(pi, ctx);
+      if (tokens.length !== 1) {
+        ctx.ui.notify("Use one of `--config`, `--solve` or `--autoreview` at a time.", "warning");
         return;
       }
-      if (tokens.length !== 1 || tokens[0] !== "solve") {
-        ctx.ui.notify("Run `/checks solve` to solve and review this task.", "warning");
+      if (tokens[0] === "--config") {
+        await runConfigFlow(pi, ctx);
+        return;
+      }
+      if (tokens[0] === "--autoreview") {
+        await runAutoReviewCommand(pi, ctx);
         return;
       }
       const runClaudeBenchmark = true;
@@ -630,7 +660,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         : ctx.model;
       if (!reviewerModel || (reviewerConfig && !ctx.modelRegistry.hasConfiguredAuth(reviewerModel))) {
         ctx.ui.notify(
-          "Configure an authenticated local Pi reviewer model in `/checks --config` before running `/checks solve`.",
+          "Configure an authenticated local Pi reviewer model in `/checks --config` before running `/checks --solve`.",
           "error",
         );
         return;
