@@ -135,6 +135,8 @@ async function runFargateWorker(opts: {
   const archivePath = join(tmpdir(), `.shipd-fargate-source-${randomUUID()}.tar.gz`);
   const workerPath = findWorkerPath();
   const solverConfig = opts.solverConfig;
+  const agentTimeoutMinutes = opts.mode === "solver" ? Math.max(1, Math.floor(solverConfig?.timeoutMinutes ?? 20)) : 0;
+  const directS3 = Boolean(fargateConfig.taskRoleArn);
   const claudeTokenPath = opts.mode === "solver" ? findClaudeOAuthTokenPath(solverConfig) : undefined;
   const workerClaudeTokenPath = claudeTokenPath
     ? join(tmpdir(), `.shipd-fargate-claude-token-${randomUUID()}.txt`)
@@ -166,6 +168,10 @@ async function runFargateWorker(opts: {
   try {
     if (opts.mode === "solver" && !solverConfig) throw new Error("Fargate solver configuration is missing.");
     if (opts.mode === "solver" && !opts.taskPrompt) throw new Error("The task prompt is empty or unavailable.");
+    if (opts.mode === "solver" && agentTimeoutMinutes > URL_EXPIRY_SECONDS / 60 && !directS3)
+      throw new Error(
+        `Solver timeouts above ${URL_EXPIRY_SECONDS / 60} minutes require fargate.taskRoleArn because presigned result URLs expire after ${URL_EXPIRY_SECONDS / 60} minutes.`,
+      );
     const testPatchPath = join(opts.repoDir, "test.patch");
     if (opts.mode === "solver" && !existsSync(testPatchPath))
       throw new Error("Missing test.patch; it is applied only after each solver finishes.");
@@ -196,14 +202,11 @@ async function runFargateWorker(opts: {
       region,
       fargateConfig,
     );
-    const agentTimeoutMinutes =
-      opts.mode === "solver" ? Math.max(1, Math.floor(solverConfig?.timeoutMinutes ?? 20)) : 0;
     const timeoutMinutes =
       opts.mode === "solver"
         ? Math.max(10, agentTimeoutMinutes * 4 + 15)
         : Math.max(1, Math.floor(opts.precheckTimeoutMinutes ?? 20));
     const solverCount = opts.mode === "solver" ? Math.max(1, Math.floor(solverConfig?.solverCount ?? 1)) : 0;
-    const directS3 = Boolean(fargateConfig.taskRoleArn);
     const maxRetries = Math.min(3, Math.max(0, Math.floor(fargateConfig.maxRetries ?? 1)));
     let lastFailure = "Fargate task did not produce a result.";
     reportPhase("requesting sandbox");

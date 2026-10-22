@@ -22,7 +22,7 @@ import type {
 export const CONFIG_PATH = join(getAgentDir(), "checks-config.json");
 export const SETTINGS_PATH = join(getAgentDir(), "settings.json");
 export const SOLVER_GAP_TIMEOUT_MIN_MINUTES = 10;
-export const SOLVER_GAP_TIMEOUT_MAX_MINUTES = 60;
+export const SOLVER_GAP_TIMEOUT_MAX_MINUTES = 90;
 export const SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES = 20;
 
 export const SOLVER_GAP_SOLVER_COUNT_MIN = 1;

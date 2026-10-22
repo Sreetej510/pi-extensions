@@ -198,9 +198,12 @@ function buildConfigRows(
       label: "Timeout",
       value: `${solverGap.timeoutMinutes} min`,
       kind: "cycle",
-      values: [10, 20, 30, 40, 50, SOLVER_GAP_TIMEOUT_MAX_MINUTES]
-        .filter((v, i, arr) => v >= SOLVER_GAP_TIMEOUT_MIN_MINUTES && arr.indexOf(v) === i)
-        .map((v) => `${v} min`),
+      values: Array.from(
+        {
+          length: Math.floor((SOLVER_GAP_TIMEOUT_MAX_MINUTES - SOLVER_GAP_TIMEOUT_MIN_MINUTES) / 10) + 1,
+        },
+        (_, i) => SOLVER_GAP_TIMEOUT_MIN_MINUTES + i * 10,
+      ).map((v) => `${v} min`),
     },
     {
       id: "solvergap-solver-count",
