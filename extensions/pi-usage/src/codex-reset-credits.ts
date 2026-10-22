@@ -44,31 +44,44 @@ export async function consumeCodexResetCredit(
       "No Pi OpenAI Codex auth was available. Use a Pi OpenAI Codex model or run /login for OpenAI ChatGPT Plus/Pro (Codex).",
     );
   }
-  const redeemRequestId = randomUUID();
-  const bodies = [
-    { id: creditId, redeem_request_id: redeemRequestId },
-    { credit_id: creditId, redeem_request_id: redeemRequestId },
-    { rate_limit_reset_credit_id: creditId, redeem_request_id: redeemRequestId },
-    { id: creditId, redeemRequestId },
-    { credit_id: creditId, redeemRequestId },
-    { rate_limit_reset_credit_id: creditId, redeemRequestId },
-  ];
-  let lastError: Error | undefined;
-  for (const body of bodies) {
-    const response = await fetchWithTimeout(
-      CODEX_CONSUME_RESET_CREDITS_URL,
-      { method: "POST", headers: auth.headers, body: JSON.stringify(body) },
-      timeoutMs,
-      "Codex consume banked reset",
-    );
-    const text = await response.text();
-    if (response.ok) return;
-    lastError = new Error(
+  // These list-only headers can make the consume endpoint reject a valid request.
+  // Headers.delete is case-insensitive, including headers inherited from Pi auth.
+  const headers = new Headers(auth.headers);
+  headers.delete("OpenAI-Beta");
+  headers.delete("originator");
+  const response = await fetchWithTimeout(
+    CODEX_CONSUME_RESET_CREDITS_URL,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ credit_id: creditId, redeem_request_id: randomUUID() }),
+    },
+    timeoutMs,
+    "Codex consume banked reset",
+  );
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
       `Codex consume banked reset returned ${response.status} ${response.statusText}: ${redactErrorBody(text)}`,
     );
-    if (response.status !== 400 && response.status !== 422) break;
   }
-  throw lastError ?? new Error("Failed to consume Codex banked reset.");
+
+  // HTTP 200 also covers no-op outcomes; only "reset" confirms a redemption.
+  const payload = parseJsonObject(text, "Codex consume banked reset response");
+  switch (payload.code) {
+    case "reset":
+      return;
+    case "nothing_to_reset":
+      throw new Error("Codex reports there are no usage windows to reset.");
+    case "no_credit":
+      throw new Error("No Codex banked reset credit is available. Run /usage --refresh.");
+    case "already_redeemed":
+      throw new Error(
+        "Codex reported this redemption was already processed. Run /usage --refresh before trying again.",
+      );
+    default:
+      throw new Error("Codex returned an unrecognized banked reset result. Run /usage --refresh before trying again.");
+  }
 }
 
 function normalizeCodexResetCreditList(payload: CodexResetCreditPayload): CodexResetCreditList {

@@ -24,6 +24,11 @@ usage / rate-limit budgets — OpenAI Codex, Anthropic OAuth, and pi-auth-backed
 | `/usage --raw` | Show raw usage API responses (debugging) |
 | `/usage --consume-banked-reset` | Select and consume a Codex banked reset after confirmation |
 
+Banked reset consumption sends one POST with `credit_id` and `redeem_request_id`, without the
+list-only `OpenAI-Beta` / `originator` headers. It only reports success when Codex returns
+`code: "reset"`. Failed or unclear requests are not automatically retried; run `/usage --refresh`
+before deciding whether to try again.
+
 ## Install
 
 ```bash
@@ -78,5 +83,6 @@ Or, for local development, point at the file directly:
 ```bash
 npm install
 npm run --workspace @sreetej510/pi-usage check     # biome + typecheck
+npm run --workspace @sreetej510/pi-usage test      # mocked requests; never spends real resets
 npm run --workspace @sreetej510/pi-usage format
 ```
