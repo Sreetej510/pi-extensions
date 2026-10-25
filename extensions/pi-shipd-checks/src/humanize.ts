@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { isAnalyzeToolEnabled, loadFargateConfig, loadPromptHumanizerConfig } from "./config.js";
+import { isAnalyzeProjectEnabled, loadFargateConfig, loadPromptHumanizerConfig } from "./config.js";
 import { runFargateDetectorBatch } from "./fargate-runner.js";
 import { formatDuration } from "./report.js";
 
@@ -279,7 +279,7 @@ export function registerHumanizerTool(pi: ExtensionAPI): void {
       return new Text(`${header}\n${body}`, 0, 0);
     },
     async execute(_toolCallId, _params, signal, onUpdate, ctx) {
-      if (!isAnalyzeToolEnabled(ctx.cwd)) {
+      if (!isAnalyzeProjectEnabled(ctx.cwd)) {
         throw new Error(
           `${HUMANIZE_AGENT_PROMPT_TOOL_NAME} is disabled for this project. Enable the Shipd tools with /analyze:on.`,
         );

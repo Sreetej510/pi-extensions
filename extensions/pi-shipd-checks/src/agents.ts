@@ -1,10 +1,12 @@
 /**
  * Spawns the throwaway gap-finder and solution-precheck agent sessions, races each
  * against a timeout + external cancel signal, and pulls structured results
- * back out of the tool-call capture objects.
+ * back out of the tool-call capture objects. The `--solve` fairness reviewer runs
+ * through the local Claude CLI instead (see `runClaude` in autoreview.ts).
  */
 
 import { type AgentSession, createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { runClaude } from "./autoreview.js";
 import { buildSentenceGapFinderPrompt, buildSolutionAuditPrompt, buildSolverReviewPrompt } from "./prompts.js";
 import {
   createGapFinderTool,
@@ -16,11 +18,11 @@ import type {
   GapStageResult,
   SolutionAuditFinding,
   SolutionAuditStageResult,
+  SolverReviewConfig,
   SolverReviewResult,
   SolverRunResult,
   TestGapFinal,
   ThinkingLevel,
-  TokenUsage,
 } from "./types.js";
 
 export const REVIEWER_TIMEOUT_MS = 15 * 60 * 1000;
@@ -183,113 +185,35 @@ export async function runSolutionAudit(opts: {
   return { status: "ok", findings: capture.findings };
 }
 
-interface PiUsageRecord {
-  input?: unknown;
-  output?: unknown;
-  cacheRead?: unknown;
-  cacheWrite?: unknown;
-  cost?: { total?: unknown };
-}
-
-function nonNegativeNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
-}
-
-function piSessionTokenUsage(session: AgentSession, contextWindow?: number): TokenUsage | undefined {
-  const messages = session.messages.filter((message) => message.role === "assistant") as unknown as Array<{
-    usage?: PiUsageRecord;
-  }>;
-  const usages = messages
-    .map((message) => message.usage)
-    .filter((usage): usage is PiUsageRecord => usage !== undefined);
-  if (usages.length === 0) return undefined;
-
-  const sum = (read: (usage: PiUsageRecord) => unknown): number | undefined => {
-    const values = usages
-      .map((usage) => nonNegativeNumber(read(usage)))
-      .filter((value): value is number => value !== undefined);
-    return values.length > 0 ? values.reduce((total, value) => total + value, 0) : undefined;
-  };
-  const inputTokens = sum((usage) => usage.input);
-  const cacheReadInputTokens = sum((usage) => usage.cacheRead);
-  const cacheCreationInputTokens = sum((usage) => usage.cacheWrite);
-  const outputTokens = sum((usage) => usage.output);
-  const totalInputTokens = (inputTokens ?? 0) + (cacheReadInputTokens ?? 0) + (cacheCreationInputTokens ?? 0);
-  const contextSizes = usages.map(
-    (usage) =>
-      (nonNegativeNumber(usage.input) ?? 0) +
-      (nonNegativeNumber(usage.cacheRead) ?? 0) +
-      (nonNegativeNumber(usage.cacheWrite) ?? 0),
-  );
-  const finalContextTokens = contextSizes.at(-1);
-  const costUsd = sum((usage) => usage.cost?.total);
-  const validContextWindow = nonNegativeNumber(contextWindow);
-  return {
-    ...(inputTokens !== undefined ? { inputTokens } : {}),
-    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
-    ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
-    ...(outputTokens !== undefined ? { outputTokens } : {}),
-    totalInputTokens,
-    totalTokens: totalInputTokens + (outputTokens ?? 0),
-    ...(finalContextTokens !== undefined ? { finalContextTokens } : {}),
-    peakContextTokens: Math.max(...contextSizes),
-    ...(validContextWindow && validContextWindow > 0 ? { contextWindow: validContextWindow } : {}),
-    ...(finalContextTokens !== undefined && validContextWindow && validContextWindow > 0
-      ? { contextWindowUtilizationPercent: Number(((finalContextTokens / validContextWindow) * 100).toFixed(2)) }
-      : {}),
-    modelCalls: usages.length,
-    ...(costUsd !== undefined ? { costUsd } : {}),
-  };
-}
-
-/** Runs the benchmark fairness reviewer through the locally configured Pi model. */
+/** Runs the benchmark fairness reviewer as one read-only local Claude CLI session, like the Auto Review reviewers. */
 export async function runSolverReview(opts: {
   tempDir: string;
-  model: unknown;
-  thinkingLevel: ThinkingLevel;
-  contextWindow?: number;
+  config: SolverReviewConfig;
   taskPrompt: string;
   solverResults: SolverRunResult[];
   testGuidelines: string;
   fairnessRules: string;
-  timeoutMinutes?: number;
+  /** Whether our solution.patch is in the workspace, so the reviewer also suggests improvements from the solvers. */
+  hasReferenceSolution: boolean;
   cancelSignal: AbortSignal;
 }): Promise<SolverReviewResult> {
-  const model = asSessionModel(opts.model);
-  let session: AgentSession | undefined;
-  try {
-    ({ session } = await createAgentSession({
-      cwd: opts.tempDir,
-      model,
-      thinkingLevel: sessionThinkingLevel(opts.thinkingLevel),
-      tools: [...REVIEWER_TOOLS],
-      sessionManager: SessionManager.inMemory(),
-    }));
-    const outcome = await raceAgentTurn(
-      async () => {
-        await session?.prompt(
-          buildSolverReviewPrompt(opts.taskPrompt, opts.solverResults, opts.testGuidelines, opts.fairnessRules),
-        );
-      },
-      opts.cancelSignal,
-      (opts.timeoutMinutes ?? REVIEWER_TIMEOUT_MS / 60_000) * 60_000,
-    );
-    if (outcome !== "done") {
-      await session.abort();
-      return {
-        status: outcome,
-        text: session.getLastAssistantText() ?? "",
-        tokenUsage: piSessionTokenUsage(session, opts.contextWindow),
-        ...(outcome === "timedOut" ? { error: "Local Pi reviewer timed out." } : {}),
-      };
-    }
-    const text = session.getLastAssistantText()?.trim() ?? "";
-    if (!text) return { status: "error", text: "Local Pi reviewer returned no text.", error: "No reviewer output." };
-    return { status: "ok", text, tokenUsage: piSessionTokenUsage(session, opts.contextWindow) };
-  } catch (caught) {
-    const error = caught instanceof Error ? caught.message : String(caught);
-    return { status: "error", text: error, error };
-  } finally {
-    await disposeAgentSession(session);
+  const run = await runClaude({
+    cwd: opts.tempDir,
+    prompt: buildSolverReviewPrompt(
+      opts.taskPrompt,
+      opts.solverResults,
+      opts.testGuidelines,
+      opts.fairnessRules,
+      opts.hasReferenceSolution,
+    ),
+    config: opts.config,
+    signal: opts.cancelSignal,
+  });
+  const text = run.text.trim();
+  const tokenUsage = run.tokenUsage ? { tokenUsage: run.tokenUsage } : {};
+  if (run.status !== "ok") {
+    return { status: run.status, text, ...tokenUsage, ...(run.error ? { error: run.error } : {}) };
   }
+  if (!text) return { status: "error", text: "Local Claude reviewer returned no text.", error: "No reviewer output." };
+  return { status: "ok", text, ...tokenUsage };
 }

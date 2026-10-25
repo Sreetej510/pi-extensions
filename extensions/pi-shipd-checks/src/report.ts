@@ -2,7 +2,6 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import type {
-  ChecksConfig,
   FargateResourceUsage,
   SolverGapConfig,
   SolverReviewResult,
@@ -32,7 +31,6 @@ export function loadExistingReport(reportPath: string): Record<string, unknown> 
 
 export interface MergeReportInput {
   existingReport: Record<string, unknown>;
-  config: ChecksConfig;
   runGapFinder: boolean;
   testGaps: TestGapFinal[];
   gapAnalysisIncomplete: boolean;
@@ -50,10 +48,6 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
     ...input.existingReport,
     timestamp: formatLocalTimestamp(),
   };
-  if (!input.runClaudeBenchmark) {
-    merged.model = `${input.config.provider}/${input.config.modelId}`;
-    merged.thinkingLevel = input.config.thinkingLevel;
-  }
   // Discard fields created by pre-gap-finder-only versions of the extension.
   delete merged.overall;
   delete merged.reports;

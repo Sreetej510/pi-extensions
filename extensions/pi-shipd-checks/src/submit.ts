@@ -1317,12 +1317,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           pi,
           repoDir: ctx.cwd,
           snapshotDir: precheckDir,
-          config: {
-            provider: "patch-precheck",
-            modelId: "patch-precheck",
-            thinkingLevel: "off",
-            fargate: loadFargateConfig(),
-          },
+          config: { fargate: loadFargateConfig() },
           cancelSignal: signal ?? new AbortController().signal,
           runId: `quality-precheck-${randomUUID()}`,
           precheckTimeoutMinutes: PATCH_PRECHECK_TIMEOUT_MINUTES,

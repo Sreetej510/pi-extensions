@@ -7,7 +7,7 @@
  * Benchmark flow:
  *   1. Snapshot git HEAD without touching the working tree; copy only agent_prompt.md as task input.
  *   2. Run independent Claude CLI solvers in Fargate, then execute base/new tests and save their logs.
- *   3. Run a read-only local Pi reviewer over the prompt, patched tests, all diffs, and all results.
+ *   3. Run a read-only local Claude CLI reviewer over the prompt, patched tests, all diffs, and all results.
  *   4. Post the assessment and merge benchmark results into shipd_report.json.
  *
  * Commands:
@@ -16,7 +16,7 @@
  *   /shipd:auth             open a browser for first-time Shipd sign-in
  *   /shipd:link <url>       save the Shipd job link for this chat session
  *   /checks                 open a menu for config or solve
- *   /checks --config        configure local reviewer/analysis models and Claude solver settings
+ *   /checks --config        configure Claude solver/reviewer settings and local analysis models
  *   /checks --solve         run Claude solvers, base/new tests, and a fairness review
  *   /checks --autoreview    local Claude CLI replica of the hosted Auto Review (tests + solution)
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.

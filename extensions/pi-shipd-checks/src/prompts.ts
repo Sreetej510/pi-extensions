@@ -289,7 +289,7 @@ export function buildSolutionAuditPrompt(
   return parts.join("\n");
 }
 
-// ── Claude CLI benchmark solvers and local Pi fairness reviewer ─────
+// ── Claude CLI benchmark solvers and local Claude CLI fairness reviewer ─────
 
 function solverOutcomeLine(result: SolverRunResult): string {
   const tests = (value: boolean | undefined) => (value === undefined ? "not run" : value ? "PASS" : "FAIL");
@@ -304,7 +304,25 @@ export function buildSolverReviewPrompt(
   solverResults: SolverRunResult[],
   testGuidelines: string,
   fairnessRules: string,
+  hasReferenceSolution: boolean,
 ): string {
+  const comparison = hasReferenceSolution
+    ? [
+        "",
+        "Then, as a separate step, compare the implementation logic of every solver's `solver_solution.patch` directly " +
+          "with our `review_assets/reference_solution.patch` (the task author's solution) for this exact prompt. Look " +
+          "only at non-test source code: ignore test files, fixtures, documentation, comments, docstrings, changelogs, " +
+          "and other non-code changes in both patches, and do not use test results or the test patch as evidence here. " +
+          "Report only places where our solution has a logical error or mishandles an edge case that a solver's code " +
+          "handles correctly, for example a missed input/state combination, a wrong boundary or condition, an " +
+          "unhandled error or empty/None case, wrong ordering, or a code path that the prompt's behavior also covers " +
+          "but ours does not update. Do not report style, naming, structure, simplicity, performance, or idiom " +
+          "preferences, differences that are equally correct, or behavior the prompt does not ask for. For each " +
+          "finding, name the solver(s), cite the relevant hunks from both patches and the prompt text the behavior " +
+          "serves, give a concrete input or state where our code is wrong and the solver's is right, and state the " +
+          "logic change our solution should make. If no solver handles anything better, say so.",
+      ]
+    : [];
   return [
     "You are an independent, skeptical reviewer for a coding-agent task benchmark.",
     "This is a read-only review. The source tree at the current working directory is clean HEAD and no patch has been " +
@@ -331,9 +349,11 @@ export function buildSolverReviewPrompt(
       "(2) an unfair, defective, or prompt-misaligned test, (3) an execution/setup failure unrelated to task quality, " +
       "or (4) insufficient evidence. A failed test alone does not prove that the test is unfair; cite the relevant " +
       "prompt text, test behavior, diff, and output.",
-    "The optional reference_solution.patch is context only, not a specification; do not infer requirements from it " +
-      "that the prompt does not state. Consider whether the tests' setup, assumptions, fixtures, expected values, and " +
-      "base/new separation are discoverable and reasonable for an agent working from clean HEAD and the exact prompt.",
+    "For the fairness review, the optional reference_solution.patch is context only, not a specification; do not infer " +
+      "requirements from it that the prompt does not state. Consider whether the tests' setup, assumptions, fixtures, " +
+      "expected values, and base/new separation are discoverable and reasonable for an agent working from clean HEAD " +
+      "and the exact prompt.",
+    ...comparison,
     "",
     "Use this test-quality checklist as guidance:",
     testGuidelines,
@@ -342,7 +362,11 @@ export function buildSolverReviewPrompt(
     fairnessRules,
     "",
     "Return a concise Markdown report with: an overall assessment; concrete fairness findings (or say none found); " +
-      "a per-agent outcome table; and prompt/test/diff/log evidence for every attribution. Clearly label uncertain " +
-      "conclusions. Do not edit files or run commands.",
+      "a per-agent outcome table; " +
+      (hasReferenceSolution
+        ? "a 'Suggested improvements to our solution' section with the comparison findings (or say none found); "
+        : "") +
+      "and prompt/test/diff/log evidence for every attribution. Clearly label uncertain conclusions. Do not edit " +
+      "files or run commands.",
   ].join("\n");
 }

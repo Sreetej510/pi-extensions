@@ -17,6 +17,7 @@ import type {
   FargateResourceUsage,
   PromptHumanizerConfig,
   SolverGapConfig,
+  SolverReviewConfig,
   ThinkingLevel,
 } from "./types.js";
 
@@ -30,6 +31,10 @@ export const SOLVER_GAP_SOLVER_COUNT_MIN = 1;
 export const SOLVER_GAP_SOLVER_COUNT_MAX = 5;
 export const SOLVER_GAP_DEFAULT_SOLVER_COUNT = 3;
 
+export const SOLVER_REVIEW_TIMEOUT_MIN_MINUTES = 10;
+export const SOLVER_REVIEW_TIMEOUT_MAX_MINUTES = 60;
+export const SOLVER_REVIEW_DEFAULT_TIMEOUT_MINUTES = 20;
+
 export const AUTO_REVIEW_TIMEOUT_MIN_MINUTES = 10;
 export const AUTO_REVIEW_TIMEOUT_MAX_MINUTES = 90;
 export const AUTO_REVIEW_DEFAULT_TIMEOUT_MINUTES = 40;
@@ -37,7 +42,6 @@ export const AUTO_REVIEW_CONCURRENCY_MIN = 1;
 export const AUTO_REVIEW_CONCURRENCY_MAX = 8;
 export const AUTO_REVIEW_DEFAULT_CONCURRENCY = 4;
 
-export const ANALYZE_GAP_DEFAULT_ENABLED = false;
 export const ANALYZE_TIMEOUT_MIN_MINUTES = 10;
 export const ANALYZE_TIMEOUT_MAX_MINUTES = 30;
 export const ANALYZE_DEFAULT_TIMEOUT_MINUTES = 15;
@@ -79,15 +83,8 @@ export function getSupportedThinkingLevels(
   });
 }
 
-export function loadChecksConfig(): ChecksConfig | null {
-  try {
-    if (!existsSync(CONFIG_PATH)) return null;
-    const parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as ChecksConfig;
-    if (parsed.provider && parsed.modelId && parsed.thinkingLevel) return parsed;
-  } catch {
-    // fall through
-  }
-  return null;
+export function loadChecksConfig(): ChecksConfig {
+  return readRawChecksConfig() as ChecksConfig;
 }
 
 export function saveChecksConfig(config: ChecksConfig): void {
@@ -155,30 +152,8 @@ export function recordFargateResourceUsage(
 /** Persist adaptive Fargate sizing after a solver-gap run. */
 export function persistFargateResourceUsage(cwd: string, usage: FargateResourceUsage): void {
   const config = loadChecksConfig();
-  if (config) {
-    saveChecksConfig(recordFargateResourceUsage(config, cwd, usage));
-    return;
-  }
-
-  // Quality checks can be used without configuring a reviewer model. Preserve
-  // that supported setup instead of dropping the Fargate-only configuration.
-  const raw = readRawChecksConfig();
-  const rawFargate = raw.fargate;
-  if (!rawFargate || typeof rawFargate !== "object" || Array.isArray(rawFargate)) return;
-  const next = recordFargateResourceUsage(
-    {
-      provider: "patch-precheck",
-      modelId: "patch-precheck",
-      thinkingLevel: "off",
-      fargate: rawFargate as FargateConfig,
-    },
-    cwd,
-    usage,
-  );
-  if (next.fargate?.adaptiveResourceProfile !== true) return;
-  const dir = dirname(CONFIG_PATH);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, fargate: next.fargate }, null, 2), "utf-8");
+  const next = recordFargateResourceUsage(config, cwd, usage);
+  if (next !== config) saveChecksConfig(next);
 }
 
 /** Solver settings are independent of Pi model configuration because solvers now use Claude CLI. */
@@ -195,26 +170,58 @@ export function loadSolverGapConfig(): SolverGapConfig {
     ? Math.min(SOLVER_GAP_SOLVER_COUNT_MAX, Math.max(SOLVER_GAP_SOLVER_COUNT_MIN, solverGap.solverCount as number))
     : SOLVER_GAP_DEFAULT_SOLVER_COUNT;
   const thinkingLevels: ClaudeThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
-  const claudeOAuthTokenFile =
-    typeof solverGap.claudeOAuthTokenFile === "string" && solverGap.claudeOAuthTokenFile.trim()
-      ? solverGap.claudeOAuthTokenFile.trim()
-      : undefined;
   return {
     modelId: ["haiku", "sonnet", "opus"].includes(solverGap.modelId ?? "") ? (solverGap.modelId as string) : "sonnet",
     thinkingLevel:
       solverGap.thinkingLevel && thinkingLevels.includes(solverGap.thinkingLevel) ? solverGap.thinkingLevel : "low",
     timeoutMinutes,
     solverCount,
-    ...(claudeOAuthTokenFile ? { claudeOAuthTokenFile } : {}),
   };
 }
 
-/** Save solver-only settings even when no Pi reviewer model is configured. */
+/** Path of the local Claude setup-token file used by Fargate solver runs, if configured. */
+export function loadClaudeOAuthTokenFile(): string | undefined {
+  const file = readRawChecksConfig().claudeOAuthTokenFile;
+  return typeof file === "string" && file.trim() ? file.trim() : undefined;
+}
+
+/** Save solver settings without touching the rest of the config. */
 export function saveSolverGapConfig(solverGap: SolverGapConfig): void {
   const raw = readRawChecksConfig();
   const dir = dirname(CONFIG_PATH);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, solverGap }, null, 2), "utf-8");
+}
+
+/** Local Claude CLI settings for the `/checks --solve` fairness reviewer; independent of Pi model configuration. */
+export function loadSolverReviewConfig(): SolverReviewConfig {
+  const raw = readRawChecksConfig().solverReview;
+  const solverReview =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Partial<SolverReviewConfig>) : {};
+  const timeoutMinutes = Number.isFinite(solverReview.timeoutMinutes)
+    ? Math.min(
+        SOLVER_REVIEW_TIMEOUT_MAX_MINUTES,
+        Math.max(SOLVER_REVIEW_TIMEOUT_MIN_MINUTES, solverReview.timeoutMinutes as number),
+      )
+    : SOLVER_REVIEW_DEFAULT_TIMEOUT_MINUTES;
+  const thinkingLevels: ClaudeThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
+  return {
+    modelId: ["haiku", "sonnet", "opus"].includes(solverReview.modelId ?? "")
+      ? (solverReview.modelId as string)
+      : "opus",
+    thinkingLevel:
+      solverReview.thinkingLevel && thinkingLevels.includes(solverReview.thinkingLevel)
+        ? solverReview.thinkingLevel
+        : "high",
+    timeoutMinutes,
+  };
+}
+
+export function saveSolverReviewConfig(solverReview: SolverReviewConfig): void {
+  const raw = readRawChecksConfig();
+  const dir = dirname(CONFIG_PATH);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, solverReview }, null, 2), "utf-8");
 }
 
 /** Local Claude CLI Auto Review settings; independent of Pi model configuration like the solver settings. */
@@ -292,49 +299,31 @@ export function loadAnalyzeEnabledProjects(): string[] {
   return Array.isArray(projects) ? projects.filter((project): project is string => typeof project === "string") : [];
 }
 
+/** Whether the agent-callable analysis tools are enabled for a project. */
 export function isAnalyzeProjectEnabled(cwd: string): boolean {
-  const raw = readRawChecksConfig();
-  if (Array.isArray(raw.enabledProjects)) {
-    return raw.enabledProjects.some((project) => project === cwd);
-  }
-  // Backward compatibility for the old global setting until /analyze:on|off is used.
-  return loadChecksConfig()?.enableAnalyzeTool ?? ANALYZE_GAP_DEFAULT_ENABLED;
+  return loadAnalyzeEnabledProjects().includes(cwd);
 }
 
 export function setAnalyzeProjectEnabled(cwd: string, enabled: boolean): void {
   const projects = new Set(loadAnalyzeEnabledProjects());
   if (enabled) projects.add(cwd);
   else projects.delete(cwd);
-  const nextProjects = [...projects];
-  const current = loadChecksConfig();
-  if (current) {
-    saveChecksConfig({ ...current, enabledProjects: nextProjects });
-    return;
-  }
-
-  const dir = dirname(CONFIG_PATH);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    CONFIG_PATH,
-    JSON.stringify({ ...readRawChecksConfig(), enabledProjects: nextProjects }, null, 2),
-    "utf-8",
-  );
-}
-
-/** Whether the agent-callable analysis tools are enabled for a project. */
-export function isAnalyzeToolEnabled(cwd?: string): boolean {
-  if (cwd !== undefined) return isAnalyzeProjectEnabled(cwd);
-  return loadChecksConfig()?.enableAnalyzeTool ?? ANALYZE_GAP_DEFAULT_ENABLED;
+  saveChecksConfig({ ...loadChecksConfig(), enabledProjects: [...projects] });
 }
 
 /** The shared model settings for the agent-callable gap-finder and solution-precheck tools. */
 export function loadAnalyzeGapConfig(): AnalyzeGapConfig | null {
-  const analyzeGap = loadChecksConfig()?.analyzeGap;
+  const analyzeGap = loadChecksConfig().analyzeGap;
   if (!analyzeGap?.provider || !analyzeGap.modelId || !analyzeGap.thinkingLevel) return null;
   const timeoutMinutes = Number.isFinite(analyzeGap.timeoutMinutes)
     ? Math.min(ANALYZE_TIMEOUT_MAX_MINUTES, Math.max(ANALYZE_TIMEOUT_MIN_MINUTES, analyzeGap.timeoutMinutes))
     : ANALYZE_DEFAULT_TIMEOUT_MINUTES;
   return { ...analyzeGap, timeoutMinutes };
+}
+
+/** Save the analysis-tool model settings without touching the rest of the config. */
+export function saveAnalyzeGapConfig(analyzeGap: AnalyzeGapConfig): void {
+  saveChecksConfig({ ...loadChecksConfig(), analyzeGap });
 }
 
 export function loadEnabledModelRefs(): string[] {

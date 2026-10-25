@@ -101,8 +101,6 @@ export interface SolverGapConfig {
   timeoutMinutes: number;
   /** Number of parallel solver agents to run. */
   solverCount: number;
-  /** Optional local file containing a Claude setup-token for Fargate solver runs. */
-  claudeOAuthTokenFile?: string;
 }
 
 export interface AutoReviewConfig {
@@ -116,6 +114,15 @@ export interface AutoReviewConfig {
   concurrency: number;
 }
 
+export interface SolverReviewConfig {
+  /** Claude Code CLI model alias or model ID used by the local `/checks --solve` fairness reviewer. */
+  modelId: string;
+  /** Claude Code CLI reviewer effort passed through as `--effort`. */
+  thinkingLevel: ClaudeThinkingLevel;
+  /** Timeout for the reviewer invocation. */
+  timeoutMinutes: number;
+}
+
 export interface PromptHumanizerConfig {
   /** Number of humanizer drafts to request from CoreWeave (1–10). */
   candidateCount?: number;
@@ -125,19 +132,18 @@ export interface PromptHumanizerConfig {
   coreweaveApiKeyFile?: string;
 }
 
-/** Single combined `checks-config.json`: local analysis reviewer settings and Claude benchmark settings. */
+/** Single combined `checks-config.json`: Claude benchmark/review settings and local analysis-tool settings. */
 export interface ChecksConfig {
-  provider: string;
-  modelId: string;
-  thinkingLevel: ThinkingLevel;
+  /** Optional local file containing a Claude setup-token for Fargate solver runs. */
+  claudeOAuthTokenFile?: string;
   fargate?: FargateConfig;
   solverGap?: SolverGapConfig;
+  /** Local Claude CLI settings for the `/checks --solve` fairness reviewer. */
+  solverReview?: SolverReviewConfig;
   /** Local Claude CLI settings for `/checks --autoreview`. */
   autoReview?: AutoReviewConfig;
   /** Project folders where the agent-callable analysis tools are enabled. */
   enabledProjects?: string[];
-  /** Legacy global setting retained for migration. */
-  enableAnalyzeTool?: boolean;
   /** Model/thinking-level settings for the agent-callable gap-finder and solution-precheck tools. */
   analyzeGap?: AnalyzeGapConfig;
   /** Candidate-count settings for the opt-in agent-prompt humanizer. */
@@ -278,7 +284,7 @@ export interface SolverRunResult {
   artifactsDir?: string;
 }
 
-/** Read-only Pi reviewer assessment of all agent solutions and the repository's tests. */
+/** Read-only Claude CLI reviewer assessment of all agent solutions and the repository's tests. */
 export interface SolverReviewResult {
   status: "ok" | "timedOut" | "cancelled" | "error";
   text: string;

@@ -18,20 +18,23 @@ import {
   AUTO_REVIEW_TIMEOUT_MAX_MINUTES,
   AUTO_REVIEW_TIMEOUT_MIN_MINUTES,
   getSupportedThinkingLevels,
-  isAnalyzeToolEnabled,
-  loadAnalyzeEnabledProjects,
+  isAnalyzeProjectEnabled,
   loadAutoReviewConfig,
   loadChecksConfig,
   loadEnabledModelRefs,
   loadSolverGapConfig,
+  loadSolverReviewConfig,
   persistFargateResourceUsage,
   SOLVER_GAP_SOLVER_COUNT_MAX,
   SOLVER_GAP_SOLVER_COUNT_MIN,
   SOLVER_GAP_TIMEOUT_MAX_MINUTES,
   SOLVER_GAP_TIMEOUT_MIN_MINUTES,
+  SOLVER_REVIEW_TIMEOUT_MAX_MINUTES,
+  SOLVER_REVIEW_TIMEOUT_MIN_MINUTES,
+  saveAnalyzeGapConfig,
   saveAutoReviewConfig,
-  saveChecksConfig,
   saveSolverGapConfig,
+  saveSolverReviewConfig,
   setAnalyzeProjectEnabled,
   splitProviderModel,
 } from "./config.js";
@@ -47,11 +50,11 @@ import { analyzeToolSettingChanged } from "./tool-sync.js";
 import type {
   AnalyzeGapConfig,
   AutoReviewConfig,
-  ChecksConfig,
   ClaudeThinkingLevel,
   CommandOption,
   FargateResourceUsage,
   SolverGapConfig,
+  SolverReviewConfig,
   SolverReviewResult,
   SolverRunResult,
   ThinkingLevel,
@@ -63,7 +66,7 @@ const COMMAND_COMPLETIONS: readonly CommandOption[] = [
   {
     value: "--config",
     label: "--config",
-    description: "Configure local Pi reviewer, analysis tools, and Claude solvers",
+    description: "Configure Claude solvers and reviewers, and the local Pi analysis tools",
   },
   { value: "--solve", label: "--solve", description: "Run Claude agents on agent_prompt.md" },
   {
@@ -139,8 +142,8 @@ const DEFAULT_ANALYZE_GAP: AnalyzeGapConfig = {
   timeoutMinutes: ANALYZE_DEFAULT_TIMEOUT_MINUTES,
 };
 
-function getAnalyzeGapConfig(current: ChecksConfigLike | null): AnalyzeGapConfig {
-  const configured = current?.analyzeGap;
+function getAnalyzeGapConfig(): AnalyzeGapConfig {
+  const configured = loadChecksConfig().analyzeGap;
   const configuredTimeout = configured?.timeoutMinutes;
   const timeoutMinutes =
     typeof configuredTimeout === "number" && Number.isFinite(configuredTimeout)
@@ -152,10 +155,11 @@ function getAnalyzeGapConfig(current: ChecksConfigLike | null): AnalyzeGapConfig
 type ConfigRowId =
   | "solver-model"
   | "solvergap-thinking"
-  | "reviewer-model"
-  | "reviewer-thinking"
   | "solvergap-timeout"
   | "solvergap-solver-count"
+  | "solverreview-model"
+  | "solverreview-effort"
+  | "solverreview-timeout"
   | "analyze-enabled"
   | "analyze-timeout"
   | "analyze-gap-model"
@@ -178,12 +182,11 @@ interface ConfigRow {
 /** Builds the current row list from config state — recomputed on every render so pickers' results show up immediately. */
 function buildConfigRows(
   ctx: ExtensionCommandContext,
-  current: ChecksConfigLike | null,
   solverGap: SolverGapConfig,
   analyzeGap: AnalyzeGapConfig,
   autoReview: AutoReviewConfig = loadAutoReviewConfig(),
+  solverReview: SolverReviewConfig = loadSolverReviewConfig(),
 ): ConfigRow[] {
-  const reviewerLevels = current ? supportedThinkingLevelsFor(ctx, current.provider, current.modelId) : ["off"];
   const analyzeGapLevels = analyzeGap.provider
     ? supportedThinkingLevelsFor(ctx, analyzeGap.provider, analyzeGap.modelId)
     : ["off"];
@@ -199,7 +202,7 @@ function buildConfigRows(
     {
       id: "solvergap-thinking",
       section: "Solver",
-      label: "Thinking level",
+      label: "Solver effort",
       value: solverGap.thinkingLevel,
       kind: "cycle",
       values: ["low", "medium", "high", "xhigh", "max"],
@@ -207,7 +210,7 @@ function buildConfigRows(
     {
       id: "solvergap-timeout",
       section: "Solver",
-      label: "Timeout",
+      label: "Solver timeout",
       value: `${solverGap.timeoutMinutes} min`,
       kind: "cycle",
       values: Array.from(
@@ -229,19 +232,31 @@ function buildConfigRows(
       ),
     },
     {
-      id: "reviewer-model",
+      id: "solverreview-model",
       section: "Solver",
-      label: "Local reviewer model (Pi)",
-      value: current ? `${current.provider}/${current.modelId}` : "not set",
-      kind: "model",
+      label: "Solver reviewer model (Claude)",
+      value: solverReview.modelId,
+      kind: "cycle",
+      values: ["haiku", "sonnet", "opus"],
     },
     {
-      id: "reviewer-thinking",
+      id: "solverreview-effort",
       section: "Solver",
-      label: "Local reviewer thinking",
-      value: current?.thinkingLevel ?? "off",
+      label: "Solver reviewer effort",
+      value: solverReview.thinkingLevel,
       kind: "cycle",
-      values: reviewerLevels,
+      values: ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      id: "solverreview-timeout",
+      section: "Solver",
+      label: "Solver reviewer timeout",
+      value: `${solverReview.timeoutMinutes} min`,
+      kind: "cycle",
+      values: Array.from(
+        { length: Math.floor((SOLVER_REVIEW_TIMEOUT_MAX_MINUTES - SOLVER_REVIEW_TIMEOUT_MIN_MINUTES) / 10) + 1 },
+        (_, i) => SOLVER_REVIEW_TIMEOUT_MIN_MINUTES + i * 10,
+      ).map((v) => `${v} min`),
     },
     {
       id: "autoreview-model",
@@ -285,7 +300,7 @@ function buildConfigRows(
       id: "analyze-enabled",
       section: "Analysis Tools",
       label: "Enabled here",
-      value: isAnalyzeToolEnabled(ctx.cwd) ? "on" : "off",
+      value: isAnalyzeProjectEnabled(ctx.cwd) ? "on" : "off",
       kind: "cycle",
       values: ["on", "off"],
     },
@@ -317,16 +332,6 @@ function buildConfigRows(
   ];
 }
 
-type ChecksConfigLike = {
-  provider: string;
-  modelId: string;
-  thinkingLevel: ThinkingLevel;
-  solverGap?: SolverGapConfig;
-  enabledProjects?: string[];
-  enableAnalyzeTool?: boolean;
-  analyzeGap?: AnalyzeGapConfig;
-};
-
 /** Custom row-based menu component: renders Solver and Analysis Tools rows. Cycling rows update and persist in place; only model rows exit the overlay to run a picker. */
 class ConfigMenuComponent {
   selectedIndex = 0;
@@ -339,18 +344,12 @@ class ConfigMenuComponent {
     private onActivateModel: (id: ConfigRowId) => void,
     private onExit: () => void,
   ) {
-    this.rows = buildConfigRows(
-      ctx,
-      loadChecksConfig(),
-      loadSolverGapConfig(),
-      getAnalyzeGapConfig(loadChecksConfig()),
-    );
+    this.rows = buildConfigRows(ctx, loadSolverGapConfig(), getAnalyzeGapConfig());
   }
 
   /** Recompute rows from the latest saved config (used after a model picker returns) without resetting selection. */
   refresh() {
-    const current = loadChecksConfig();
-    this.rows = buildConfigRows(this.ctx, current, loadSolverGapConfig(), getAnalyzeGapConfig(current));
+    this.rows = buildConfigRows(this.ctx, loadSolverGapConfig(), getAnalyzeGapConfig());
     this.selectedIndex = Math.min(this.selectedIndex, this.rows.length - 1);
   }
 
@@ -399,7 +398,6 @@ class ConfigMenuComponent {
         return;
       }
       if (!row.values || row.values.length === 0) return;
-      const current = loadChecksConfig();
       const solverGap = loadSolverGapConfig();
       const currentIndex = row.values.indexOf(row.value);
       const nextValue = row.values[(currentIndex + 1) % row.values.length];
@@ -422,6 +420,16 @@ class ConfigMenuComponent {
         this.onCycleSaved();
         return;
       }
+      if (row.id.startsWith("solverreview-")) {
+        const solverReview = loadSolverReviewConfig();
+        if (row.id === "solverreview-model") solverReview.modelId = nextValue;
+        else if (row.id === "solverreview-effort") solverReview.thinkingLevel = nextValue as ClaudeThinkingLevel;
+        else solverReview.timeoutMinutes = Number.parseInt(nextValue, 10);
+        saveSolverReviewConfig(solverReview);
+        this.refresh();
+        this.onCycleSaved();
+        return;
+      }
       if (row.id.startsWith("autoreview-")) {
         const autoReview = loadAutoReviewConfig();
         if (row.id === "autoreview-model") autoReview.modelId = nextValue;
@@ -439,25 +447,13 @@ class ConfigMenuComponent {
         this.onCycleSaved();
         return;
       }
-      if (!current) {
-        this.ctx.ui.notify(
-          "Set the local Pi reviewer model first — it's required before analysis-tool settings",
-          "warning",
-        );
-        return;
-      }
-      const analyzeGap = getAnalyzeGapConfig(current);
-      if (row.id === "reviewer-thinking") {
-        saveChecksConfig({ ...current, thinkingLevel: nextValue as ThinkingLevel, solverGap, analyzeGap });
-      } else if (row.id === "analyze-enabled") {
+      const analyzeGap = getAnalyzeGapConfig();
+      if (row.id === "analyze-enabled") {
         setAnalyzeProjectEnabled(this.ctx.cwd, nextValue === "on");
       } else if (row.id === "analyze-timeout") {
-        saveChecksConfig({
-          ...current,
-          analyzeGap: { ...analyzeGap, timeoutMinutes: Number.parseInt(nextValue, 10) },
-        });
+        saveAnalyzeGapConfig({ ...analyzeGap, timeoutMinutes: Number.parseInt(nextValue, 10) });
       } else if (row.id === "analyze-gap-thinking") {
-        saveChecksConfig({ ...current, analyzeGap: { ...analyzeGap, thinkingLevel: nextValue as ThinkingLevel } });
+        saveAnalyzeGapConfig({ ...analyzeGap, thinkingLevel: nextValue as ThinkingLevel });
       }
       this.refresh();
       this.onCycleSaved();
@@ -514,39 +510,14 @@ async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
 
     if (!activated) return;
 
-    const current = loadChecksConfig();
-    const solverGap = loadSolverGapConfig();
-    const analyzeGap = getAnalyzeGapConfig(current);
-
-    if (activated === "reviewer-model") {
-      const picked = await pickModelOnly(ctx, current, "Select local Pi reviewer model");
-      if (!picked) continue;
-      const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
-      const thinkingLevel = levels.includes(current?.thinkingLevel ?? "off")
-        ? (current?.thinkingLevel ?? "off")
-        : (levels[0] ?? "off");
-      saveChecksConfig({
-        ...picked,
-        thinkingLevel,
-        solverGap,
-        analyzeGap,
-        enabledProjects: current?.enabledProjects ?? loadAnalyzeEnabledProjects(),
-        enableAnalyzeTool: current?.enableAnalyzeTool,
-      });
-      ctx.ui.notify(`Local Pi reviewer model saved: ${picked.provider}/${picked.modelId}`, "info");
-      continue;
-    }
+    const analyzeGap = getAnalyzeGapConfig();
 
     if (activated === "analyze-gap-model") {
-      if (!current) {
-        ctx.ui.notify("Set the local Pi reviewer model first — it's required before analyze-tool settings.", "warning");
-        continue;
-      }
       const picked = await pickModelOnly(ctx, analyzeGap.provider ? analyzeGap : null, "Select gap-finder model");
       if (!picked) continue;
       const levels = supportedThinkingLevelsFor(ctx, picked.provider, picked.modelId);
       const thinkingLevel = levels.includes(analyzeGap.thinkingLevel) ? analyzeGap.thinkingLevel : (levels[0] ?? "off");
-      saveChecksConfig({ ...current, analyzeGap: { ...analyzeGap, ...picked, thinkingLevel } });
+      saveAnalyzeGapConfig({ ...analyzeGap, ...picked, thinkingLevel });
       ctx.ui.notify(`Gap-finder model saved: ${picked.provider}/${picked.modelId}`, "info");
     }
   }
@@ -649,27 +620,9 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         ctx.ui.notify("A checks run is already in progress.", "warning");
         return;
       }
-      const reviewerConfig = loadChecksConfig();
-      const config: ChecksConfig = reviewerConfig ?? {
-        provider: "claude-cli",
-        modelId: "default",
-        thinkingLevel: "off",
-      };
-      const reviewerModel = reviewerConfig
-        ? ctx.modelRegistry.find(reviewerConfig.provider, reviewerConfig.modelId)
-        : ctx.model;
-      if (!reviewerModel || (reviewerConfig && !ctx.modelRegistry.hasConfiguredAuth(reviewerModel))) {
-        ctx.ui.notify(
-          "Configure an authenticated local Pi reviewer model in `/checks --config` before running `/checks --solve`.",
-          "error",
-        );
-        return;
-      }
-      const reviewerThinkingLevel = reviewerConfig?.thinkingLevel ?? "off";
-      const reviewerModelName = `${reviewerModel.provider}/${reviewerModel.id}`;
-      const reviewerContextWindow = Number.isFinite(reviewerModel.contextWindow)
-        ? reviewerModel.contextWindow
-        : undefined;
+      const config = loadChecksConfig();
+      const reviewerConfig = loadSolverReviewConfig();
+      const reviewerModelName = `claude-cli/${reviewerConfig.modelId}`;
       const missing = [...REQUIRED_FILES, "Dockerfile", "test.patch"].filter(
         (file) => !existsSync(join(ctx.cwd, file)),
       );
@@ -771,23 +724,22 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             prepareLocalSolverReviewWorkspace(ctx.cwd, dir, solverResults);
             const review = await runSolverReview({
               tempDir: dir,
-              model: reviewerModel,
-              thinkingLevel: reviewerThinkingLevel,
-              contextWindow: reviewerContextWindow,
+              config: reviewerConfig,
               taskPrompt,
               solverResults,
               testGuidelines: loadTestGuidelines(),
               fairnessRules: loadFairnessRules(),
+              hasReferenceSolution: existsSync(join(ctx.cwd, "solution.patch")),
               cancelSignal: abort.signal,
             });
-            solverReview = { ...review, model: reviewerModelName, thinkingLevel: reviewerThinkingLevel };
+            solverReview = { ...review, model: reviewerModelName, thinkingLevel: reviewerConfig.thinkingLevel };
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             solverReview = {
               status: "error",
               text: message,
               model: reviewerModelName,
-              thinkingLevel: reviewerThinkingLevel,
+              thinkingLevel: reviewerConfig.thinkingLevel,
               error: message,
             };
           }
@@ -810,15 +762,8 @@ export function registerChecksCommand(pi: ExtensionAPI) {
             return;
           }
         }
-        const reportConfig: ChecksConfig = {
-          ...config,
-          provider: "claude-cli",
-          modelId: solverConfig.modelId,
-          thinkingLevel: "off",
-        };
         const merged = mergeReport({
           existingReport: loadExistingReport(join(ctx.cwd, "shipd_report.json")),
-          config: reportConfig,
           runGapFinder: false,
           testGaps: [],
           gapAnalysisIncomplete: false,

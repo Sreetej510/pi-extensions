@@ -37,6 +37,7 @@ import {
   FARGATE_PREQUALITY_PROFILE,
   HUMANIZER_MAX_CANDIDATE_COUNT,
   HUMANIZER_MIN_CANDIDATE_COUNT,
+  loadClaudeOAuthTokenFile,
   resolveFargateResources,
 } from "./config.js";
 import { type FargateDockerPlan, parseFargateDockerfile } from "./fargate-docker.js";
@@ -137,7 +138,7 @@ async function runFargateWorker(opts: {
   const solverConfig = opts.solverConfig;
   const agentTimeoutMinutes = opts.mode === "solver" ? Math.max(1, Math.floor(solverConfig?.timeoutMinutes ?? 20)) : 0;
   const directS3 = Boolean(fargateConfig.taskRoleArn);
-  const claudeTokenPath = opts.mode === "solver" ? findClaudeOAuthTokenPath(solverConfig) : undefined;
+  const claudeTokenPath = opts.mode === "solver" ? findClaudeOAuthTokenPath() : undefined;
   const workerClaudeTokenPath = claudeTokenPath
     ? join(tmpdir(), `.shipd-fargate-claude-token-${randomUUID()}.txt`)
     : undefined;
@@ -177,7 +178,7 @@ async function runFargateWorker(opts: {
       throw new Error("Missing test.patch; it is applied only after each solver finishes.");
     if (!claudeTokenPath && opts.mode === "solver")
       throw new Error(
-        "Missing Claude OAuth token file path. Set solverGap.claudeOAuthTokenFile in checks-config.json or CLAUDE_CODE_OAUTH_TOKEN_FILE.",
+        "Missing Claude OAuth token file path. Set claudeOAuthTokenFile in checks-config.json or CLAUDE_CODE_OAUTH_TOKEN_FILE.",
       );
     if (claudeTokenPath && !existsSync(claudeTokenPath))
       throw new Error(`Claude OAuth token file not found: ${claudeTokenPath}. Check the configured path.`);
@@ -628,8 +629,8 @@ function loadFargateConfigFromChecks(config: ChecksConfig, repoDir: string, mode
   return projectProfile ? { ...fargate, resourceProfile: projectProfile } : fargate;
 }
 
-function findClaudeOAuthTokenPath(solverConfig?: SolverGapConfig): string | undefined {
-  return process.env.CLAUDE_CODE_OAUTH_TOKEN_FILE?.trim() || solverConfig?.claudeOAuthTokenFile?.trim() || undefined;
+function findClaudeOAuthTokenPath(): string | undefined {
+  return process.env.CLAUDE_CODE_OAUTH_TOKEN_FILE?.trim() || loadClaudeOAuthTokenFile();
 }
 
 function findWorkerPath(): string {

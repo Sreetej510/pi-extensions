@@ -114,7 +114,7 @@ function claudeTokenUsage(result: Json): TokenUsage | undefined {
 export function runClaude(opts: {
   cwd: string;
   prompt: string;
-  config: AutoReviewConfig;
+  config: Pick<AutoReviewConfig, "modelId" | "thinkingLevel" | "timeoutMinutes">;
   signal: AbortSignal;
 }): Promise<ClaudeRunResult> {
   const args = [

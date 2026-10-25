@@ -6,12 +6,7 @@ import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { runGapFinder, runSolutionAudit } from "./agents.js";
-import {
-  ANALYZE_DEFAULT_TIMEOUT_MINUTES,
-  isAnalyzeToolEnabled,
-  loadAnalyzeGapConfig,
-  loadChecksConfig,
-} from "./config.js";
+import { isAnalyzeProjectEnabled, loadAnalyzeGapConfig } from "./config.js";
 import { getChangedCodeDiff, listChangedCodeFiles } from "./git.js";
 import { registerHumanizerTool } from "./humanize.js";
 import { formatDuration } from "./report.js";
@@ -125,7 +120,7 @@ function registerAnalysisTool(pi: ExtensionAPI, kind: AnalysisKind): void {
       return component;
     },
     async execute(_toolCallId, _params, signal, onUpdate, ctx) {
-      if (!isAnalyzeToolEnabled(ctx.cwd)) {
+      if (!isAnalyzeProjectEnabled(ctx.cwd)) {
         throw new Error(`${toolName} is disabled for this project. Enable the analysis tools with /analyze:on.`);
       }
 
@@ -134,14 +129,17 @@ function registerAnalysisTool(pi: ExtensionAPI, kind: AnalysisKind): void {
         throw new Error("Missing required file in project root: agent_prompt.md");
       }
 
-      const configuredAnalyze = loadAnalyzeGapConfig();
-      const config = configuredAnalyze ?? loadChecksConfig();
-      const model = config ? ctx.modelRegistry.find(config.provider, config.modelId) : ctx.model;
-      if (!model || (config && !ctx.modelRegistry.hasConfiguredAuth(model))) {
-        throw new Error(`No model configured/authenticated for ${toolName}. Set one via /checks --config.`);
+      const config = loadAnalyzeGapConfig();
+      if (!config) {
+        throw new Error(`No analysis model configured for ${toolName}. Set one via /checks --config.`);
       }
-      const thinkingLevel = configuredAnalyze?.thinkingLevel ?? config?.thinkingLevel ?? "off";
-      const timeoutMinutes = configuredAnalyze?.timeoutMinutes ?? ANALYZE_DEFAULT_TIMEOUT_MINUTES;
+      const model = ctx.modelRegistry.find(config.provider, config.modelId);
+      if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
+        throw new Error(
+          `Analysis model ${config.provider}/${config.modelId} is not available or authenticated. Set one via /checks --config.`,
+        );
+      }
+      const { thinkingLevel, timeoutMinutes } = config;
 
       const abort = new AbortController();
       if (signal) {
