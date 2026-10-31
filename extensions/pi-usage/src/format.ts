@@ -2,6 +2,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { BAR_SEGMENTS, LIMIT_VALUE_COLUMN, RESET_FOREGROUND } from "./constants.js";
 import { isOpenAICodexModel, reportMatchesModel } from "./models.js";
 import type {
+  AnthropicStatusWindow,
   CodexUsageReport,
   NormalizedCredits,
   NormalizedRateLimitSnapshot,
@@ -59,7 +60,54 @@ export function formatCodexUsageStatusline(report: CodexUsageReport, model?: Pro
 }
 
 export function formatUsageStatusline(report: UsageReport, model?: ProviderUsageModel): string {
-  return report.provider === "anthropic" ? report.statusline : formatCodexUsageStatusline(report, model);
+  if (report.provider === "codex") return formatCodexUsageStatusline(report, model);
+  return report.statusWindows?.length
+    ? `claude ${formatAnthropicStatusWindows(report.statusWindows)}`
+    : report.statusline;
+}
+
+/** Whether the statusline text changes with the clock (time left to a reset). */
+export function usageStatuslineHasCountdown(report: UsageReport): boolean {
+  return report.provider === "anthropic" && Boolean(report.statusWindows?.some((window) => window.resetsAt));
+}
+
+/** Groups adjacent windows that reset at the same minute, prints the time left
+ * once per group and separates groups with ` / `:
+ * `5h 9% ↻1h16m / 7d 19% fable 7% ↻9h55m`
+ * (the weekly window and the Fable limit reset together). Time left rather than
+ * a clock time, so the text is the same in every time zone. */
+export function formatAnthropicStatusWindows(windows: AnthropicStatusWindow[]): string {
+  const groups: { texts: string[]; resetAt?: number }[] = [];
+  for (const window of windows) {
+    const resetAt = window.resetsAt ? roundedResetTime(window.resetsAt) : undefined;
+    const last = groups.at(-1);
+    if (last && last.resetAt === resetAt) last.texts.push(window.text);
+    else groups.push({ texts: [window.text], resetAt });
+  }
+  return groups
+    .map((group) => {
+      const text = group.texts.join(" ");
+      const left = group.resetAt !== undefined ? formatTimeLeft(group.resetAt - Date.now()) : undefined;
+      return left ? `${text} ↻${left}` : text;
+    })
+    .join(" / ");
+}
+
+/** `resets_at` jitters around the minute (`21:19:59.98` vs `21:20:00.45` between
+ * calls); round to the nearest minute so windows that reset together group together. */
+function roundedResetTime(value: string): number | undefined {
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? Math.round(time / 60_000) * 60_000 : undefined;
+}
+
+/** Time left, rounded down: `45m`, `1h16m`, `23h12m`, `1d10h`. */
+function formatTimeLeft(remainingMs: number): string | undefined {
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) return undefined;
+  const minutes = Math.floor(remainingMs / 60_000);
+  if (minutes < 60) return `${Math.max(1, minutes)}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return minutes % 60 ? `${hours}h${minutes % 60}m` : `${hours}h`;
+  return hours % 24 ? `${Math.floor(hours / 24)}d${hours % 24}h` : `${Math.floor(hours / 24)}d`;
 }
 
 export function formatUsageReport(report: UsageReport, cacheAgeMs?: number): string {

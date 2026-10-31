@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CACHE_TTL_MS, DEFAULT_TIMEOUT_MS, STATUS_KEY } from "./constants.js";
 import { isRateLimitErrorMessage, isStaleExtensionContextError, rateLimitBackoffMs } from "./errors.js";
-import { formatUsageStatusline } from "./format.js";
+import { formatUsageStatusline, usageStatuslineHasCountdown } from "./format.js";
 import { isUsageSupportedModel, providerKeyForModel, reportMatchesModel } from "./models.js";
 import { queryUsageWithRetries } from "./query.js";
 import {
@@ -17,6 +17,8 @@ let cache: CachedReport | undefined;
 let combinedCache: { createdAt: number; reports: UsageReport[] } | undefined;
 let statuslineClearTimer: ReturnType<typeof setTimeout> | undefined;
 let statuslineRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+/** Re-renders the statusline each minute so the time left to a reset stays current between fetches. */
+let statuslineTickTimer: ReturnType<typeof setTimeout> | undefined;
 let statuslineRequestId = 0;
 let sessionActive = false;
 let activeStatuslineContext: ExtensionContext | undefined;
@@ -41,11 +43,17 @@ export function clearCodexMemoryCache(): void {
   cache = undefined;
 }
 
+const clearStatuslineTick = () => {
+  if (statuslineTickTimer) clearTimeout(statuslineTickTimer);
+  statuslineTickTimer = undefined;
+};
+
 const clearStatuslineTimers = () => {
   if (statuslineClearTimer) clearTimeout(statuslineClearTimer);
   if (statuslineRefreshTimer) clearTimeout(statuslineRefreshTimer);
   statuslineClearTimer = undefined;
   statuslineRefreshTimer = undefined;
+  clearStatuslineTick();
 };
 
 export function handleStaleContextError(ctx: ExtensionContext, error: unknown): boolean {
@@ -85,6 +93,7 @@ const scheduleTemporaryStatuslineClear = (ctx: ExtensionContext) => {
   statuslineClearTimer = setTimeout(() => {
     statuslineClearTimer = undefined;
     if (!sessionActive || requestId !== statuslineRequestId) return;
+    clearStatuslineTick();
     setStatuslineValue(ctx, undefined);
   }, CACHE_TTL_MS);
   statuslineClearTimer.unref?.();
@@ -105,6 +114,25 @@ const scheduleStatuslineRefresh = (
   statuslineRefreshTimer.unref?.();
 };
 
+const scheduleStatuslineTick = (ctx: ExtensionContext, report: UsageReport, render: () => string) => {
+  clearStatuslineTick();
+  if (!usageStatuslineHasCountdown(report)) return;
+  const requestId = statuslineRequestId;
+  const tick = () => {
+    // Fire just after the next wall-clock minute; resets are rounded to whole minutes.
+    statuslineTickTimer = setTimeout(
+      () => {
+        statuslineTickTimer = undefined;
+        if (!sessionActive || requestId !== statuslineRequestId) return;
+        if (setStatuslineValue(ctx, render())) tick();
+      },
+      60_000 - (Date.now() % 60_000) + 50,
+    );
+    statuslineTickTimer.unref?.();
+  };
+  tick();
+};
+
 const setUsageStatusline = (
   ctx: ExtensionContext,
   report: UsageReport,
@@ -115,12 +143,16 @@ const setUsageStatusline = (
     refreshDelayMs?: number;
   },
 ) => {
-  let text = formatUsageStatusline(report, options.model);
-  if (options.staleAgeMs !== undefined && options.staleAgeMs > CACHE_TTL_MS) {
-    text = `${text} (${formatAgeShort(options.staleAgeMs)} old)`;
-  }
-  if (!setStatuslineValue(ctx, text)) return;
+  const render = () => {
+    const text = formatUsageStatusline(report, options.model);
+    if (options.staleAgeMs === undefined) return text;
+    // Recompute the age on every render so the "(… old)" suffix keeps up with the clock.
+    const staleAgeMs = Date.now() - report.capturedAt;
+    return staleAgeMs > CACHE_TTL_MS ? `${text} (${formatAgeShort(staleAgeMs)} old)` : text;
+  };
+  if (!setStatuslineValue(ctx, render())) return;
   activeStatuslineContext = ctx;
+  scheduleStatuslineTick(ctx, report, render);
   if (statuslineClearTimer) clearTimeout(statuslineClearTimer);
   statuslineClearTimer = undefined;
   if (options.autoRefresh) scheduleStatuslineRefresh(ctx, options.model, options.refreshDelayMs);
@@ -236,6 +268,7 @@ export function applyCurrentProviderStatusline(ctx: ExtensionContext, reports: U
 }
 
 export function setStatuslineChecking(ctx: ExtensionContext): boolean {
+  clearStatuslineTick();
   return setStatuslineValue(ctx, "checking");
 }
 

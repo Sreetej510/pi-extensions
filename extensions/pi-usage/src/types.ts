@@ -46,8 +46,13 @@ export type AnthropicUsageReport = {
   source: "anthropic-oauth";
   capturedAt: number;
   summaryLines: string[];
+  /** Pre-rendered statusline; used as-is when `statusWindows` is absent (e.g. cached by older versions). */
   statusline: string;
+  /** Windows behind the statusline; the time left to each reset is rendered at display time. */
+  statusWindows?: AnthropicStatusWindow[];
 };
+
+export type AnthropicStatusWindow = { text: string; resetsAt?: string };
 
 export type UsageReport = CodexUsageReport | AnthropicUsageReport;
 
@@ -171,6 +176,29 @@ export type AnthropicOAuthUsagePayload = Record<string, unknown> & {
   five_hour?: unknown;
   seven_day?: unknown;
   extra_usage?: unknown;
+  limits?: unknown;
+  weekly_scoped_shares?: unknown;
+};
+
+/** One entry of the `limits` array, e.g.
+ * `{ kind: "weekly_scoped", group: "weekly", percent: 7, resets_at, scope: { model: { display_name: "Fable" } } }`. */
+export type AnthropicLimitEntry = {
+  kind?: unknown;
+  group?: unknown;
+  percent?: unknown;
+  resets_at?: unknown;
+  scope?: unknown;
+};
+
+export type AnthropicLimitScope = {
+  model?: unknown;
+  surface?: unknown;
+};
+
+export type AnthropicWeeklyScopedShare = {
+  limit_index?: unknown;
+  used_percent_of_weekly?: unknown;
+  allowance_percent_of_weekly?: unknown;
 };
 
 export type CodexResetCreditPayload = {
