@@ -1,8 +1,9 @@
 /**
  * Shipd Checks Extension for pi
  *
- * Behavioral test-gap finding, prompt humanization, and post-implementation solution-quality prechecking, plus a
- * Claude CLI benchmark runner for tasks described by `agent_prompt.md`.
+ * The agent-callable `auditor` (a local Claude CLI replica of the hosted Auto Review: unfair tests, test gaps,
+ * solution gaps and improvements), prompt humanization, Shipd quality checks, and a Claude CLI benchmark runner for
+ * tasks described by `agent_prompt.md`.
  *
  * Benchmark flow:
  *   1. Snapshot git HEAD without touching the working tree; copy only agent_prompt.md as task input.
@@ -16,16 +17,17 @@
  *   /shipd:auth             open a browser for first-time Shipd sign-in
  *   /shipd:link <url>       save the Shipd job link for this chat session
  *   /checks                 open a menu for config or solve
- *   /checks --config        configure Claude solver/reviewer settings and local analysis models
+ *   /checks --config        configure Claude solver, reviewer and auditor settings
  *   /checks --solve         run Claude solvers, base/new tests, and a fairness review
- *   /checks --autoreview    local Claude CLI replica of the hosted Auto Review (tests + solution)
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.
  *
  * File layout:
  *   index.ts     extension entry point (this file) — renderer, shortcut, command registration
  *   command.ts   /checks command: argument parsing, settings, and run orchestration
- *   agents.ts    local Pi gap-finder, solution-precheck, and benchmark-review sessions
- *   autoreview*.ts  /checks --autoreview: Claude CLI reviewers, synthesis, verdict; prompts and hosted calibration data
+ *   agents.ts    the --solve fairness reviewer (one Claude CLI session)
+ *   analyze.ts   the agent-callable auditor tool (and humanizer registration)
+ *   auditor*.ts  the auditor's engine: Claude CLI reviewers, synthesis, grouping, report; prompts and calibration data
+ *   claude-cli.ts  read-only local Claude CLI runner shared by the auditor and the --solve reviewer
  *   prompts.ts   task and reviewer prompt text
  *   fargate-runner.ts/worker.ts remote Claude solver/test execution and report transport
  *   report.ts    shipd_report.json load/merge/summary logic
@@ -38,7 +40,6 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Spacer, Text } from "@earendil-works/pi-tui";
-import type { AutoReviewSummary } from "./autoreview.js";
 import { registerChecksCommand } from "./command.js";
 import { PROGRESS_WIDGET_KEY } from "./progress.js";
 import type { SolverSummaryDetail } from "./report.js";
@@ -58,18 +59,18 @@ const CANCEL_SHORTCUT = Key.ctrlShift("x");
 
 export default function shipdChecksExtension(pi: ExtensionAPI) {
   pi.registerCommand("analyze:on", {
-    description: "Enable the gap-finder, solution-precheck, and prompt-humanizer tools for this project folder",
+    description: "Enable the auditor and prompt-humanizer tools for this project folder",
     handler: async (_args, ctx) => {
       setAnalyzeEnabled(pi, ctx.cwd, true);
-      ctx.ui.notify("Gap-finder, solution-precheck, and prompt-humanizer tools ON in this project", "info");
+      ctx.ui.notify("Auditor and prompt-humanizer tools ON in this project", "info");
     },
   });
 
   pi.registerCommand("analyze:off", {
-    description: "Disable the gap-finder, solution-precheck, and prompt-humanizer tools for this project folder",
+    description: "Disable the auditor and prompt-humanizer tools for this project folder",
     handler: async (_args, ctx) => {
       setAnalyzeEnabled(pi, ctx.cwd, false);
-      ctx.ui.notify("Gap-finder, solution-precheck, and prompt-humanizer tools OFF in this project", "info");
+      ctx.ui.notify("Auditor and prompt-humanizer tools OFF in this project", "info");
     },
   });
 
@@ -140,44 +141,6 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
     return container;
   });
 
-  pi.registerMessageRenderer<AutoReviewSummary>("shipd_autoreview_report", (message, _options, theme) => {
-    const summary = message.details;
-    const container = new Container();
-    container.addChild(new Text(theme.bold(theme.fg("accent", "Auto Review (local)")), 0, 0));
-    if (!summary) {
-      container.addChild(new Text(theme.fg("dim", "  nothing to report"), 0, 0));
-      return container;
-    }
-    const color = (verdict: string) =>
-      verdict === "PASS" ? "success" : verdict === "BLOCK" || verdict === "FAIL" ? "error" : "warning";
-    container.addChild(new Text(`  ${theme.bold(theme.fg(color(summary.verdict), summary.verdict))}`, 0, 0));
-    container.addChild(
-      new Text(
-        `  Test Quality ${theme.fg(color(summary.testQuality), summary.testQuality)} (${summary.notFairCount}/${summary.testsGraded} Not fair) · ` +
-          `Solution Quality ${theme.fg(color(summary.solutionQuality), summary.solutionQuality)}`,
-        0,
-        0,
-      ),
-    );
-    container.addChild(
-      new Text(
-        `  ${summary.high.length} gating HIGH, ${summary.mediumCount} MEDIUM; reviewers ${summary.reviewersOk}/${summary.reviewersTotal} ok; ` +
-          `${summary.counterTests} counter-tests in the report (${formatDuration(summary.durationMs)})`,
-        0,
-        0,
-      ),
-    );
-    for (const finding of summary.high.slice(0, 12)) {
-      const text = finding.text.length > 240 ? `${finding.text.slice(0, 240)}…` : finding.text;
-      container.addChild(new Text(theme.fg("error", `  ✗ ${finding.as || finding.area}: ${text}`), 0, 0));
-    }
-    if (summary.high.length > 12) {
-      container.addChild(new Text(theme.fg("dim", `  … ${summary.high.length - 12} more in the report`), 0, 0));
-    }
-    container.addChild(new Text(theme.fg("dim", `  report: ${summary.reportPath}`), 0, 0));
-    return container;
-  });
-
   pi.registerShortcut(CANCEL_SHORTCUT, {
     description: "Cancel an in-progress /checks run",
     handler: (ctx) => {
@@ -193,7 +156,7 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
   registerChecksCommand(pi);
 }
 
-/** Keeps the gap-finder and solution-precheck tools visible only while enabled (like HPC tools). */
+/** Keeps the auditor and humanizer tools visible only while enabled (like HPC tools). */
 function registerAnalysisToolsSync(pi: ExtensionAPI) {
   pi.on("session_start", (event, ctx) => {
     // New, resume, reload, fork — load the persisted setting for this session.

@@ -103,8 +103,8 @@ export interface SolverGapConfig {
   solverCount: number;
 }
 
-export interface AutoReviewConfig {
-  /** Claude Code CLI model alias or model ID used by the local Auto Review reviewers. */
+export interface AuditorConfig {
+  /** Claude Code CLI model alias or model ID used by the `auditor` tool's reviewers. */
   modelId: string;
   /** Claude Code CLI reviewer effort passed through as `--effort`. */
   thinkingLevel: ClaudeThinkingLevel;
@@ -140,26 +140,13 @@ export interface ChecksConfig {
   solverGap?: SolverGapConfig;
   /** Local Claude CLI settings for the `/checks --solve` fairness reviewer. */
   solverReview?: SolverReviewConfig;
-  /** Local Claude CLI settings for `/checks --autoreview`. */
-  autoReview?: AutoReviewConfig;
+  /** Local Claude CLI settings for the `auditor` tool. */
+  auditor?: AuditorConfig;
   /** Project folders where the agent-callable analysis tools are enabled. */
   enabledProjects?: string[];
-  /** Model/thinking-level settings for the agent-callable gap-finder and solution-precheck tools. */
-  analyzeGap?: AnalyzeGapConfig;
   /** Candidate-count settings for the opt-in agent-prompt humanizer. */
   promptHumanizer?: PromptHumanizerConfig;
 }
-
-/** Model settings shared by the read-only gap-finder and solution-precheck tools. */
-export interface AnalyzeAgentConfig {
-  provider: string;
-  modelId: string;
-  thinkingLevel: ThinkingLevel;
-  /** Maximum time allowed for each read-only analysis agent phase. */
-  timeoutMinutes: number;
-}
-
-export interface AnalyzeGapConfig extends AnalyzeAgentConfig {}
 
 export interface ReviewReport {
   verdict: Verdict;
@@ -170,41 +157,10 @@ export interface ReviewReport {
   notes: string[];
 }
 
-/** A fair, public behavioral test gap found by the gap-finder. */
+/** A behavioral test gap, as recorded in shipd_report.json by older gap-finder runs. */
 export interface TestGapFinal {
   description: string;
   justification: string;
-}
-
-/** Kind of actionable problem found by the solution-precheck. */
-export type SolutionAuditCategory =
-  | "missing-requirement"
-  | "regression"
-  | "architecture"
-  | "unsafe-failure"
-  | "inconsistent-path"
-  | "dead-code"
-  | "unrelated-change";
-
-/** A concrete quality problem in the current solution implementation. */
-export interface SolutionAuditFinding {
-  category: SolutionAuditCategory;
-  /** Short behavior, symbol, or concern identifier; avoid requiring a source location. */
-  subject: string;
-  /** What is wrong with the implementation and why it is actionable. */
-  problem: string;
-  /** Prompt, repository, implementation, or regression evidence supporting the finding. */
-  evidence: string;
-  /** The requirement, invariant, or quality property the solution must preserve. */
-  requiredBehavior: string;
-  /** A concrete repair that stays within the prompt and repository conventions. */
-  recommendation: string;
-}
-
-/** Result of the single read-only solution-precheck. */
-export interface SolutionAuditStageResult {
-  status: "ok" | "timedOut" | "cancelled" | "error" | "noSubmission";
-  findings: SolutionAuditFinding[];
 }
 
 export type ReviewerRoleKey = "description" | "tests" | "solution";
@@ -213,12 +169,6 @@ export interface ReviewerRole {
   key: ReviewerRoleKey;
   label: string;
   rubricHeading: RegExp;
-}
-
-/** `ok` means the agent actually finished and submitted (possibly an empty list on purpose). */
-export interface GapStageResult<T> {
-  status: "ok" | "timedOut" | "cancelled" | "error" | "noSubmission";
-  gaps: T[];
 }
 
 export interface CommandOption {

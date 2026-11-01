@@ -299,3 +299,20 @@ export async function snapshotGitHead(
   }
   return { status: "ok" };
 }
+
+const CREATE_PATCHES_TIMEOUT_MS = 120_000;
+
+/** Runs the project's `create_patches.sh` to regenerate test.patch and solution.patch; throws with its output on failure. */
+export async function runCreatePatches(pi: ExtensionAPI, cwd: string, signal?: AbortSignal): Promise<void> {
+  const run = await pi.exec(getShellExecutable(), ["create_patches.sh"], {
+    cwd,
+    timeout: CREATE_PATCHES_TIMEOUT_MS,
+    signal,
+  });
+  if (run.killed || run.code !== 0) {
+    const output = (run.stderr || run.stdout || "").trim().slice(-2_000);
+    throw new Error(
+      `create_patches.sh failed${run.killed ? " or timed out" : ` (exit ${run.code})`}.${output ? `\n${output}` : ""}`,
+    );
+  }
+}

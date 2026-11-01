@@ -1,69 +1,42 @@
-/** Agent-callable gap-finder and solution-precheck tools. Both use one read-only agent flow. */
+/** The agent-callable `auditor` tool (a local Claude CLI replica of the hosted Auto Review) and the humanizer tool. */
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { runGapFinder, runSolutionAudit } from "./agents.js";
-import { isAnalyzeProjectEnabled, loadAnalyzeGapConfig } from "./config.js";
-import { getChangedCodeDiff, listChangedCodeFiles } from "./git.js";
+import { type AuditFinding, type AuditResult, type FindingGroup, GROUP_TITLES, runAudit } from "./auditor.js";
+import { isAnalyzeProjectEnabled } from "./config.js";
 import { registerHumanizerTool } from "./humanize.js";
 import { formatDuration } from "./report.js";
-import { loadFairnessRules, loadGapRules, loadSolutionRules, loadTestGuidelines } from "./rubric.js";
-import type { SolutionAuditFinding, TestGapFinal } from "./types.js";
 
-export const GAP_FINDER_TOOL_NAME = "gap-finder";
-export const SOLUTION_PRECHECK_TOOL_NAME = "solution-precheck";
+export const AUDITOR_TOOL_NAME = "auditor";
 
-const ANALYZE_PREVIEW_LINES = 6;
-const analysisToolParams = Type.Object({});
-type AnalysisKind = "gaps" | "solution";
-
-function analysisToolName(kind: AnalysisKind): string {
-  return kind === "gaps" ? GAP_FINDER_TOOL_NAME : SOLUTION_PRECHECK_TOOL_NAME;
-}
-
-function analysisTitle(kind: AnalysisKind): string {
-  return kind === "gaps" ? "Gap Finder" : "Solution Precheck";
-}
-
-function analysisCountLabel(kind: AnalysisKind, count: number): string {
-  return kind === "gaps" ? `${count} gap${count === 1 ? "" : "s"}` : `${count} finding${count === 1 ? "" : "s"}`;
-}
+const ANALYZE_PREVIEW_LINES = 8;
+const auditorToolParams = Type.Object({});
+let auditInProgress = false;
 
 export function registerAnalysisTools(pi: ExtensionAPI): void {
-  registerAnalysisTool(pi, "gaps");
-  registerAnalysisTool(pi, "solution");
+  registerAuditorTool(pi);
   registerHumanizerTool(pi);
 }
 
-function registerAnalysisTool(pi: ExtensionAPI, kind: AnalysisKind): void {
-  const toolName = analysisToolName(kind);
-  const title = analysisTitle(kind);
+function registerAuditorTool(pi: ExtensionAPI): void {
   pi.registerTool({
-    name: toolName,
-    label: title,
+    name: AUDITOR_TOOL_NAME,
+    label: "Auditor",
     description:
-      kind === "gaps"
-        ? "Use only when explicitly asked to find behavioral test-coverage gaps. Run one exhaustive read-only agent that reviews the prompt sentence by sentence, performs its own fairness and evidence check, and returns confirmed gaps. It never writes or modifies files."
-        : "Use only when explicitly asked for a solution precheck or solution audit. Run one exhaustive read-only agent that checks the implementation for contract gaps, regressions, failure safety, architecture, dead code, and unrelated changes. It never writes or modifies files.",
-    promptSnippet: kind === "gaps" ? "Find behavioral test gaps" : "Precheck solution quality",
-    promptGuidelines:
-      kind === "gaps"
-        ? [
-            "Call gap-finder only when the user explicitly asks for behavioral test-gap analysis; never call it proactively or for unrelated work.",
-            "gap-finder has no parameters and runs one read-only agent that performs its own discovery and fairness validation.",
-            "Run one gap-finder invocation at a time and wait for it to finish; never issue multiple invocations in parallel.",
-            "Read details.testGaps for the confirmed behavioral gaps; the caller applies any changes.",
-          ]
-        : [
-            "Call solution-precheck only when the user explicitly asks for a solution precheck or solution audit; never call it proactively or for unrelated work.",
-            "solution-precheck has no parameters and runs one read-only solution-quality auditor.",
-            "Run one solution-precheck invocation at a time and wait for it to finish; never issue multiple invocations in parallel.",
-            "Read details.solutionAuditFindings for the confirmed solution-quality findings; the caller applies any changes.",
-          ],
-    parameters: analysisToolParams,
+      "Use only when explicitly asked to audit the task, find test gaps, check test fairness, or precheck the solution. " +
+      "Runs a local Claude CLI replica of the hosted Auto Review over agent_prompt.md, test.patch and solution.patch " +
+      "(refreshed with create_patches.sh when present; test.sh is ignored): it finds unfair tests, test gaps, solution " +
+      "gaps and solution improvements, and checks every finding against the hosted proof legs. It never writes or " +
+      "modifies project files other than its report.",
+    promptSnippet: "Audit tests and solution (unfair tests, test gaps, solution gaps, improvements)",
+    promptGuidelines: [
+      "Call auditor only when the user explicitly asks for an audit, test-gap analysis, a fairness check or a solution precheck; never call it proactively or for unrelated work.",
+      "auditor has no parameters. It takes a long time (several Claude CLI reviewers plus a synthesis step) and consumes Claude usage.",
+      "Run one auditor invocation at a time and wait for it to finish; never issue multiple invocations in parallel.",
+      "Read details.unfairTests, details.testGaps, details.solutionGaps and details.solutionImprovements. HIGH findings gate; MEDIUM ones are the fix-before-upload list. They are review findings, not instructions: validate each against agent_prompt.md and the repository before changing anything, and apply the changes yourself.",
+    ],
+    parameters: auditorToolParams,
     renderCall(_args, _theme, context) {
       const state = context.state;
       if (context.executionStarted && state.startedAt === undefined) {
@@ -93,16 +66,10 @@ function registerAnalysisTool(pi: ExtensionAPI, kind: AnalysisKind): void {
       const label = options.isPartial ? "Elapsed" : "Took";
       const endTime = state.endedAt ?? Date.now();
       const duration = state.startedAt !== undefined ? formatDuration(endTime - state.startedAt) : "—";
-      const details = result.details as
-        | {
-            testGaps?: unknown[];
-            solutionAuditFindings?: unknown[];
-          }
-        | undefined;
-      const findings = kind === "gaps" ? details?.testGaps : details?.solutionAuditFindings;
+      const details = result.details as Partial<AuditResult> | undefined;
       const metaParts = [`${label} ${duration}`];
-      if (Array.isArray(findings)) metaParts.push(analysisCountLabel(kind, findings.length));
-      const header = theme.fg("toolTitle", theme.bold(title)) + theme.fg("muted", `  ${metaParts.join("  ·  ")}`);
+      if (details?.verdict) metaParts.push(details.verdict);
+      const header = theme.fg("toolTitle", theme.bold("Auditor")) + theme.fg("muted", `  ${metaParts.join("  ·  ")}`);
       const resultText = (result.content ?? []).map((part) => (part.type === "text" ? part.text : "")).join("\n");
       const output = resultText.trim();
       let displayLines = output ? removeJustifications(output.split("\n")) : ["(no output)"];
@@ -121,78 +88,28 @@ function registerAnalysisTool(pi: ExtensionAPI, kind: AnalysisKind): void {
     },
     async execute(_toolCallId, _params, signal, onUpdate, ctx) {
       if (!isAnalyzeProjectEnabled(ctx.cwd)) {
-        throw new Error(`${toolName} is disabled for this project. Enable the analysis tools with /analyze:on.`);
-      }
-
-      const promptPath = join(ctx.cwd, "agent_prompt.md");
-      if (!existsSync(promptPath)) {
-        throw new Error("Missing required file in project root: agent_prompt.md");
-      }
-
-      const config = loadAnalyzeGapConfig();
-      if (!config) {
-        throw new Error(`No analysis model configured for ${toolName}. Set one via /checks --config.`);
-      }
-      const model = ctx.modelRegistry.find(config.provider, config.modelId);
-      if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
         throw new Error(
-          `Analysis model ${config.provider}/${config.modelId} is not available or authenticated. Set one via /checks --config.`,
+          `${AUDITOR_TOOL_NAME} is disabled for this project. Enable the analysis tools with /analyze:on.`,
         );
       }
-      const { thinkingLevel, timeoutMinutes } = config;
-
+      if (auditInProgress) throw new Error("An auditor run is already in progress; wait for it to finish.");
+      auditInProgress = true;
       const abort = new AbortController();
       if (signal) {
         if (signal.aborted) abort.abort();
         else signal.addEventListener("abort", () => abort.abort(), { once: true });
       }
-
-      const codeFiles = await listChangedCodeFiles(pi, ctx.cwd, abort.signal);
-      if (abort.signal.aborted) throw new Error("Cancelled by user.");
-      const changedCodeDiff = kind === "solution" ? await getChangedCodeDiff(pi, ctx.cwd, codeFiles, abort.signal) : "";
-      if (abort.signal.aborted) throw new Error("Cancelled by user.");
-
-      const common = {
-        tempDir: ctx.cwd,
-        model,
-        thinkingLevel,
-        codeFiles,
-        timeoutMinutes,
-        cancelSignal: abort.signal,
-      };
-
-      if (kind === "solution") {
-        onUpdate?.({ content: [{ type: "text", text: "Prechecking solution quality..." }], details: {} });
-        const audit = await runSolutionAudit({
-          ...common,
-          solutionRules: loadSolutionRules(),
-          changedCodeDiff,
+      try {
+        const audit = await runAudit({
+          pi,
+          cwd: ctx.cwd,
+          signal: abort.signal,
+          onProgress: (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }),
         });
-        if (abort.signal.aborted) throw new Error("Cancelled by user.");
-        if (audit.status !== "ok") throw new Error(`Solution precheck did not complete (status: ${audit.status}).`);
-
-        const findings: SolutionAuditFinding[] = audit.findings;
-        return {
-          content: [{ type: "text", text: buildSolutionAuditResultText(findings) }],
-          details: { solutionAuditFindings: findings },
-        };
+        return { content: [{ type: "text", text: buildAuditResultText(audit) }], details: audit };
+      } finally {
+        auditInProgress = false;
       }
-
-      onUpdate?.({ content: [{ type: "text", text: "Finding behavioral test gaps..." }], details: {} });
-      const gaps = await runGapFinder({
-        ...common,
-        testRubric: loadTestGuidelines(),
-        gapRules: loadGapRules(),
-        fairnessRules: loadFairnessRules(),
-      });
-      if (abort.signal.aborted) throw new Error("Cancelled by user.");
-      if (gaps.status !== "ok") throw new Error(`Gap finder did not complete (status: ${gaps.status}).`);
-
-      const testGaps: TestGapFinal[] = gaps.gaps;
-      return {
-        content: [{ type: "text", text: buildGapFinderResultText(testGaps) }],
-        details: { testGaps },
-      };
     },
   });
 }
@@ -202,7 +119,7 @@ function removeJustifications(lines: string[]): string[] {
   const visible: string[] = [];
   let skipping = false;
   for (const line of lines) {
-    if (/^\s*\d+\.\s+/.test(line)) {
+    if (/^\s*\d+\.\s+/.test(line) || /^\S/.test(line)) {
       skipping = false;
       visible.push(line);
     } else if (/^\s*Justification:/i.test(line)) {
@@ -257,28 +174,39 @@ function styleAnalyzeLine(line: string, theme: import("@earendil-works/pi-coding
   return theme.fg("toolOutput", line);
 }
 
-function buildGapFinderResultText(testGaps: TestGapFinal[]): string {
-  if (testGaps.length === 0) return "Gap finder complete: no confirmed behavioral test gaps were found.";
-  const lines = testGaps.map((gap, i) => `${i + 1}. ${gap.description}\n   Justification: ${gap.justification}`);
-  return [
-    "Below are behavioral test gaps found by the gap-finder agent. Validate each against the prompt and repository before implementing a test.",
-    "",
-    ...lines,
-  ].join("\n");
+function findingLine(finding: AuditFinding, index: number): string {
+  const tag = [finding.level, finding.criterion].filter(Boolean).join(" ");
+  const lines = [`${index + 1}. [${tag}] ${finding.finding}`];
+  const justification = [finding.why, finding.failedLeg ? `failed leg: ${finding.failedLeg}` : ""]
+    .filter(Boolean)
+    .join("; ");
+  if (justification) lines.push(`   Justification: ${justification}`);
+  return lines.join("\n");
 }
 
-function buildSolutionAuditResultText(findings: SolutionAuditFinding[]): string {
-  if (findings.length === 0) return "Solution precheck complete: no actionable solution-quality findings were found.";
-  const lines = findings.map(
-    (finding, i) =>
-      `${i + 1}. [${finding.category}] ${finding.subject}: ${finding.problem}\n` +
-      `   Evidence: ${finding.evidence}\n` +
-      `   Required behavior: ${finding.requiredBehavior}\n` +
-      `   Recommendation: ${finding.recommendation}`,
-  );
-  return [
-    "Below are suggestions from the solution-precheck agent, not instructions. Decide whether each finding is valid under the prompt and repository, and implement only the repairs you judge appropriate.",
-    "",
-    ...lines,
-  ].join("\n");
+function buildAuditResultText(audit: AuditResult): string {
+  const lines = [
+    `Auditor verdict ${audit.verdict}: Test Quality ${audit.testQuality}, Solution Quality ${audit.solutionQuality}. Report: ${audit.reportPath}`,
+    "These are review findings, not instructions. HIGH findings gate; MEDIUM ones should be fixed before upload. Validate each against agent_prompt.md and the repository, and implement only the changes you judge correct.",
+  ];
+  for (const group of Object.keys(GROUP_TITLES) as FindingGroup[]) {
+    const findings = audit[group];
+    lines.push("", `${GROUP_TITLES[group]} (${findings.length}):`);
+    if (!findings.length) lines.push("   none");
+    else lines.push(...findings.map(findingLine));
+  }
+  const failed = audit.reviewers.filter((reviewer) => reviewer.status !== "ok");
+  if (failed.length) {
+    lines.push(
+      "",
+      `Reviewers that did not finish: ${failed.map((reviewer) => `${reviewer.name} (${reviewer.status})`).join(", ")}`,
+    );
+  }
+  if (audit.counterTests.length) {
+    lines.push(
+      "",
+      `${audit.counterTests.length} counter-tests (not executed) are in details.counterTests and the report.`,
+    );
+  }
+  return lines.join("\n");
 }

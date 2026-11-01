@@ -1,9 +1,12 @@
 /**
- * Reviewer prompts for `/checks --autoreview`, ported from the shipd-workflow Auto Review replica
+ * Reviewer prompts for the `auditor` tool, ported from the shipd-workflow Auto Review replica
  * (shipd-v5/rulebook/rulebook_agents.py and shipd-v5/tq_local.py). Only the test and solution reviewers are kept, one
  * read each, with overlapping reviewers folded in: Local Test Quality per-test fairness (+ judge-tests' fixture rules)
  * and coverage (+ judge-tests' discrimination rules), the solution audit lenses (+ the lifecycle walk),
- * per-unit Solution Quality, and the synthesis step with its proof legs. The fairness ledger is dropped: per-test
+ * per-unit Solution Quality, and the synthesis step with its proof legs. The rules.md families the old gap-finder and
+ * solution-precheck tools used are carried over: fairness rules into per-test Test Quality, test-gap rules into
+ * coverage, solution-gap rules into the audit and per-unit reads, and the audit's quality lens takes over the
+ * precheck's betterment checks (conventions, dead code, unrelated changes, duplication). The fairness ledger is dropped: per-test
  * Test Quality already sources every assertion. The test runner (test.sh) is out of scope: it is stripped from
  * test.patch and the snapshot, and no reviewer grades it.
  *
@@ -11,7 +14,7 @@
  *   repo/            clean git HEAD (the pinned base; patches NOT applied)
  *   review_assets/   problem.md (agent_prompt.md), test.patch (without test.sh), solution.patch, proposed_tests/
  * Reviewers cannot write files, so each prompt asks for one final ```json block; counter-tests travel inline.
- * Hosted calibration is distilled into general patterns (autoreview-data.ts), never quotes from past tasks.
+ * Hosted calibration is distilled into general patterns (auditor-data.ts), never quotes from past tasks.
  */
 
 import {
@@ -24,7 +27,8 @@ import {
   TQ_PROCEDURE,
   TQ_UNFAIR_FAMILIES,
   TQ_UNFAIR_PATTERNS,
-} from "./autoreview-data.js";
+} from "./auditor-data.js";
+import { loadFairnessRules, loadGapRules, loadSolutionRules } from "./rubric.js";
 
 const FENCE = "```";
 export const REPO_DIR = "repo";
@@ -154,6 +158,9 @@ ${bodies}
 ${REPLY}${FENCE}json block as your final message. ${NO_FILES}
 {"tests":[{"name":"<test name exactly as in the file>","file":"<path>","fairness":"Prompt-stated|Repo-discoverable|Standard external semantics|Not fair","verifies":"<what the test asserts, concrete values>","assertions":[{"what":"<one assert line or compile-time API use: a type, signature, method name or field the test relies on>","source":"prompt: <quote> | repo: <file:line> | standard: <name> | derived from the test's own setup | NONE"}],"evidence":"<the sentence / file:line / standard that grounds each co-asserted detail; for Not fair: the refutation battery, the pinned detail and the other grounded implementation it fails>","qualityCheck":"<one sentence>","concerns":[<zero or more of ${TQ_CONCERNS.join(", ")}>],"pinned":"<Not fair only: the unstated choice, in a few words>","family":"<Not fair only: the TQF-NN id that fits the pinned choice, or none>","fix":"<Not fair only: state it in problem.md | loosen the assertion to X | drop the test>"}]}
 Also apply these hosted rules to every test: a specific number, factor, order or threshold where problem.md only states a direction or quality ("escalates", "longer", "faster", "at least", "grows") is Not fair unless the repo fixes that number; observing the result through one particular surface (one getter, one list, one log line, one internal map) when plausible implementations expose it elsewhere pins representation; simulate each test's own fixture (HTTP clients that follow redirects, default timeouts, shared global state between tests, helpers that silently drop zero, empty or default values): a fixture that rejects a correct implementation makes the test Not fair.
+Fairness rules from rules.md (authoritative where they are stricter than the above):
+${loadFairnessRules()}
+
 One entry per test, in file order. Judge every concern from the code that runs: a comment that explains a risk away ("no seed is needed", "timing is generous") never removes it; unseeded randomness, a finite random search or a wall-clock window stays a concern until the code makes it deterministic or bounded. List EVERY assertion and every API the test needs to compile in "assertions" (a test with eight asserts has eight rows); the test is Not fair when any row's source is NONE. Hosted unfair verdicts are usually one unsourced co-assertion among many sourced ones: an exact byte or text equality where problem.md promises only an equivalent result, a side effect asserted absent (a counter stays 0, no call made), a helper or method name the repo does not have.
 `;
 }
@@ -188,6 +195,9 @@ Discrimination rules the hosted reviewer applies (each one is a coverage suggest
 
 Coverage finding families hosted raises most often:
 ${TEST_FINDING_FAMILIES}
+
+Test-gap rules from rules.md (authoritative: apply their candidate, contract-first, assertion-strength, fixture and edge-case rules to every suggestion):
+${loadGapRules()}
 
 Rubric:
 ${RUBRIC}
@@ -237,13 +247,17 @@ const LENSES: Record<string, [string, string]> = {
     "D-OUTCOME, D-CONFIG",
     "List every PRE-EXISTING public method, config key, message flow, default, error shape, count, ordering or persisted field whose observable behaviour the solution alters (including through a shared helper), then check each against problem.md: an alteration the description does not ask for, and that an existing caller or test would see, is a violation. Include persistence and wire formats (a new enum variant, field order, an older client or log entry that must still decode).",
   ],
+  quality: [
+    "S2, S3, S4",
+    'Solution betterment, reported even when behaviour is correct. Compare every changed area with the one or two closest real analogues in the repo (layering, naming, exports, error handling and logging, persistence, async and state handling, cleanup, public extension points) and report clear deviations from established conventions (S2); added or changed code that grep proves is unused, unreachable or leftover scaffolding, avoidable duplication of an existing helper, avoidable coupling, and changes outside the task\'s scope (S3); AI-generated artefacts: comments addressed to a reviewer or explaining the task, unexplained defensive code, coding patterns the repo does not use (S4). Cite the analogue path:line for every convention claim and give a focused "recommendation". Do not prescribe one equivalent design when alternatives remain valid, and do not report purely cosmetic nits (spacing, import order). These findings need no quote from problem.md and no counter-test; set "dimension" to S2, S3 or S4.',
+  ],
 };
 
 export function buildAuditPrompt(inputs: PromptInputs): string {
   const lensText = Object.entries(LENSES)
     .map(([lens, [dims, ask]]) => `- lens ${lens} (${dims}): ${ask}`)
     .join("\n");
-  return `You are the Solution Quality reviewer (S1: the solution meets ALL requirements; S2: no regressions). Audit the solution through EACH of the lenses below in turn, one lens at a time, and do not stop after the first lens that finds something:
+  return `You are the Solution Quality reviewer (S1: the solution meets ALL requirements; S2: no regressions, follows existing code patterns; S3: no irrelevant changes; S4: no AI-generated artefacts). Audit the solution through EACH of the lenses below in turn, one lens at a time, and do not stop after the first lens that finds something:
 ${lensText}
 Read problem.md, the reference solution, and the pinned repository at ${REPO_DIR}/ (open the files the solution touches and every caller of them). Solution finding families hosted raises most often:
 ${SOLUTION_FINDING_FAMILIES}
@@ -255,7 +269,10 @@ First derive the promises: every behaviour, default, bound, error case, class or
 Repo oracle rule. Before any claim about identity, equality, sameness, normalisation or "the same X" (address, host, key, name, path, version), find the repo's own definition of it (an Equal/Same/Key/Normalize function, the value the code routes or looks up by) and cite it as path:line in "oracle". Then: (1) a solution that uses a stricter or looser notion than that oracle IS a violation, claim it; (2) a claim whose expected behaviour needs a stricter or looser notion than the oracle is NOT a violation, drop it; (3) when the repo has no oracle and problem.md does not decide between two readings, set "reading":"conflict", give both readings in the claim, and write no counter-test: neither reading may be tested or enforced (such a conflict gates until problem.md settles it).
 Unreachable cases. When a case cannot be reproduced in a test (a privileged or default port, a real external host, a platform-only condition), still claim it: set "reach":"reasoned", trace the code path line by line in "claim", and write a counter-test for the nearest reachable variant if one exists. A reasoned claim gates until the solution is fixed or the claim is refuted by citing the code that prevents it.
 
-${counterTestRule("CT-<lens>")} One violation found through two lenses is reported once. When a violation rests on two promises, name the primary one in "promise" and the other in the claim. Report violations a test can show, and reasoned ones on real paths a test cannot reach, each tied to a problem.md sentence (quote it); no style opinions, no inputs no caller can produce.
+${counterTestRule("CT-<lens>")} One violation found through two lenses is reported once. When a violation rests on two promises, name the primary one in "promise" and the other in the claim. Report violations a test can show, and reasoned ones on real paths a test cannot reach, each tied to a problem.md sentence (quote it); no style opinions, no inputs no caller can produce. The quality lens is the exception: its S2/S3/S4 findings need a repo analogue instead of a problem.md quote.
+
+Solution-gap rules from rules.md (authoritative for this audit):
+${loadSolutionRules()}
 
 problem.md:
 <<<
@@ -265,7 +282,7 @@ ${inputs.problem}
 ${inline("solution.patch", SOLUTION_PATCH, inputs.solutionPatch)}
 
 ${REPLY}${FENCE}json block as your final message. ${NO_FILES}
-{"promises":[{"id":"P01","statement":"<verbatim problem.md sentence>"}],"violations":[{"id":"CT-paths-01","lens":"paths","promise":"P02","dimension":"D-...","quote":"<problem.md words>","claim":"<what is wrong, where (file:function)>","oracle":"<repo path:line defining the notion, or none>","reading":"decided|conflict","reach":"testable|reasoned","counter_test":"CT-paths-01-<slug>","test_name":"<added test name>","counter_test_patch":"<unified diff or empty>","counter_test_cmd":"<command or empty>"}]}
+{"promises":[{"id":"P01","statement":"<verbatim problem.md sentence>"}],"violations":[{"id":"CT-paths-01","lens":"paths","promise":"P02","dimension":"D-...","quote":"<problem.md words>","claim":"<what is wrong, where (file:function)>","oracle":"<repo path:line defining the notion, or none>","reading":"decided|conflict","reach":"testable|reasoned","counter_test":"CT-paths-01-<slug>","test_name":"<added test name>","counter_test_patch":"<unified diff or empty>","counter_test_cmd":"<command or empty>","recommendation":"<quality lens only: the focused repair>"}]}
 `;
 }
 
@@ -306,7 +323,8 @@ Question for every unit: ${UNIT_QUESTION}
 
 FULL DEPTH, for every unit without exception: open its complete code in ${SOLUTION_PATCH} (the whole hunk, not the excerpt above), open the file it lives in at ${REPO_DIR}/ to see the code around it, and open every caller of it. Then check it against every sentence of problem.md that it can affect, on every path that reaches it (for example: before an answer, while uploading, while reading the body; after an update, a store swap, a reload, a registry change). An excerpt is never enough to call a unit sound.
 
-Report only defects a concrete test could show, each with the verbatim problem.md sentence it breaks and a concrete input.
+Report only defects a concrete test could show, each with the verbatim problem.md sentence it breaks and a concrete input. Solution-gap rules from rules.md (authoritative):
+${loadSolutionRules()}
 
 ${counterTestRule(prefix)} Use the repo's own definitions (equality, identity, defaults) as the oracle: a test that demands a stricter or looser notion than the repo's is wrong, so report no defect there. A defect on a path no test can reach (for example a port a non-root user cannot bind) gets "reach":"reasoned" and no counter-test.
 
@@ -342,6 +360,7 @@ Severity after the legs hold (hosted calibration):
 - A test that cannot tell apart two behaviours problem.md distinguishes (counts as success vs is ignored, replaces vs multiplies, rejects vs clamps) is HIGH T3: that is a discrimination failure, not a bounded edge.
 - T5 (unspecified behaviour) is HIGH when a test pins a choice problem.md does not state and a reasonable solver would choose differently; it is MEDIUM when the repo's existing pattern makes the choice obvious. A test that reads values by parsing Debug/Display/log text, or pins exact internal names, field layout or child names problem.md does not give, is HIGH T5/T7 (representation coupling), even when a derived format would happen to pass.
 - S1/S2 solution defects are HIGH when legs 1,3,5,6 hold; style or pattern nits are MEDIUM/LOW.
+- Audit quality-lens findings (S2 conventions, S3 dead code, duplication or unrelated changes, S4 AI artefacts) need no promise_citation or failing_case: keep them MEDIUM with "as" S2, S3 or S4 when the cited repo analogue or grep evidence holds, HIGH only when they also change observable behaviour, and DROP them when the analogue does not show the convention or the code is in fact used.
 - Platform-leak findings (comments or text in the tests) are HIGH only for words about the grading process itself: graded, grader, evaluation harness, hidden tests, solver, benchmark, reward, the submission, reference solution. Comments that merely talk about "an implementation" or "any implementation of this feature" are ordinary code comments: MEDIUM at most.
 - When a leg cannot be checked from the evidence given, the finding is unproven: demote to MEDIUM. Unproven is not HIGH.
 `;

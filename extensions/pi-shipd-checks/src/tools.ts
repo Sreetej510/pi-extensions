@@ -1,16 +1,14 @@
 /**
- * Custom tools the review/gap agents call to submit their structured results.
+ * Custom tool the focus reviewers call to submit their structured result.
  * Each tool just writes into a `capture` object passed in by the caller —
  * that's how agents.ts pulls the final result back out of the agent session.
  */
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ReviewReport, SolutionAuditFinding, TestGapFinal } from "./types.js";
+import type { ReviewReport } from "./types.js";
 
 export const REPORT_TOOL_NAME = "submit_review_report";
-export const GAP_FINDER_REPORT_TOOL_NAME = "submit_test_gaps";
-export const SOLUTION_AUDIT_TOOL_NAME = "submit_solution_audit_findings";
 
 // ── Reviewer report tool ─────────────────────────────────────────────
 
@@ -53,107 +51,6 @@ export function createReportTool(capture: { report?: ReviewReport }): ToolDefini
       };
       return {
         content: [{ type: "text", text: `Report recorded: ${params.verdict}` }],
-        details: undefined,
-      };
-    },
-  };
-}
-
-// ── Gap-finder report tool ───────────────────────────────────────────
-
-const gapFinderToolParams = Type.Object({
-  gaps: Type.Array(
-    Type.Object({
-      description: Type.String({ description: "A fair, publicly observable missing behavioral test." }),
-      justification: Type.String({
-        description:
-          "Why the gap is grounded in agent_prompt.md or the repository and why a plausible incorrect implementation " +
-          "could pass the current tests despite missing this behavior.",
-      }),
-    }),
-    {
-      description:
-        "The complete final list of distinct, evidence-backed positive and negative behavioral test gaps. Use an " +
-        "empty array only after exhaustive analysis finds none.",
-    },
-  ),
-});
-
-export function createGapFinderTool(capture: { gaps?: TestGapFinal[] }): ToolDefinition<typeof gapFinderToolParams> {
-  return {
-    name: GAP_FINDER_REPORT_TOOL_NAME,
-    label: "Submit Test Gaps",
-    description:
-      "Submit the complete final list of fair behavioral test gaps. This is the ONLY way to report your result — " +
-      "call it exactly once, as your last action, after independently checking every candidate.",
-    parameters: gapFinderToolParams,
-    async execute(_toolCallId, params) {
-      const gaps = params.gaps ?? [];
-      capture.gaps = gaps;
-      return {
-        content: [{ type: "text", text: `Recorded ${gaps.length} test gap(s)` }],
-        details: undefined,
-      };
-    },
-  };
-}
-
-const solutionAuditFindingParams = Type.Object({
-  category: Type.Union(
-    [
-      Type.Literal("missing-requirement"),
-      Type.Literal("regression"),
-      Type.Literal("architecture"),
-      Type.Literal("unsafe-failure"),
-      Type.Literal("inconsistent-path"),
-      Type.Literal("dead-code"),
-      Type.Literal("unrelated-change"),
-    ],
-    {
-      description: "The kind of actionable quality problem found in the solution implementation.",
-    },
-  ),
-  subject: Type.String({
-    description: "A short behavior, symbol, or concern identifier; do not require a source line or file location.",
-  }),
-  problem: Type.String({
-    description: "What is wrong with the implementation and why it is actionable.",
-  }),
-  evidence: Type.String({
-    description: "The prompt, repository, implementation, or regression evidence supporting the finding.",
-  }),
-  requiredBehavior: Type.String({
-    description: "The requirement, invariant, or solution-quality property that must be preserved.",
-  }),
-  recommendation: Type.String({
-    description: "A concrete repair that stays within the prompt and repository conventions.",
-  }),
-});
-
-const solutionAuditFindingsParams = Type.Object({
-  findings: Type.Array(solutionAuditFindingParams, {
-    description:
-      "Only confirmed, actionable solution-quality findings. Use an empty array when the implementation meets the " +
-      "prompt and repository standards.",
-  }),
-});
-
-export function createSolutionAuditTool(capture: {
-  findings?: SolutionAuditFinding[];
-}): ToolDefinition<typeof solutionAuditFindingsParams> {
-  return {
-    name: SOLUTION_AUDIT_TOOL_NAME,
-    label: "Submit Solution Precheck Findings",
-    description:
-      "Submit the complete result from the single post-implementation solution-quality audit. This is the ONLY " +
-      "way to report your result — call it exactly once, as your last action. Use an empty list when no actionable " +
-      "issue is found.",
-    parameters: solutionAuditFindingsParams,
-    async execute(_toolCallId, params) {
-      const findings = params.findings ?? [];
-      capture.findings = findings;
-      return {
-        content: [{ type: "text", text: `Recorded ${findings.length} solution-precheck finding(s)` }],
         details: undefined,
       };
     },

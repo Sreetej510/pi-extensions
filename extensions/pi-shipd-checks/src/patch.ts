@@ -1,4 +1,4 @@
-/** Unified-diff helpers shared by the solve reviewer workspace and the Auto Review reviewers. */
+/** Unified-diff helpers shared by the solve reviewer workspace and the auditor reviewers. */
 
 export interface PatchFile {
   path: string;

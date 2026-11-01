@@ -10,25 +10,17 @@ For `/checks --solve`:
 2. Sends the exact contents of `agent_prompt.md` as each solver's sole first user message. No prompt file, task Dockerfile, `test.patch`, `solution.patch`, or uncommitted test files are overlaid into a solver workspace. The Dockerfile is used only by the harness to provision the Fargate environment.
 3. Runs several configurable (default 3) independent Claude Code CLI solver invocations in parallel, each with its own isolated clean-HEAD workspace and only the `Bash` tool enabled. Captures each solver's `stream-json` trace of assistant and tool events (not private chain-of-thought). There is no test-driven repair loop, and the test patch remains unavailable until that solver exits.
 4. After a solver finishes, the harness applies `test.patch` to its workspace, then runs `bash test.sh --output_path <file> base` and `bash test.sh --output_path <file> new` as an unprivileged user with a fresh writable `HOME` and cache. It captures both full logs.
-5. After all solvers exit and their tests run, a read-only local Claude Code CLI reviewer (`Read`, `Grep`, `Glob` only; your local `claude` login, same wrapper as Auto Review) receives an untouched clean-HEAD tree plus `agent_prompt.md`, all patch files, standalone copies of new test files, each solver's patch, and every solver's test logs. No patch is applied in the review workspace.
+5. After all solvers exit and their tests run, a read-only local Claude Code CLI reviewer (`Read`, `Grep`, `Glob` only; your local `claude` login, same runner as the `auditor` tool) receives an untouched clean-HEAD tree plus `agent_prompt.md`, all patch files, standalone copies of new test files, each solver's patch, and every solver's test logs. No patch is applied in the review workspace.
 6. Runs the Claude CLI solvers inside one AWS ECS Fargate Spot task. A Spot interruption retries the task and resumes completed solver indexes. A local `claude setup-token` file is transferred through a private, server-side-encrypted S3 object and supplied to the Claude CLI through `CLAUDE_CODE_OAUTH_TOKEN`. A root-owned shell wrapper strips credential variables and drops every solver Bash command to its own unprivileged UID; the token is not available to those commands. The temporary token and run objects are deleted after the task stops.
 7. Posts a chat summary and logs results in `.pi/shipd-checks/<runId>/`, including `agent_steps.jsonl` per solver, and `shipd_report.json` in your project root.
 
-For `/checks --autoreview` (a local replica of the hosted Auto Review, ported from the shipd-workflow rulebook; tests and solution only; no description grading, and `test.sh` is ignored):
+The agent-callable `auditor` tool replaces the old `gap-finder` and `solution-precheck` tools. It is a local replica of the hosted Auto Review, ported from the shipd-workflow rulebook, for the tests and the solution only (no description grading; `test.sh` is ignored). It takes no parameters:
 
-1. Snapshots git `HEAD` into a temp workspace as the pinned base (`repo/`), next to `review_assets/` holding `agent_prompt.md` (as problem.md), `test.patch` with its `test.sh` section removed, `solution.patch`, and standalone copies of new test files. Neither patch is applied.
-2. Runs read-only Claude Code CLI reviewers on this machine (`Read`, `Grep`, `Glob` only; your local `claude` login), several at a time, one read each: Local Test Quality per-file fairness batches (one per ~60 KB of test files), one coverage read (with judge-tests' discrimination rules folded in), the solution audit over nine lenses (paths, identity, ordering, variants, numeric, compose, metadata, lifecycle including the state lifecycle walk, behaviour), and per-unit Solution Quality on every `solution.patch` hunk (12 hunks per reviewer). A typical task needs about 6–8 sessions. Prompts carry hosted calibration distilled into general patterns (`src/autoreview-data.ts`), not quotes from past tasks.
-3. Runs synthesis (one session per 50 findings) over every finding with the hosted proof legs (failing case, wrong implementation, promise citation, load-bearing check, provenance, materiality, reference pass, exercised environment). A finding gates only when synthesis keeps it HIGH.
-4. Verdict: `BLOCK` (any gating HIGH), `REVIEW` (MEDIUM or unproven findings, a Not fair test, or a failed reviewer), `PASS`, or `INCOMPLETE`. Test Quality is `FAIL` when any test is Not fair (an assertion with no source counts). Counter-tests the reviewers write are included in the report but not executed, so the legs that need execution are decided from the files.
-5. Writes only the final report, `.pi/shipd-checks/<runId>-autoreview.md` (verdict, findings with synthesis reasoning, Test Quality results, reviewer status, and the counter-test patches inline), and merges a summary into `shipd_report.json` under `autoReview`. Reviewer prompts, streams and answers are not kept.
-
-The agent-callable `gap-finder` tool runs one exhaustive read-only agent over the prompt, repository, and tests. It
-reviews requirements sentence by sentence, performs its own evidence and fairness check, and returns confirmed
-behavioral test gaps in `details.testGaps`.
-
-The agent-callable `solution-precheck` tool runs one exhaustive read-only solution-quality agent and returns findings in
-`details.solutionAuditFindings`. It checks contract gaps, regressions, failure safety, architecture, dead code, and
-unrelated changes.
+1. Runs `create_patches.sh` when the project has one, to refresh `test.patch` and `solution.patch` from the working tree, then requires `agent_prompt.md`, `test.patch` and `solution.patch`.
+2. Snapshots git `HEAD` into a temp workspace as the pinned base (`repo/`), next to `review_assets/` holding `agent_prompt.md` (as problem.md), `test.patch` with its `test.sh` section removed, `solution.patch`, and standalone copies of new test files. Neither patch is applied.
+3. Runs read-only Claude Code CLI reviewers on this machine (`Read`, `Grep`, `Glob` only; your local `claude` login), several at a time, one read each: Local Test Quality per-file fairness batches (one per ~60 KB of test files), one coverage read, the solution audit over ten lenses (paths, identity, ordering, variants, numeric, compose, metadata, lifecycle, behaviour, and the quality lens for solution betterment: repo conventions, dead code, duplication, unrelated changes, AI artefacts), and per-unit Solution Quality on every `solution.patch` hunk (12 hunks per reviewer). The embedded `rules.md` families the old tools used go into these prompts: fairness rules into per-test Test Quality, test-gap rules into coverage, solution-gap rules into the audit and per-unit reads. Prompts also carry hosted calibration distilled into general patterns (`src/auditor-data.ts`), not quotes from past tasks. A typical task needs about 6–8 sessions.
+4. Runs synthesis (one session per 50 findings) over every finding with the hosted proof legs (failing case, wrong implementation, promise citation, load-bearing check, provenance, materiality, reference pass, exercised environment). A finding gates only when synthesis keeps it HIGH; findings synthesis rejects as wrong are dropped.
+5. Returns the findings grouped as `details.unfairTests`, `details.testGaps`, `details.solutionGaps` and `details.solutionImprovements`, each with `level` (`HIGH` gates, `MEDIUM` is the fix-before-upload list), `criterion`, `finding` and the synthesis reasoning, plus `details.verdict` (`BLOCK`, `REVIEW`, `PASS` or `INCOMPLETE`), `details.testQuality`, `details.solutionQuality`, `details.counterTests` (not executed) and reviewer statuses. It writes only one file, the report `.pi/shipd-checks/<runId>-auditor.md`; reviewer prompts and answers are not kept.
 
 The opt-in `humanize-agent-prompt` tool reads the complete current-project `agent_prompt.md`, requests 3 experimental
 rewrite drafts from the CoreWeave Nemotron LoRA, scores every draft through a configured HTTPS detector endpoint, and
@@ -45,8 +37,8 @@ hash matches, it skips the Shipd Prompt Quality check entirely and reports a cac
 checks the refreshed status after filling the fields and runs only when the check is stale or has a `Run` button. Otherwise it
 uses the current report. A new hash is saved only after Prompt Quality passes. On failure, only `promptQuality` is returned; there are no Test/Solution results or `stoppedReason`.
 Only after Prompt Quality passes or has a matching cached pass does it run the Fargate patch precheck against a clean `HEAD`;
-only if that passes does it run Test Quality and Solution Quality. Those checks run fresh jobs, rerun stale reports, skip
-current reports, and wait for started jobs. It returns only the useful report data:
+only if that passes does it run Test Quality, and only if Test Quality passes does it run Solution Quality. A failing Test Quality (any unfair test or coverage suggestion) returns `promptQuality` and `testQuality` without running Solution Quality. Each check runs fresh jobs, reruns stale reports, skips
+current reports, and waits for started jobs. It returns only the useful report data:
 `details.testQuality.verdict`, `details.testQuality.coverageSuggestions`, `details.testQuality.unfairnessCount`, and
 `details.testQuality.tests` filtered to blocks whose `concerns` array is non-empty or whose `fairness` is exactly `"Not fair"`,
 `details.promptQuality` and its verdict, reason, and major non-AI comments (only `category`, `quote`, and `suggestion`; AI-category comments are omitted), plus
@@ -68,35 +60,34 @@ challenge-submit button. Authentication comes from `SHIPD_STORAGE_STATE` or the 
 `/shipd:auth`. `/shipd:auth` launches the installed browser as a normal visible process and attaches over local CDP,
 which supports Google/SSO sign-in better than an automated browser launch.
 
-The gap-finder and solution-precheck tools are read-only and each uses one agent. Invoke them only when the user asks,
-never in parallel, and run repeated requests sequentially after applying each result. The prompt humanizer also requires
+The `auditor` tool is read-only apart from its report and `create_patches.sh`, takes a long time, and consumes Claude
+usage. Invoke it only when the user asks, never in parallel, and run repeated requests sequentially after applying each
+result. The prompt humanizer also requires
 an explicit user request and sends the prompt to CoreWeave and the configured detector endpoint. `quality-check` consumes
 Shipd tokens; do not run overlapping invocations for the same challenge.
 
 ## Commands
 
-`/checks --solve` runs the benchmark using `agent_prompt.md`; it requires that prompt file, `Dockerfile`, and `test.patch` (which supplies `test.sh` and the test files). The solver sees only clean `HEAD` plus the prompt text; the harness applies `test.patch` after the solver exits. `solution.patch` is not required by the solver; when present, the local reviewer receives it as our reference solution: it stays context only for the fairness review, and the reviewer also compares its non-test code logic with every solver's patch and lists, under "Suggested improvements to our solution", edge cases or logical errors a solver handles correctly that ours does not (no tests, docs, or style). `/checks --config` is separate and configures the Claude solver and reviewer settings and the analysis-tool model. The gap-finder, solution-precheck, and prompt-humanizer tools are enabled per project with `/analyze:on`.
+`/checks --solve` runs the benchmark using `agent_prompt.md`; it requires `create_patches.sh`, that prompt file, `Dockerfile`, and `test.patch` (which supplies `test.sh` and the test files). Like the `quality-check` tool, it first runs `create_patches.sh` in the working directory to regenerate `test.patch` and `solution.patch`, and stops if the script fails. The solver sees only clean `HEAD` plus the prompt text; the harness applies `test.patch` after the solver exits. `solution.patch` is not required by the solver; when present, the local reviewer receives it as our reference solution: it stays context only for the fairness review, and the reviewer also compares its non-test code logic with every solver's patch and lists, under "Suggested improvements to our solution", edge cases or logical errors a solver handles correctly that ours does not (no tests, docs, or style). `/checks --config` is separate and configures the Claude solver, reviewer and auditor settings. The `auditor` and prompt-humanizer tools are enabled per project with `/analyze:on`.
 
 | Command | Effect |
 |---|---|
-| `/checks` | Open a menu for config, solve, or autoreview |
+| `/checks` | Open a menu for config or solve |
 | `/checks --solve` | Run isolated Claude CLI solvers and base/new tests, then use a local Claude CLI reviewer to assess test fairness and failed agents |
-| `/checks --autoreview` | Run the local Claude CLI Auto Review of `test.patch` and `solution.patch` (requires `agent_prompt.md`, `test.patch`, `solution.patch`) |
-| `/checks --config` | Configure Solver model (Claude), Claude solver effort, timeout, parallel agent count, the Claude reviewer, Auto Review, and the analysis-tool model |
+| `/checks --config` | Configure Solver model (Claude), Claude solver effort, timeout, parallel agent count, the Claude reviewer, and the auditor tool |
 | `/shipd:auth` | Open a browser for first-time Shipd sign-in and save the session |
 | `/shipd:link <url>` | Save the Shipd job link for the current chat session |
-| `/analyze:on` | Enable the gap-finder, solution-precheck, and prompt-humanizer tools for the current project |
-| `/analyze:off` | Disable the gap-finder, solution-precheck, and prompt-humanizer tools for the current project |
+| `/analyze:on` | Enable the `auditor` and prompt-humanizer tools for the current project |
+| `/analyze:off` | Disable the `auditor` and prompt-humanizer tools for the current project |
 
-**Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run, stopping its active Fargate task, local Claude review, or local Auto Review reviewers. A cancelled run skips final report writing.
+**Shortcut:** `Ctrl+Shift+X` cancels an in-progress `/checks` run, stopping its active Fargate task or local Claude review. A cancelled run skips final report writing.
 
 ## Configuration
 
-`/checks --config` opens the row-based settings menu with three sections:
+`/checks --config` opens the row-based settings menu with two sections:
 
 - **Solver**: Solver model (Claude: `haiku`, `sonnet`, or `opus`), solver effort (`low`, `medium`, `high`, `xhigh`, or `max`), one-shot timeout (10–90 minutes), parallel agent count, and the Claude reviewer model (default `opus`), effort (default `high`), and timeout (10–60 minutes; default 20), stored under `solverReview` in `checks-config.json`. Solver effort defaults to `low` when unset and is passed explicitly to Claude. Diffs, agent output, `agent_steps.jsonl` traces, base/new logs, and the local reviewer assessment are saved under `.pi/shipd-checks/<runId>/` and summarized in `shipd_report.json`.
-- **Auto Review**: Claude reviewer model (`haiku`, `sonnet`, or `opus`; default `opus`), effort (default `high`), timeout per reviewer (10–90 minutes; default 40), and parallel reviewers (1–8; default 4). Stored under `autoReview` in `checks-config.json`.
-- **Analysis Tools**: timeout, model, and thinking level for the separate agent-callable gap-finder and solution-precheck tools. The timeout applies to each read-only agent. These are stored under `analyzeGap.timeoutMinutes`, `analyzeGap.provider`, `analyzeGap.modelId`, and `analyzeGap.thinkingLevel`. The analysis tools have no fallback model: they refuse to run until a model is set here. Fargate resources are selected automatically and are not configurable in this menu.
+- **Analysis Tools**: whether the analysis tools are enabled for this project, and the `auditor` tool's Claude settings: model (`haiku`, `sonnet`, or `opus`; default `opus`), effort (default `high`), timeout per reviewer (10–90 minutes; default 40), and parallel reviewers (1–8; default 4), stored under `auditor` in `checks-config.json` (an `autoReview` block from earlier versions is still read). Fargate resources are selected automatically and are not configurable in this menu.
 
 For each Claude solver, `shipd_report.json` records CLI-reported input/cache/output token totals, final and peak request-context token counts, context-window size/utilization, API-call count, and cost when available. When the CLI explicitly reports thinking tokens, `totalTokens` subtracts them from raw input-plus-output; otherwise it remains the raw total. The raw total is also recorded when a subtraction is made. The local Claude reviewer records the CLI-reported usage and cost. Per-agent, reviewer, and aggregate usage appears once under `solverTokenUsage`; `solverRunSummary` contains outcomes, aggregate test counts, and per-suite JUnit counts, while `solverReview` contains the assessment and reviewer model settings.
 
@@ -191,7 +182,7 @@ On-Demand fallback. Spot interruptions are retried according to `fargate.maxRetr
 
 5. Generate a CI token with `claude setup-token` and save only the token in a local secret file. Set the top-level `claudeOAuthTokenFile` in `checks-config.json` to that file's path (or set `CLAUDE_CODE_OAUTH_TOKEN_FILE`). The runner transfers the token through a private, server-side-encrypted S3 object, does not place it in the ECS task definition or bootstrap JSON, and deletes the local temporary copy and run object after the task stops. Do not commit the token or put it in Pi's `auth.json`. Claude setup tokens are long-lived and must be rotated when they expire. Configure the Solver model (Claude), thinking/effort level, count, and timeout in `/checks --config`, then run `/checks --solve`. Projects need `Dockerfile`, `agent_prompt.md`, and `test.patch`, which should add `test.sh` with `--output_path <file> base` and `--output_path <file> new` modes. A task role is required for runs that may exceed the 55-minute pre-signed URL lifetime; configure it before using longer solver timeouts.
 
-Use `/analyze:on` and `/analyze:off` to control the gap-finder, solution-precheck, and prompt-humanizer tools per project, like HPC. The
+Use `/analyze:on` and `/analyze:off` to control the `auditor` and prompt-humanizer tools per project, like HPC. The
 enabled project list is stored alongside the other settings in `~/.pi/agent/checks-config.json`.
 
 The patch precheck always uses the `medium` Fargate profile. It applies `test.patch`, creates isolated workspaces with and without `solution.patch`, and runs the base suites concurrently in both workspaces followed by the new suites concurrently in both workspaces. It requires
@@ -199,8 +190,7 @@ The patch precheck always uses the `medium` Fargate profile. It applies `test.pa
 before `solution.patch`, then requires both base and new suites to pass after the solution patch. Pytest subtest totals are not treated as passing testcase records; emitted `<testcase>` statuses and explicit `SUBPASSED` records are used for the pre-solution invariant. A failed precheck aborts
 before Shipd is opened and includes the Linux platform, a human-readable phase, and failed/errored test names in the tool error.
 
-The `gap-finder` and `solution-precheck` tools are read-only and return repair recommendations; the caller changes the
-tests, prompt, or solution. Invoke them only when the user asks, never in parallel, and run repeated requests
+The `auditor` tool returns review findings, not edits; the caller changes the tests or solution. Invoke them only when the user asks, never in parallel, and run repeated requests
 sequentially after applying each result. The humanizer does not modify `agent_prompt.md`; validate all requirements and
 apply any selected draft locally.
 
@@ -211,9 +201,8 @@ apply any selected draft locally.
 }
 ```
 
-Use ↑/↓ to select a row and Enter/Space to change it. The currently selected model is shown first
-in its picker. Model settings are saved to `~/.pi/agent/checks-config.json`; solver settings are nested
-under `solverGap` and analyze-tool model settings under `analyzeGap`.
+Use ↑/↓ to select a row and Enter/Space to change it. Settings are saved to `~/.pi/agent/checks-config.json`; solver
+settings are nested under `solverGap`, the solve reviewer under `solverReview`, and the auditor under `auditor`.
 
 ## Install
 
@@ -244,14 +233,19 @@ Or, for local development, point at the entry point directly:
 | `src/index.ts` | Extension entry point: message renderer, cancel shortcut, command registration |
 | `src/submit.ts` | `quality-check`: Playwright draft filling, sequential quality checks, scheduled polling, and report extraction |
 | `src/command.ts` | The `/checks` command: argument parsing, `--config` flow, run orchestration |
-| `src/agents.ts` | Spawns and races local Pi gap-finder and solution-precheck sessions; runs the benchmark review through the local Claude CLI |
+| `src/agents.ts` | Runs the `--solve` benchmark review through the local Claude CLI |
+| `src/analyze.ts` | The agent-callable `auditor` tool (rendering, result text) and humanizer registration |
+| `src/auditor.ts` | The auditor engine: workspace, reviewer plan, findings, synthesis grading, report |
+| `src/auditor-prompts.ts` | Auditor reviewer and synthesis prompts |
+| `src/auditor-data.ts` | Hosted Auto Review calibration distilled into general patterns |
+| `src/claude-cli.ts` | Read-only local Claude CLI runner shared by the auditor and the `--solve` reviewer |
 | `src/solvergap.ts` | Benchmark artifact-directory constant |
 | `src/fargate-docker.ts` | Supported Dockerfile parsing for remote solver setup |
 | `src/fargate-runner.ts` | ECS Fargate Spot/S3 orchestration for Claude CLI benchmark runs, patch-prechecks, and detector tasks; retries and cleanup |
 | `src/fargate-worker.ts` | ESM worker that runs isolated Claude CLI solvers or patch prechecks in the shared task |
 | `src/resource-usage.ts` | Container CPU sampling for adaptive profile selection |
-| `src/prompts.ts` | All prompt text sent to those agents |
-| `src/tools.ts` | Custom tools the agents call to submit their structured results |
+| `src/prompts.ts` | Focus-reviewer and `--solve` reviewer prompt text |
+| `src/tools.ts` | Report-submission tool for the focus reviewers |
 | `src/rubric.ts` | Embedded guidelines/fairness rubric text + per-role section loaders |
 | `src/roles.ts` | The 3 reviewer roles (description/tests/solution) metadata |
 | `src/report.ts` | `shipd_report.json` load/merge/summary logic |

@@ -12,9 +12,9 @@ import { Text } from "@earendil-works/pi-tui";
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { Type } from "typebox";
-import { getShellExecutable, loadFargateConfig } from "./config.js";
+import { loadFargateConfig } from "./config.js";
 import { runFargatePatchPrecheck } from "./fargate-runner.js";
-import { snapshotGitHead } from "./git.js";
+import { runCreatePatches, snapshotGitHead } from "./git.js";
 import { formatDuration } from "./report.js";
 import type { PatchPrecheckResult } from "./types.js";
 
@@ -26,7 +26,6 @@ export const SHIPD_PROMPT_QUALITY_SHA_ENTRY = "shipd_prompt_quality_sha";
 const DEFAULT_STORAGE_STATE_PATH = join(homedir(), ".pi", "agent", "shipd-auth", "shipd.ai.json");
 const PATCH_PRECHECK_TIMEOUT_MINUTES = 15;
 const SHIPD_AUTH_URL = "https://shipd.ai/";
-const PATCH_SCRIPT_TIMEOUT_MS = 120_000;
 const INITIAL_WAIT_MS = 300_000;
 const RECHECK_INTERVAL_MS = 90_000;
 const PROMPT_QUALITY_INITIAL_WAIT_MS = 120_000;
@@ -268,17 +267,7 @@ async function readSubmissionFiles(pi: ExtensionAPI, cwd: string, signal?: Abort
   if (missing.length) throw new Error(`Missing required file(s) in the working directory: ${missing.join(", ")}`);
 
   checkCancelled(signal);
-  const patchRun = await pi.exec(getShellExecutable(), ["create_patches.sh"], {
-    cwd,
-    timeout: PATCH_SCRIPT_TIMEOUT_MS,
-    signal,
-  });
-  if (patchRun.killed || patchRun.code !== 0) {
-    const output = (patchRun.stderr || patchRun.stdout || "").trim().slice(-2_000);
-    throw new Error(
-      `create_patches.sh failed${patchRun.killed ? " or timed out" : ` (exit ${patchRun.code})`}.${output ? `\n${output}` : ""}`,
-    );
-  }
+  await runCreatePatches(pi, cwd, signal);
 
   checkCancelled(signal);
   const [taskPrompt, testPatch, solutionPatch] = await Promise.all([
@@ -707,11 +696,7 @@ function buildPromptQualityResult(report: QualityReport | undefined): JsonRecord
   return result;
 }
 
-function buildAgentResult(
-  testReport: QualityReport | undefined,
-  promptQuality: JsonRecord,
-  solutionReport: QualityReport | undefined,
-): JsonRecord {
+function buildTestQualityResult(testReport: QualityReport | undefined): JsonRecord {
   const coverageSuggestions = Array.isArray(testReport?.coverageSuggestions) ? testReport.coverageSuggestions : [];
   const unfairnessTests = Array.isArray(testReport?.tests)
     ? testReport.tests
@@ -732,7 +717,7 @@ function buildAgentResult(
       : 0;
   const unfairnessCount = Math.max(unfairnessTests.length, reportedUnfairnessCount);
   const testPasses = Boolean(testReport) && unfairnessCount === 0 && coverageSuggestions.length === 0;
-  const testQuality: JsonRecord = !testReport
+  return !testReport
     ? { verdict: "FAIL", reason: "No completed Test Quality report was available." }
     : testPasses
       ? { verdict: "PASS" }
@@ -742,18 +727,28 @@ function buildAgentResult(
           unfairnessCount,
           ...(unfairnessTests.length > 0 ? { tests: unfairnessTests } : {}),
         };
+}
+
+function buildSolutionQualityResult(solutionReport: QualityReport | undefined): JsonRecord {
   const solutionPasses = Boolean(solutionReport) && hasPerfectSolutionEvaluation(solutionReport?.evaluation);
-  const solutionQuality: JsonRecord = !solutionReport
+  return !solutionReport
     ? { verdict: "FAIL", reason: "No completed Solution Quality report was available." }
     : solutionPasses
       ? { verdict: "PASS" }
       : { verdict: "FAIL", failures: solutionQualityFailures(solutionReport.evaluation) };
+}
 
+/** Solution Quality is omitted when Test Quality failed, because it was not run. */
+function buildAgentResult(
+  promptQuality: JsonRecord,
+  testQuality: JsonRecord,
+  solutionQuality?: JsonRecord,
+): JsonRecord {
   return {
     promptQuality,
     ...(promptQuality.verdict === "PASS" ? { note: PROMPT_PRESERVATION_NOTE } : {}),
     testQuality,
-    solutionQuality,
+    ...(solutionQuality ? { solutionQuality } : {}),
   };
 }
 
@@ -1332,29 +1327,41 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         precheckDir = undefined;
 
         onUpdate?.({
-          content: [
-            { type: "text", text: "Fargate patch prechecks passed; opening Shipd for Test and Solution Quality..." },
-          ],
+          content: [{ type: "text", text: "Fargate patch prechecks passed; opening Shipd for Test Quality..." }],
           details: undefined,
         });
         const finalPage = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
         browser = finalPage.browser;
         page = finalPage.page;
         if (promptQualityCached) await uploadChallengeFields(page, files, signal);
-        await runQualityStage(["Test Quality", "Solution Quality"]);
+        await runQualityStage(["Test Quality"]);
 
-        if (!page) throw new Error("Shipd quality status page was closed before report extraction.");
-        onUpdate?.({
-          content: [{ type: "text", text: "Extracting Test and Solution Quality reports..." }],
-          details: undefined,
-        });
+        if (!page) throw new Error("Shipd quality status page was closed before Test Quality report extraction.");
+        onUpdate?.({ content: [{ type: "text", text: "Extracting Test Quality report..." }], details: undefined });
         const testReport = (await hasQualityReport(page, "Test Quality"))
           ? (await extractQualityReportWithRetry(page, "Test Quality", signal)).parsed
           : undefined;
+        const testQuality = buildTestQualityResult(testReport);
+        if (testQuality.verdict !== "PASS") {
+          const result = buildAgentResult(promptQuality, testQuality);
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        }
+
+        onUpdate?.({
+          content: [{ type: "text", text: "Test Quality passed; running Solution Quality..." }],
+          details: undefined,
+        });
+        await runQualityStage(["Solution Quality"]);
+
+        if (!page) throw new Error("Shipd quality status page was closed before Solution Quality report extraction.");
+        onUpdate?.({ content: [{ type: "text", text: "Extracting Solution Quality report..." }], details: undefined });
         const solutionReport = (await hasQualityReport(page, "Solution Quality"))
           ? (await extractQualityReportWithRetry(page, "Solution Quality", signal)).parsed
           : undefined;
-        const result = buildAgentResult(testReport, promptQuality, solutionReport);
+        const result = buildAgentResult(promptQuality, testQuality, buildSolutionQualityResult(solutionReport));
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           details: result,

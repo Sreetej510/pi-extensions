@@ -1,5 +1,5 @@
 /**
- * Hosted Auto Review calibration for the `/checks --autoreview` reviewers, distilled from the shipd-workflow corpus
+ * Hosted Auto Review calibration for the `auditor` tool reviewers, distilled from the shipd-workflow corpus
  * (shipd-v5/rulebook/rulebook.json families, autoreview-corpus/tq, autoreview-corpus/synth-examples.json).
  * Each entry states the general pattern hosted reviewers raise, not a quote from a past task, so no task under review
  * (or an earlier round of it) leaks into the prompts.

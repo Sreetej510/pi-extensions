@@ -1,6 +1,5 @@
 /**
- * Global config (~/.pi/agent/checks-config.json) for local analysis-agent models,
- * Claude CLI benchmark settings, and Fargate resources, plus helpers for reading
+ * Global config (~/.pi/agent/checks-config.json) for the Claude CLI benchmark, reviewer and auditor settings, and Fargate resources, plus helpers for reading
  * pi's own settings.json (enabled models, shell path) used by unrelated tools.
  */
 
@@ -8,8 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
-  AnalyzeGapConfig,
-  AutoReviewConfig,
+  AuditorConfig,
   ChecksConfig,
   ClaudeThinkingLevel,
   FargateConfig,
@@ -35,16 +33,13 @@ export const SOLVER_REVIEW_TIMEOUT_MIN_MINUTES = 10;
 export const SOLVER_REVIEW_TIMEOUT_MAX_MINUTES = 60;
 export const SOLVER_REVIEW_DEFAULT_TIMEOUT_MINUTES = 20;
 
-export const AUTO_REVIEW_TIMEOUT_MIN_MINUTES = 10;
-export const AUTO_REVIEW_TIMEOUT_MAX_MINUTES = 90;
-export const AUTO_REVIEW_DEFAULT_TIMEOUT_MINUTES = 40;
-export const AUTO_REVIEW_CONCURRENCY_MIN = 1;
-export const AUTO_REVIEW_CONCURRENCY_MAX = 8;
-export const AUTO_REVIEW_DEFAULT_CONCURRENCY = 4;
+export const AUDITOR_TIMEOUT_MIN_MINUTES = 10;
+export const AUDITOR_TIMEOUT_MAX_MINUTES = 90;
+export const AUDITOR_DEFAULT_TIMEOUT_MINUTES = 40;
+export const AUDITOR_CONCURRENCY_MIN = 1;
+export const AUDITOR_CONCURRENCY_MAX = 8;
+export const AUDITOR_DEFAULT_CONCURRENCY = 4;
 
-export const ANALYZE_TIMEOUT_MIN_MINUTES = 10;
-export const ANALYZE_TIMEOUT_MAX_MINUTES = 30;
-export const ANALYZE_DEFAULT_TIMEOUT_MINUTES = 15;
 export const HUMANIZER_MIN_CANDIDATE_COUNT = 1;
 export const HUMANIZER_MAX_CANDIDATE_COUNT = 10;
 export const HUMANIZER_DEFAULT_CANDIDATE_COUNT = 3;
@@ -224,34 +219,32 @@ export function saveSolverReviewConfig(solverReview: SolverReviewConfig): void {
   writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, solverReview }, null, 2), "utf-8");
 }
 
-/** Local Claude CLI Auto Review settings; independent of Pi model configuration like the solver settings. */
-export function loadAutoReviewConfig(): AutoReviewConfig {
-  const raw = readRawChecksConfig().autoReview;
-  const autoReview = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Partial<AutoReviewConfig>) : {};
-  const timeoutMinutes = Number.isFinite(autoReview.timeoutMinutes)
-    ? Math.min(
-        AUTO_REVIEW_TIMEOUT_MAX_MINUTES,
-        Math.max(AUTO_REVIEW_TIMEOUT_MIN_MINUTES, autoReview.timeoutMinutes as number),
-      )
-    : AUTO_REVIEW_DEFAULT_TIMEOUT_MINUTES;
-  const concurrency = Number.isInteger(autoReview.concurrency)
-    ? Math.min(AUTO_REVIEW_CONCURRENCY_MAX, Math.max(AUTO_REVIEW_CONCURRENCY_MIN, autoReview.concurrency as number))
-    : AUTO_REVIEW_DEFAULT_CONCURRENCY;
+/** Local Claude CLI settings for the `auditor` tool; a saved `autoReview` block from earlier versions still applies. */
+export function loadAuditorConfig(): AuditorConfig {
+  const config = readRawChecksConfig();
+  const raw = config.auditor ?? config.autoReview;
+  const auditor = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Partial<AuditorConfig>) : {};
+  const timeoutMinutes = Number.isFinite(auditor.timeoutMinutes)
+    ? Math.min(AUDITOR_TIMEOUT_MAX_MINUTES, Math.max(AUDITOR_TIMEOUT_MIN_MINUTES, auditor.timeoutMinutes as number))
+    : AUDITOR_DEFAULT_TIMEOUT_MINUTES;
+  const concurrency = Number.isInteger(auditor.concurrency)
+    ? Math.min(AUDITOR_CONCURRENCY_MAX, Math.max(AUDITOR_CONCURRENCY_MIN, auditor.concurrency as number))
+    : AUDITOR_DEFAULT_CONCURRENCY;
   const thinkingLevels: ClaudeThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
   return {
-    modelId: ["haiku", "sonnet", "opus"].includes(autoReview.modelId ?? "") ? (autoReview.modelId as string) : "opus",
+    modelId: ["haiku", "sonnet", "opus"].includes(auditor.modelId ?? "") ? (auditor.modelId as string) : "opus",
     thinkingLevel:
-      autoReview.thinkingLevel && thinkingLevels.includes(autoReview.thinkingLevel) ? autoReview.thinkingLevel : "high",
+      auditor.thinkingLevel && thinkingLevels.includes(auditor.thinkingLevel) ? auditor.thinkingLevel : "high",
     timeoutMinutes,
     concurrency,
   };
 }
 
-export function saveAutoReviewConfig(autoReview: AutoReviewConfig): void {
-  const raw = readRawChecksConfig();
+export function saveAuditorConfig(auditor: AuditorConfig): void {
+  const { autoReview: _legacy, ...raw } = readRawChecksConfig();
   const dir = dirname(CONFIG_PATH);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, autoReview }, null, 2), "utf-8");
+  writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, auditor }, null, 2), "utf-8");
 }
 
 /** Candidate counts for the humanizer can be configured even when reviewer models are unset. */
@@ -309,21 +302,6 @@ export function setAnalyzeProjectEnabled(cwd: string, enabled: boolean): void {
   if (enabled) projects.add(cwd);
   else projects.delete(cwd);
   saveChecksConfig({ ...loadChecksConfig(), enabledProjects: [...projects] });
-}
-
-/** The shared model settings for the agent-callable gap-finder and solution-precheck tools. */
-export function loadAnalyzeGapConfig(): AnalyzeGapConfig | null {
-  const analyzeGap = loadChecksConfig().analyzeGap;
-  if (!analyzeGap?.provider || !analyzeGap.modelId || !analyzeGap.thinkingLevel) return null;
-  const timeoutMinutes = Number.isFinite(analyzeGap.timeoutMinutes)
-    ? Math.min(ANALYZE_TIMEOUT_MAX_MINUTES, Math.max(ANALYZE_TIMEOUT_MIN_MINUTES, analyzeGap.timeoutMinutes))
-    : ANALYZE_DEFAULT_TIMEOUT_MINUTES;
-  return { ...analyzeGap, timeoutMinutes };
-}
-
-/** Save the analysis-tool model settings without touching the rest of the config. */
-export function saveAnalyzeGapConfig(analyzeGap: AnalyzeGapConfig): void {
-  saveChecksConfig({ ...loadChecksConfig(), analyzeGap });
 }
 
 export function loadEnabledModelRefs(): string[] {

@@ -1,17 +1,20 @@
 /** Keeps the analysis and humanizer tools active only when enabled for the project. */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { GAP_FINDER_TOOL_NAME, registerAnalysisTools, SOLUTION_PRECHECK_TOOL_NAME } from "./analyze.js";
+import { AUDITOR_TOOL_NAME, registerAnalysisTools } from "./analyze.js";
 import { isAnalyzeProjectEnabled, setAnalyzeProjectEnabled } from "./config.js";
 import { HUMANIZE_AGENT_PROMPT_TOOL_NAME } from "./humanize.js";
 import { QUALITY_CHECK_TOOL_NAME } from "./submit.js";
 
-const ANALYSIS_TOOL_NAMES = [
-  GAP_FINDER_TOOL_NAME,
-  SOLUTION_PRECHECK_TOOL_NAME,
-  HUMANIZE_AGENT_PROMPT_TOOL_NAME,
+const ANALYSIS_TOOL_NAMES = [AUDITOR_TOOL_NAME, HUMANIZE_AGENT_PROMPT_TOOL_NAME] as const;
+/** Tools the auditor replaced (gap-finder, solution-precheck) and older names, removed from restored sessions. */
+const LEGACY_TOOL_NAMES = [
+  "analyze_task_tests",
+  "analyze_test_gaps",
+  "submit_shipd",
+  "gap-finder",
+  "solution-precheck",
 ] as const;
-const LEGACY_TOOL_NAMES = ["analyze_task_tests", "analyze_test_gaps", "submit_shipd"] as const;
 
 let analyzeEnabled = false;
 let toolsRegistered = false;
