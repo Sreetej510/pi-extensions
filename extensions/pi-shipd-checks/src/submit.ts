@@ -31,6 +31,12 @@ const RECHECK_INTERVAL_MS = 90_000;
 const PROMPT_QUALITY_INITIAL_WAIT_MS = 120_000;
 const PROMPT_QUALITY_RECHECK_INTERVAL_MS = 30_000;
 const UI_TIMEOUT_MS = 5_000;
+const REPORT_PREVIEW_TIMEOUT_MS = 20_000;
+const PAGE_READY_TIMEOUT_MS = 90_000;
+const NETWORK_IDLE_TIMEOUT_MS = 15_000;
+const DRAFT_SAVE_QUIET_MS = 3_000;
+const DRAFT_SAVE_TIMEOUT_MS = 120_000;
+const DRAFT_SYNC_ATTEMPTS = 3;
 const CHALLENGE_FORM_TIMEOUT_MS = 30_000;
 const CHALLENGE_FORM_POLL_INTERVAL_MS = 200;
 const QUALITY_UI_RETRY_ATTEMPTS = 3;
@@ -291,8 +297,107 @@ async function navigateAuthenticated(page: Page, targetUrl: string, signal?: Abo
   if (response && response.status() >= 400) {
     throw new Error(`Shipd job-link navigation returned HTTP ${response.status()}.`);
   }
-  await page.waitForTimeout(4_000);
+  await waitForChallengePage(page, signal);
+}
+
+async function qualityRowLoaded(page: Page, quality: QualityName): Promise<boolean> {
+  const label = qualityLabel(page, quality);
+  if ((await label.count()) !== 1 || !(await label.isVisible())) return false;
+  const row = qualityRow(page, quality);
+  if ((await row.locator('button[title^="Run"], button[title^="Re-run"]').count()) > 0) return true;
+  return isBusy(clean(await row.innerText()));
+}
+
+/**
+ * Wait for the challenge form and every quality row's status to load. A row rendered before its
+ * Convex status arrives has no Run/Re-run button, which would otherwise read as a current report.
+ */
+async function waitForChallengePage(page: Page, signal?: AbortSignal): Promise<void> {
+  const deadline = Date.now() + PAGE_READY_TIMEOUT_MS;
+  while (true) {
+    checkCancelled(signal);
+    const descriptionVisible = await page
+      .locator("#problem-description")
+      .isVisible()
+      .catch(() => false);
+    const pending: QualityName[] = [];
+    for (const quality of QUALITY_NAMES) {
+      if (!(await qualityRowLoaded(page, quality).catch(() => false))) pending.push(quality);
+    }
+    if (descriptionVisible && pending.length === 0) break;
+    if (Date.now() >= deadline) {
+      const missing = [...(descriptionVisible ? [] : ["Task Prompt field"]), ...pending.map(displayQualityName)];
+      throw new Error(
+        `Shipd challenge page did not finish loading within ${formatDuration(PAGE_READY_TIMEOUT_MS)} (waiting for ${missing.join(", ")}).`,
+      );
+    }
+    await sleep(CHALLENGE_FORM_POLL_INTERVAL_MS, signal);
+  }
+  await page.waitForLoadState("networkidle", { timeout: NETWORK_IDLE_TIMEOUT_MS }).catch(() => undefined);
   checkCancelled(signal);
+}
+
+interface ConvexMutationTracker {
+  pending: Set<number>;
+  lastActivityAt: number;
+}
+
+const convexMutationTrackers = new WeakMap<Page, ConvexMutationTracker>();
+
+/** Track Shipd's Convex sync socket so draft saves can be awaited until the server acknowledges them. */
+function trackConvexMutations(page: Page): void {
+  const tracker: ConvexMutationTracker = { pending: new Set(), lastActivityAt: 0 };
+  convexMutationTrackers.set(page, tracker);
+  page.on("websocket", (socket) => {
+    if (!socket.url().includes(".convex.cloud/")) return;
+    const record =
+      (direction: "sent" | "received") =>
+      ({ payload }: { payload: string | Buffer }) => {
+        let message: unknown;
+        try {
+          message = JSON.parse(String(payload));
+        } catch {
+          return;
+        }
+        if (!isRecord(message) || typeof message.requestId !== "number") return;
+        if (direction === "sent" && message.type === "Mutation") tracker.pending.add(message.requestId);
+        else if (direction === "received" && message.type === "MutationResponse")
+          tracker.pending.delete(message.requestId);
+        else return;
+        tracker.lastActivityAt = Date.now();
+      };
+    socket.on("framesent", record("sent"));
+    socket.on("framereceived", record("received"));
+  });
+}
+
+async function readSaveIndicators(page: Page): Promise<string[]> {
+  const texts = await page
+    .locator("span")
+    .filter({ hasText: /^\s*(?:saved|saving|unsaved)\b/i })
+    .allInnerTexts()
+    .catch(() => []);
+  return texts.map((text) => clean(text)).filter((text) => text.length <= 40);
+}
+
+/** Wait until Shipd has acknowledged every draft mutation and its header indicator reads "Saved". */
+async function waitForDraftSaved(page: Page, signal?: AbortSignal): Promise<void> {
+  const tracker = convexMutationTrackers.get(page);
+  const startedAt = Date.now();
+  await sleep(DRAFT_SAVE_QUIET_MS, signal);
+  while (true) {
+    checkCancelled(signal);
+    const indicators = await readSaveIndicators(page);
+    const pendingCount = tracker?.pending.size ?? 0;
+    const quiet = pendingCount === 0 && Date.now() - (tracker?.lastActivityAt ?? 0) >= DRAFT_SAVE_QUIET_MS;
+    if (quiet && indicators.every((text) => /^saved$/i.test(text))) return;
+    if (Date.now() - startedAt >= DRAFT_SAVE_TIMEOUT_MS) {
+      throw new Error(
+        `Shipd draft did not finish saving within ${formatDuration(DRAFT_SAVE_TIMEOUT_MS)} (${pendingCount} unacknowledged save${pendingCount === 1 ? "" : "s"}; indicator: ${indicators.join(", ") || "none"}).`,
+      );
+    }
+    await sleep(CHALLENGE_FORM_POLL_INTERVAL_MS, signal);
+  }
 }
 
 async function openShipdPage(
@@ -314,6 +419,7 @@ async function openShipdPage(
       }
     });
     const page = await context.newPage();
+    trackConvexMutations(page);
     await navigateAuthenticated(page, targetUrl, signal);
     return { browser, page };
   } catch (error) {
@@ -328,15 +434,103 @@ async function fillCodeEditor(page: Page, editor: Locator, value: string): Promi
   await page.keyboard.insertText(value);
 }
 
-async function uploadChallengeFields(page: Page, files: SubmissionFiles, signal?: AbortSignal): Promise<void> {
+interface DraftField {
+  key: keyof SubmissionFiles;
+  name: string;
+  root: string;
+}
+
+const DRAFT_FIELDS: readonly DraftField[] = [
+  { key: "taskPrompt", name: "Task Prompt", root: "#problem-description" },
+  { key: "testPatch", name: "Test Patch", root: "#problem-test-patch" },
+  { key: "solutionPatch", name: "Solution Patch", root: "#problem-solution-patch" },
+];
+
+interface CodeMirrorViewLike {
+  state?: { doc?: { toString(): string } };
+}
+
+function draftEditor(page: Page, field: DraftField): Locator {
+  return field.key === "taskPrompt"
+    ? page.locator(field.root)
+    : page.locator(`${field.root} [contenteditable="true"], ${field.root} textarea`);
+}
+
+function normalizeDraftText(value: string): string {
+  return value.replace(/\r\n?/g, "\n");
+}
+
+/** Read a field's full value. CodeMirror renders only visible lines, so read its document instead of the DOM text. */
+async function readDraftField(page: Page, field: DraftField): Promise<string | undefined> {
+  const value = await page
+    .locator(field.root)
+    .first()
+    .evaluate((element) => {
+      if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) return element.value;
+      const textarea = element.querySelector("textarea");
+      if (textarea) return textarea.value;
+      const content = element.querySelector(".cm-content") as
+        | (Element & { cmView?: { rootView?: { view?: CodeMirrorViewLike } }; cmTile?: { view?: CodeMirrorViewLike } })
+        | null;
+      const text = (content?.cmView?.rootView?.view ?? content?.cmTile?.view)?.state?.doc?.toString();
+      return typeof text === "string" ? text : null;
+    })
+    .catch(() => null);
+  return value ?? undefined;
+}
+
+/** Fields whose draft value differs from the local files; unreadable fields count only when requested. */
+async function changedDraftFields(
+  page: Page,
+  files: SubmissionFiles,
+  includeUnreadable: boolean,
+): Promise<DraftField[]> {
+  const changed: DraftField[] = [];
+  for (const field of DRAFT_FIELDS) {
+    const current = await readDraftField(page, field);
+    const differs =
+      current === undefined ? includeUnreadable : normalizeDraftText(current) !== normalizeDraftText(files[field.key]);
+    if (differs) changed.push(field);
+  }
+  return changed;
+}
+
+/**
+ * Make the Shipd draft match the local files before any quality status is read. Only changed fields
+ * are filled; each save is awaited, then the page is reloaded to confirm the server kept the content.
+ */
+async function syncChallengeDraft(
+  page: Page,
+  files: SubmissionFiles,
+  targetUrl: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  await waitForChallengeFields(page, signal);
+  let changed = await changedDraftFields(page, files, true);
+  for (let attempt = 1; changed.length > 0; attempt += 1) {
+    if (attempt > DRAFT_SYNC_ATTEMPTS) {
+      throw new Error(
+        `Shipd did not keep the uploaded ${changed.map((field) => field.name).join(", ")} after ${DRAFT_SYNC_ATTEMPTS} save attempts.`,
+      );
+    }
+    for (const field of changed) {
+      const editor = draftEditor(page, field);
+      if (field.key === "taskPrompt") await editor.fill(files[field.key]);
+      else await fillCodeEditor(page, editor, files[field.key]);
+      await editor.evaluate((element) => (element as HTMLElement).blur());
+    }
+    await waitForDraftSaved(page, signal);
+    await navigateAuthenticated(page, targetUrl, signal);
+    await waitForChallengeFields(page, signal);
+    changed = await changedDraftFields(page, files, false);
+  }
+}
+
+/** CodeMirror editors mount asynchronously after the challenge page hydrates. */
+async function waitForChallengeFields(page: Page, signal?: AbortSignal): Promise<void> {
   checkCancelled(signal);
-  const description = page.locator("#problem-description");
-  const testEditor = page.locator('#problem-test-patch [contenteditable="true"], #problem-test-patch textarea');
-  const solutionEditor = page.locator(
-    '#problem-solution-patch [contenteditable="true"], #problem-solution-patch textarea',
-  );
-  const fields = [description, testEditor, solutionEditor];
-  const fieldNames = ["Task Prompt", "Test Patch", "Solution Patch"];
+  const fields = DRAFT_FIELDS.map((field) => draftEditor(page, field));
+  const fieldNames = DRAFT_FIELDS.map((field) => field.name);
   const deadline = Date.now() + CHALLENGE_FORM_TIMEOUT_MS;
   let counts = await Promise.all(fields.map((field) => field.count()));
   while (
@@ -351,16 +545,6 @@ async function uploadChallengeFields(page: Page, files: SubmissionFiles, signal?
     await sleep(CHALLENGE_FORM_POLL_INTERVAL_MS, signal);
     counts = await Promise.all(fields.map((field) => field.count()));
   }
-
-  // CodeMirror editors mount asynchronously after the challenge page hydrates.
-  // Wait for the labeled fields instead of assuming they exist after navigation's fixed delay.
-  // Populate the entire Shipd draft before reading status or starting any quality check.
-  await description.fill(files.taskPrompt);
-  await fillCodeEditor(page, testEditor, files.testPatch);
-  await fillCodeEditor(page, solutionEditor, files.solutionPatch);
-  await solutionEditor.evaluate((element) => (element as HTMLElement).blur());
-  await qualityRow(page, "Task Prompt Quality").hover();
-  await sleep(2_000, signal);
 }
 
 async function qualityRunStartedRowText(
@@ -553,13 +737,18 @@ async function hasQualityReport(page: Page, quality: QualityName): Promise<boole
 }
 
 async function getQualityExpander(page: Page, quality: QualityName): Promise<Locator> {
-  await qualityRow(page, quality).hover();
   // The report preview is portal-rendered; locate its accessible control rather than
   // depending on the preview's Tailwind positioning class (for example, `div.fixed`).
   const expanders = page.locator(
     'button[title="Expand to full view"]:visible, button[aria-label="Expand to full view"]:visible',
   );
-  await expanders.first().waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
+  // Move off the row and let any open preview close (about 200 ms) before hovering. Hovering the
+  // point the pointer already rests on fires no new mouseenter, and a lingering preview belongs
+  // to the previously hovered row.
+  await page.mouse.move(0, 0);
+  await expanders.first().waitFor({ state: "hidden", timeout: UI_TIMEOUT_MS });
+  await qualityRow(page, quality).hover();
+  await expanders.first().waitFor({ state: "visible", timeout: REPORT_PREVIEW_TIMEOUT_MS });
   const count = await expanders.count();
   if (count !== 1) throw new Error(`${quality}: expected one visible quality expander, found ${count}`);
   const expander = expanders.first();
@@ -576,7 +765,7 @@ async function extractQualityReport(page: Page, quality: QualityName, signal?: A
   await expander.click();
 
   const dialog = page.getByRole("dialog").last();
-  await dialog.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
+  await dialog.waitFor({ state: "visible", timeout: REPORT_PREVIEW_TIMEOUT_MS });
   const heading = clean(
     await dialog
       .locator("h2")
@@ -593,7 +782,7 @@ async function extractQualityReport(page: Page, quality: QualityName, signal?: A
       .filter({ hasText: /raw output/i })
       .first();
     try {
-      await rawButton.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
+      await rawButton.waitFor({ state: "visible", timeout: REPORT_PREVIEW_TIMEOUT_MS });
     } catch {
       const dialogText = clean(await dialog.innerText());
       throw new Error(`${quality}: raw output control did not appear; dialog text: ${dialogText.slice(0, 1_000)}`);
@@ -601,7 +790,7 @@ async function extractQualityReport(page: Page, quality: QualityName, signal?: A
     await rawButton.click();
   }
 
-  await code.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
+  await code.waitFor({ state: "visible", timeout: REPORT_PREVIEW_TIMEOUT_MS });
   const rawOutput = await code.innerText();
   const parsed = parseJson(rawOutput, quality);
   await page.keyboard.press("Escape").catch(() => undefined);
@@ -1265,7 +1454,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           const initial = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
           browser = initial.browser;
           page = initial.page;
-          await uploadChallengeFields(page, files, signal);
+          await syncChallengeDraft(page, files, targetUrl, signal);
           await runQualityStage(["Task Prompt Quality"]);
 
           if (!page) throw new Error("Shipd page was closed before Prompt Quality report extraction.");
@@ -1333,7 +1522,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         const finalPage = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
         browser = finalPage.browser;
         page = finalPage.page;
-        if (promptQualityCached) await uploadChallengeFields(page, files, signal);
+        if (promptQualityCached) await syncChallengeDraft(page, files, targetUrl, signal);
         await runQualityStage(["Test Quality"]);
 
         if (!page) throw new Error("Shipd quality status page was closed before Test Quality report extraction.");

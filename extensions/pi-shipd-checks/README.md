@@ -30,8 +30,10 @@ or correctness evidence. The adapter is experimental and was trained on all 519 
 assigned to EVAL and HOLDOUT; treat all outputs as unapproved drafts.
 
 The agent-callable `quality-check` tool runs `create_patches.sh` in the current working directory and reads
-`agent_prompt.md`, `test.patch`, and `solution.patch`. Before checking or running Prompt Quality, it uploads all three
-contents to the authenticated Shipd draft fields and waits for the editor update to settle. It computes a SHA-256 of the
+`agent_prompt.md`, `test.patch`, and `solution.patch`. Before reading any quality status, it syncs the Shipd draft: it
+fills only the fields whose saved content differs from the local files, waits until Shipd's Convex backend acknowledges
+every save and the header shows `Saved`, then reloads and confirms the draft matches (up to three attempts). Each page
+load waits until every quality row's status has loaded, since a row without its status would read as a current report. It computes a SHA-256 of the
 exact prompt content. The last passing prompt hash is stored as a custom entry in the current chat session. If the
 hash matches, it skips the Shipd Prompt Quality check entirely and reports a cached `PASS`; if it differs or is absent, it
 checks the refreshed status after filling the fields and runs only when the check is stale or has a `Run` button. Otherwise it
