@@ -1,6 +1,6 @@
 {
   "name": "@sreetej510/pi-shipd-checks",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "description": "Pi extension for Shipd checks, a local Claude CLI auditor (Auto Review replica for tests and solution), and opt-in CoreWeave-backed agent_prompt.md humanization.",
   "type": "module",
   "license": "MIT",
