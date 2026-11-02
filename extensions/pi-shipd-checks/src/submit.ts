@@ -1437,6 +1437,17 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           }
         };
 
+        // Every run opens the job link and syncs all draft fields first, so each later stage
+        // (including a cached Prompt Quality pass) reads statuses for the local content.
+        onUpdate?.({
+          content: [{ type: "text", text: "Opening the Shipd job link and syncing the draft..." }],
+          details: undefined,
+        });
+        const initial = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
+        browser = initial.browser;
+        page = initial.page;
+        await syncChallengeDraft(page, files, targetUrl, signal);
+
         let promptQuality: JsonRecord;
         if (promptQualityCached) {
           promptQuality = { verdict: "PASS", cached: true };
@@ -1446,15 +1457,10 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
             ],
             details: undefined,
           });
+          await browser.close().catch(() => undefined);
+          browser = undefined;
+          page = undefined;
         } else {
-          onUpdate?.({
-            content: [{ type: "text", text: "Opening Shipd to prepare Prompt Quality..." }],
-            details: undefined,
-          });
-          const initial = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
-          browser = initial.browser;
-          page = initial.page;
-          await syncChallengeDraft(page, files, targetUrl, signal);
           await runQualityStage(["Task Prompt Quality"]);
 
           if (!page) throw new Error("Shipd page was closed before Prompt Quality report extraction.");
@@ -1522,7 +1528,6 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         const finalPage = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
         browser = finalPage.browser;
         page = finalPage.page;
-        if (promptQualityCached) await syncChallengeDraft(page, files, targetUrl, signal);
         await runQualityStage(["Test Quality"]);
 
         if (!page) throw new Error("Shipd quality status page was closed before Test Quality report extraction.");
