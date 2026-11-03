@@ -11,7 +11,12 @@ usage / rate-limit budgets — OpenAI Codex, Anthropic OAuth, and pi-auth-backed
 - Caches results on disk (`~/.pi/agent/usage-cache.json`) for a few minutes so multiple
   concurrent pi sessions don't hammer the provider APIs.
 - Pushes a compact usage summary into the statusline, refreshed automatically with retry/backoff
-  on rate limits (`429`).
+  on rate limits (`429`). Anthropic windows show the time left until they reset, e.g.
+  `claude 5h 9% ↻1h16m / 7d 19% fable 7% ↻9h55m`; windows that reset together share one
+  countdown. The countdown is re-rendered every minute without querying the API, and it is the
+  same in every time zone.
+- Lists Anthropic model-scoped weekly limits (the `limits` entries with a `scope`, e.g. Fable) in
+  `/usage` and in the statusline.
 - Shows the next Codex banked-reset expiry and supports confirmed, interactive consumption.
 
 ## Commands

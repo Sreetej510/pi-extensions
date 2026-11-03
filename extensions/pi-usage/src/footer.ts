@@ -5,16 +5,6 @@ import { STATUS_KEY } from "./constants.js";
 import type { FooterDataView, FooterTheme, FooterTui } from "./types.js";
 import { asNumber, sanitizeStatusText } from "./utils.js";
 
-let footerRegistered = false;
-
-export function isFooterRegistered(): boolean {
-  return footerRegistered;
-}
-
-export function setFooterRegistered(value: boolean): void {
-  footerRegistered = value;
-}
-
 export function installUsageFooter(pi: ExtensionAPI, ctx: ExtensionContext): void {
   // biome-ignore lint/suspicious/noExplicitAny: footer factory params are provided by the host
   ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {

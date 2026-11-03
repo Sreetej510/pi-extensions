@@ -31,15 +31,9 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerUsageCommand } from "./command.js";
-import { installUsageFooter, isFooterRegistered, setFooterRegistered } from "./footer.js";
+import { installUsageFooter } from "./footer.js";
 import { isUsageSupportedModel } from "./models.js";
-import {
-  clearUsageStatusline,
-  handleStaleContextError,
-  refreshCurrentUsageStatusline,
-  rethrowUnlessStaleContextError,
-  setSessionActive,
-} from "./statusline.js";
+import { createUsageStatusline } from "./statusline.js";
 
 export { completeCodexStatusArguments, parseArgs } from "./args.js";
 export { isStaleExtensionContextError } from "./errors.js";
@@ -55,13 +49,28 @@ export type {
 } from "./types.js";
 
 export default function usageExtension(pi: ExtensionAPI) {
-  registerUsageCommand(pi);
+  // pi calls this factory once per session but may reuse the imported module
+  // for sessions with the same cwd (Pi Web runs many in one process), so all
+  // per-session state lives here and not at module level.
+  const statusline = createUsageStatusline();
+  const {
+    clearUsageStatusline,
+    handleStaleContextError,
+    refreshCurrentUsageStatusline,
+    rethrowUnlessStaleContextError,
+    setSessionActive,
+  } = statusline;
+  // The TUI drops extension footers when it replaces the session (/new, /resume),
+  // so the flag belongs to this session's instance.
+  let footerRegistered = false;
+
+  registerUsageCommand(pi, statusline);
 
   const ensureUsageFooter = (ctx: ExtensionContext) => {
-    if (isFooterRegistered() || !ctx.hasUI) return;
+    if (footerRegistered || !ctx.hasUI) return;
     try {
       installUsageFooter(pi, ctx);
-      setFooterRegistered(true);
+      footerRegistered = true;
     } catch (error) {
       if (!handleStaleContextError(ctx, error)) throw error;
     }
