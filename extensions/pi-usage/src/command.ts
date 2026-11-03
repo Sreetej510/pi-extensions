@@ -18,20 +18,18 @@ import {
   saveSharedBackoff,
   saveSharedUsageReport,
 } from "./shared-cache.js";
-import {
-  applyCurrentProviderStatusline,
-  clearCodexMemoryCache,
-  clearStatuslineValue,
-  getCombinedCache,
-  handleStaleContextError,
-  isSessionActive,
-  setCombinedCache,
-  setStatuslineChecking,
-} from "./statusline.js";
+import { clearCodexMemoryCache, getCombinedCache, setCombinedCache, type UsageStatusline } from "./statusline.js";
 import type { SharedCacheEntry } from "./types.js";
 import { errorMessage } from "./utils.js";
 
-export function registerUsageCommand(pi: ExtensionAPI): void {
+export function registerUsageCommand(pi: ExtensionAPI, statusline: UsageStatusline): void {
+  const {
+    applyCurrentProviderStatusline,
+    clearStatuslineValue,
+    handleStaleContextError,
+    isSessionActive,
+    setStatuslineChecking,
+  } = statusline;
   pi.registerCommand(COMMAND_NAME, {
     description: "Show usage for all configured providers (Codex and Anthropic)",
     getArgumentCompletions: completeCodexStatusArguments,

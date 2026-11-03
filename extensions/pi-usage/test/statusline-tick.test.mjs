@@ -12,9 +12,11 @@ const { outputFiles } = await build({
   target: "node22",
   external: ["@earendil-works/*"],
 });
-const { applyCurrentProviderStatusline, clearUsageStatusline, setSessionActive, setStatuslineChecking } = await import(
+const { createUsageStatusline } = await import(
   `data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString("base64")}`
 );
+const { applyCurrentProviderStatusline, clearUsageStatusline, setSessionActive, setStatuslineChecking } =
+  createUsageStatusline();
 
 const NOW = Date.parse("2026-10-31T19:04:34Z");
 let statuses;
