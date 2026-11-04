@@ -14,6 +14,7 @@ import type {
   FargateResourceProfile,
   FargateResourceUsage,
   PromptHumanizerConfig,
+  QualityCheckConfig,
   SolverGapConfig,
   SolverReviewConfig,
   ThinkingLevel,
@@ -245,6 +246,21 @@ export function saveAuditorConfig(auditor: AuditorConfig): void {
   const dir = dirname(CONFIG_PATH);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, auditor }, null, 2), "utf-8");
+}
+
+/** Settings for the `quality-check` tool; Test and Solution Quality run sequentially unless configured otherwise. */
+export function loadQualityCheckConfig(): QualityCheckConfig {
+  const raw = readRawChecksConfig().qualityCheck;
+  const qualityCheck =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Partial<QualityCheckConfig>) : {};
+  return { testSolutionMode: qualityCheck.testSolutionMode === "parallel" ? "parallel" : "sequential" };
+}
+
+export function saveQualityCheckConfig(qualityCheck: QualityCheckConfig): void {
+  const raw = readRawChecksConfig();
+  const dir = dirname(CONFIG_PATH);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, qualityCheck }, null, 2), "utf-8");
 }
 
 /** Candidate counts for the humanizer can be configured even when reviewer models are unset. */

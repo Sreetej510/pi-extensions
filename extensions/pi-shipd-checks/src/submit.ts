@@ -12,7 +12,7 @@ import { Text } from "@earendil-works/pi-tui";
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { Type } from "typebox";
-import { loadFargateConfig } from "./config.js";
+import { loadFargateConfig, loadQualityCheckConfig } from "./config.js";
 import { runFargatePatchPrecheck } from "./fargate-runner.js";
 import { runCreatePatches, snapshotGitHead } from "./git.js";
 import { formatDuration } from "./report.js";
@@ -927,7 +927,7 @@ function buildSolutionQualityResult(solutionReport: QualityReport | undefined): 
       : { verdict: "FAIL", failures: solutionQualityFailures(solutionReport.evaluation) };
 }
 
-/** Solution Quality is omitted when Test Quality failed, because it was not run. */
+/** Solution Quality is omitted when it was not run: in sequential mode, after Test Quality failed. */
 function buildAgentResult(
   promptQuality: JsonRecord,
   testQuality: JsonRecord,
@@ -1521,14 +1521,21 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         await rm(precheckDir, { recursive: true, force: true });
         precheckDir = undefined;
 
+        // Read per run so a /checks --config change applies without restarting pi.
+        const runInParallel = loadQualityCheckConfig().testSolutionMode === "parallel";
         onUpdate?.({
-          content: [{ type: "text", text: "Fargate patch prechecks passed; opening Shipd for Test Quality..." }],
+          content: [
+            {
+              type: "text",
+              text: `Fargate patch prechecks passed; opening Shipd for ${runInParallel ? "Test and Solution Quality" : "Test Quality"}...`,
+            },
+          ],
           details: undefined,
         });
         const finalPage = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
         browser = finalPage.browser;
         page = finalPage.page;
-        await runQualityStage(["Test Quality"]);
+        await runQualityStage(runInParallel ? ["Test Quality", "Solution Quality"] : ["Test Quality"]);
 
         if (!page) throw new Error("Shipd quality status page was closed before Test Quality report extraction.");
         onUpdate?.({ content: [{ type: "text", text: "Extracting Test Quality report..." }], details: undefined });
@@ -1536,19 +1543,21 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           ? (await extractQualityReportWithRetry(page, "Test Quality", signal)).parsed
           : undefined;
         const testQuality = buildTestQualityResult(testReport);
-        if (testQuality.verdict !== "PASS") {
-          const result = buildAgentResult(promptQuality, testQuality);
-          return {
-            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-            details: result,
-          };
-        }
+        if (!runInParallel) {
+          if (testQuality.verdict !== "PASS") {
+            const result = buildAgentResult(promptQuality, testQuality);
+            return {
+              content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+              details: result,
+            };
+          }
 
-        onUpdate?.({
-          content: [{ type: "text", text: "Test Quality passed; running Solution Quality..." }],
-          details: undefined,
-        });
-        await runQualityStage(["Solution Quality"]);
+          onUpdate?.({
+            content: [{ type: "text", text: "Test Quality passed; running Solution Quality..." }],
+            details: undefined,
+          });
+          await runQualityStage(["Solution Quality"]);
+        }
 
         if (!page) throw new Error("Shipd quality status page was closed before Solution Quality report extraction.");
         onUpdate?.({ content: [{ type: "text", text: "Extracting Solution Quality report..." }], details: undefined });

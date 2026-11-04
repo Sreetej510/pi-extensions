@@ -39,7 +39,7 @@ hash matches, it skips the Shipd Prompt Quality check entirely and reports a cac
 checks the refreshed status of the synced draft and runs only when the check is stale or has a `Run` button. Otherwise it
 uses the current report. A new hash is saved only after Prompt Quality passes. On failure, only `promptQuality` is returned; there are no Test/Solution results or `stoppedReason`.
 Only after Prompt Quality passes or has a matching cached pass does it run the Fargate patch precheck against a clean `HEAD`;
-only if that passes does it run Test Quality, and only if Test Quality passes does it run Solution Quality. A failing Test Quality (any unfair test or coverage suggestion) returns `promptQuality` and `testQuality` without running Solution Quality. Each check runs fresh jobs, reruns stale reports, skips
+only if that passes does it run Test Quality, and only if Test Quality passes does it run Solution Quality. A failing Test Quality (any unfair test or coverage suggestion) returns `promptQuality` and `testQuality` without running Solution Quality. Setting **Test and Solution Quality** to `parallel` in `/checks --config` starts both together after the precheck and always returns both reports, even when Test Quality fails. Each check runs fresh jobs, reruns stale reports, skips
 current reports, and waits for started jobs. It returns only the useful report data:
 `details.testQuality.verdict`, `details.testQuality.coverageSuggestions`, `details.testQuality.unfairnessCount`, and
 `details.testQuality.tests` filtered to blocks whose `concerns` array is non-empty or whose `fairness` is exactly `"Not fair"`,
@@ -76,7 +76,7 @@ Shipd tokens; do not run overlapping invocations for the same challenge.
 |---|---|
 | `/checks` | Open a menu for config or solve |
 | `/checks --solve` | Run isolated Claude CLI solvers and base/new tests, then use a local Claude CLI reviewer to assess test fairness and failed agents |
-| `/checks --config` | Configure Solver model (Claude), Claude solver effort, timeout, parallel agent count, the Claude reviewer, and the auditor tool |
+| `/checks --config` | Configure Solver model (Claude), Claude solver effort, timeout, parallel agent count, the Claude reviewer, whether `quality-check` runs Test and Solution Quality sequentially or in parallel, and the auditor tool |
 | `/shipd:auth` | Open a browser for first-time Shipd sign-in and save the session |
 | `/shipd:link <url>` | Save the Shipd job link for the current chat session |
 | `/analyze:on` | Enable the `auditor` and prompt-humanizer tools for the current project |
@@ -86,9 +86,10 @@ Shipd tokens; do not run overlapping invocations for the same challenge.
 
 ## Configuration
 
-`/checks --config` opens the row-based settings menu with two sections:
+`/checks --config` opens the row-based settings menu with three sections:
 
 - **Solver**: Solver model (Claude: `haiku`, `sonnet`, or `opus`), solver effort (`low`, `medium`, `high`, `xhigh`, or `max`), one-shot timeout (10–90 minutes), parallel agent count, and the Claude reviewer model (default `opus`), effort (default `high`), and timeout (10–60 minutes; default 20), stored under `solverReview` in `checks-config.json`. Solver effort defaults to `low` when unset and is passed explicitly to Claude. Diffs, agent output, `agent_steps.jsonl` traces, base/new logs, and the local reviewer assessment are saved under `.pi/shipd-checks/<runId>/` and summarized in `shipd_report.json`.
+- **Quality Checks**: whether the `quality-check` tool runs Test and Solution Quality `sequential` (default; Solution Quality runs only after Test Quality passes) or `parallel` (both start together and both reports are returned), stored under `qualityCheck` in `checks-config.json`. The setting is read after the patch precheck on each run, so a change applies without restarting pi.
 - **Analysis Tools**: whether the analysis tools are enabled for this project, and the `auditor` tool's Claude settings: model (`haiku`, `sonnet`, or `opus`; default `opus`), effort (default `high`), timeout per reviewer (10–90 minutes; default 40), and parallel reviewers (1–8; default 4), stored under `auditor` in `checks-config.json` (an `autoReview` block from earlier versions is still read). Fargate resources are selected automatically and are not configurable in this menu.
 
 For each Claude solver, `shipd_report.json` records CLI-reported input/cache/output token totals, final and peak request-context token counts, context-window size/utilization, API-call count, and cost when available. When the CLI explicitly reports thinking tokens, `totalTokens` subtracts them from raw input-plus-output; otherwise it remains the raw total. The raw total is also recorded when a subtraction is made. The local Claude reviewer records the CLI-reported usage and cost. Per-agent, reviewer, and aggregate usage appears once under `solverTokenUsage`; `solverRunSummary` contains outcomes, aggregate test counts, and per-suite JUnit counts, while `solverReview` contains the assessment and reviewer model settings.
@@ -204,7 +205,7 @@ apply any selected draft locally.
 ```
 
 Use ↑/↓ to select a row and Enter/Space to change it. Settings are saved to `~/.pi/agent/checks-config.json`; solver
-settings are nested under `solverGap`, the solve reviewer under `solverReview`, and the auditor under `auditor`.
+settings are nested under `solverGap`, the solve reviewer under `solverReview`, the `quality-check` mode under `qualityCheck`, and the auditor under `auditor`.
 
 ## Install
 

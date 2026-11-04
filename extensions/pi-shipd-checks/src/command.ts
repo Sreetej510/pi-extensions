@@ -16,6 +16,7 @@ import {
   isAnalyzeProjectEnabled,
   loadAuditorConfig,
   loadChecksConfig,
+  loadQualityCheckConfig,
   loadSolverGapConfig,
   loadSolverReviewConfig,
   persistFargateResourceUsage,
@@ -26,6 +27,7 @@ import {
   SOLVER_REVIEW_TIMEOUT_MAX_MINUTES,
   SOLVER_REVIEW_TIMEOUT_MIN_MINUTES,
   saveAuditorConfig,
+  saveQualityCheckConfig,
   saveSolverGapConfig,
   saveSolverReviewConfig,
   setAnalyzeProjectEnabled,
@@ -44,6 +46,7 @@ import type {
   ClaudeThinkingLevel,
   CommandOption,
   FargateResourceUsage,
+  QualityTestSolutionMode,
   SolverGapConfig,
   SolverReviewConfig,
   SolverReviewResult,
@@ -56,7 +59,7 @@ const COMMAND_COMPLETIONS: readonly CommandOption[] = [
   {
     value: "--config",
     label: "--config",
-    description: "Configure Claude solvers and reviewers, and the auditor tool",
+    description: "Configure Claude solvers and reviewers, quality checks, and the auditor tool",
   },
   { value: "--solve", label: "--solve", description: "Run Claude agents on agent_prompt.md" },
 ];
@@ -83,6 +86,7 @@ type ConfigRowId =
   | "solverreview-model"
   | "solverreview-effort"
   | "solverreview-timeout"
+  | "quality-test-solution-mode"
   | "analyze-enabled"
   | "auditor-model"
   | "auditor-effort"
@@ -91,7 +95,7 @@ type ConfigRowId =
 
 interface ConfigRow {
   id: ConfigRowId;
-  section: "Solver" | "Analysis Tools";
+  section: "Solver" | "Quality Checks" | "Analysis Tools";
   label: string;
   value: string;
   /** "model" rows open a picker (closes the menu, then reopens it); "cycle" rows step through `values` in place. */
@@ -175,6 +179,14 @@ function buildConfigRows(
       ).map((v) => `${v} min`),
     },
     {
+      id: "quality-test-solution-mode",
+      section: "Quality Checks",
+      label: "Test and Solution Quality",
+      value: loadQualityCheckConfig().testSolutionMode,
+      kind: "cycle",
+      values: ["sequential", "parallel"],
+    },
+    {
       id: "analyze-enabled",
       section: "Analysis Tools",
       label: "Enabled here",
@@ -223,7 +235,7 @@ function buildConfigRows(
   ];
 }
 
-/** Custom row-based menu component: renders Solver and Analysis Tools rows. Cycling rows update and persist in place; only model rows exit the overlay to run a picker. */
+/** Custom row-based menu component: renders Solver, Quality Checks and Analysis Tools rows. Cycling rows update and persist in place; only model rows exit the overlay to run a picker. */
 class ConfigMenuComponent {
   selectedIndex = 0;
   private rows: ConfigRow[];
@@ -321,6 +333,12 @@ class ConfigMenuComponent {
         this.onCycleSaved();
         return;
       }
+      if (row.id === "quality-test-solution-mode") {
+        saveQualityCheckConfig({ testSolutionMode: nextValue as QualityTestSolutionMode });
+        this.refresh();
+        this.onCycleSaved();
+        return;
+      }
       if (row.id.startsWith("auditor-")) {
         const auditor = loadAuditorConfig();
         if (row.id === "auditor-model") auditor.modelId = nextValue;
@@ -345,7 +363,7 @@ class ConfigMenuComponent {
   }
 }
 
-/** Interactive `/checks --config` settings menu with Solver and Analysis Tools sections; Ctrl+S (or Esc) saves and exits. */
+/** Interactive `/checks --config` settings menu with Solver, Quality Checks and Analysis Tools sections; Ctrl+S (or Esc) saves and exits. */
 async function runConfigFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
   if (ctx.mode !== "tui") {
     ctx.ui.notify("/checks --config requires interactive mode", "error");
