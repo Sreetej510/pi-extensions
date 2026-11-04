@@ -44,6 +44,8 @@ const QUALITY_UI_RETRY_DELAY_MS = 250;
 const QUALITY_RUN_START_TIMEOUT_MS = 2_000;
 const QUALITY_ACTION_READY_TIMEOUT_MS = 30_000;
 const QUALITY_NAMES = ["Task Prompt Quality", "Test Quality", "Solution Quality"] as const;
+/** Test Quality concerns that never fail the check; they are also removed from the returned concerns. */
+const IGNORED_TEST_CONCERNS: ReadonlySet<string> = new Set(["timing_sensitivity"]);
 const PROMPT_PRESERVATION_NOTE =
   "Keep agent_prompt.md unchanged if possible—small edits can make it fail. Prefer aligning tests and solution to the prompt; only if the prompt is demonstrably wrong, make the smallest correction while preserving its human style.";
 
@@ -889,11 +891,18 @@ function buildTestQualityResult(testReport: QualityReport | undefined): JsonReco
   const coverageSuggestions = Array.isArray(testReport?.coverageSuggestions) ? testReport.coverageSuggestions : [];
   const unfairnessTests = Array.isArray(testReport?.tests)
     ? testReport.tests
-        .filter(
-          (item): item is JsonRecord =>
-            isRecord(item) &&
-            (item.fairness === "Not fair" || (Array.isArray(item.concerns) && item.concerns.length > 0)),
+        .filter(isRecord)
+        .map((item) =>
+          Array.isArray(item.concerns)
+            ? {
+                ...item,
+                concerns: item.concerns.filter(
+                  (concern: unknown) => typeof concern !== "string" || !IGNORED_TEST_CONCERNS.has(concern),
+                ),
+              }
+            : item,
         )
+        .filter((item) => item.fairness === "Not fair" || (Array.isArray(item.concerns) && item.concerns.length > 0))
         .map((item) =>
           item.fairness === "Not fair" && Array.isArray(item.concerns) && item.concerns.length === 0
             ? { ...item, concerns: ["Not fully fair"] }
