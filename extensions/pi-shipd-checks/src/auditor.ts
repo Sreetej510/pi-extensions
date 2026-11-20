@@ -1,10 +1,11 @@
 /**
  * The `auditor` tool's engine: a local replica of the hosted Auto Review for the tests and the solution, ported from
  * the shipd-workflow rulebook (shipd-v5/rulebook). Read-only Claude CLI reviewers run on this machine:
- *   round 1: Local Test Quality (per-file fairness batches + one coverage read), the solution audit over every lens
- *            (including the solution-betterment lens), and per-unit Solution Quality; one read each;
- *   round 2: synthesis applies the proof legs to every finding.
- * Findings come back grouped as unfair tests, test gaps, solution gaps and solution improvements. A finding gates
+ *   round 1: typed agents run in parallel: test agents own test.patch (unfair tests, missing coverage, test code
+ *            quality) and solution agents own solution.patch (wrong outputs, solution code quality). How many of each
+ *            type run depends on the size of each patch; each agent gets its own slice;
+ *   round 2: one combined synthesis sees every finding and all of the change and applies the proof legs.
+ * Findings come back grouped as unfair tests, test gaps, test improvements, solution gaps and solution improvements. A finding gates
  * (BLOCK) only when synthesis keeps it HIGH. Counter-tests are reported, not executed. test.sh is out of scope: it is
  * stripped from test.patch and the snapshot before any reviewer sees them. Only the final report is kept: reviewer
  * prompts and answers live in the temp workspace and are deleted with it.
@@ -17,15 +18,14 @@ import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   ASSETS_DIR,
-  buildAuditPrompt,
-  buildSqUnitPrompt,
+  buildSolutionAgentPrompt,
   buildSynthesisPrompt,
-  buildTqCoveragePrompt,
-  buildTqUnitPrompt,
+  buildTestAgentPrompt,
   type PromptInputs,
+  QUALITY_CATEGORIES,
   REPO_DIR,
+  type SolutionUnit,
   type SynthesisCandidate,
-  TQ_GATING_CONCERNS,
 } from "./auditor-prompts.js";
 import { extractJsonAnswer, runClaude } from "./claude-cli.js";
 import { getShellExecutable, loadAuditorConfig } from "./config.js";
@@ -37,19 +37,19 @@ import type { AuditorConfig, TokenUsage } from "./types.js";
 
 export const AUDITOR_REQUIRED_FILES = ["agent_prompt.md", "test.patch", "solution.patch"] as const;
 const PATCH_SCRIPT_TIMEOUT_MS = 5 * 60_000;
-const TQ_BATCH_CHARS = 60_000;
-const SQ_UNITS_PER_BATCH = 12;
-const SYNTH_CHUNK = 50;
-const CANDIDATE_TEXT_LIMIT = 700;
-/** tq_local.CLASS_RX: a requirement about a class is PARTIAL when one coverage read says so. */
-const CLASS_RX =
-  /\b(?:any|every|each|all|other|others|whatever|either|no matter)\b|\bcounts?\b|\bcount as\b|\bdoes not count\b|\*|\bnumber of\b|\bup to\b|\bat least\b|\bat most\b|\bupper limit\b|\b\w+ checks\b|\bpaths?\b|\bkinds?\b|\bstatus(?:es)?\b|\bcodes\b/i;
+/** One test agent per this much test.patch, up to MAX_AGENTS_PER_TYPE. */
+const TEST_CHARS_PER_AGENT = 70_000;
+/** One solution agent per this much solution.patch, up to MAX_AGENTS_PER_TYPE. */
+const SOLUTION_CHARS_PER_AGENT = 50_000;
+const MAX_AGENTS_PER_TYPE = 4;
+const SYNTH_CHUNK = 60;
+const CANDIDATE_TEXT_LIMIT = 1_600;
 
 type ReviewerStatus = "ok" | "timedOut" | "cancelled" | "error" | "noAnswer";
 
 interface ReviewerTask {
   name: string;
-  kind: "tq-unit" | "tq-coverage" | "audit" | "sq-unit" | "synthesis";
+  kind: "test" | "solution" | "synthesis";
   prompt: string;
 }
 
@@ -151,7 +151,7 @@ function prepareAssets(repoDir: string, workspace: string): PromptInputs {
   return { problem, testPatch, solutionPatch };
 }
 
-function solutionUnits(solutionPatch: string) {
+function solutionUnits(solutionPatch: string): SolutionUnit[] {
   return splitPatchHunks(solutionPatch).map((hunk, index) => ({
     id: `unit-${String(index + 1).padStart(2, "0")}`,
     name: hunk.context || `hunk ${index + 1}`,
@@ -167,29 +167,76 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
-export function planReviewers(inputs: PromptInputs): ReviewerTask[] {
-  const tasks: ReviewerTask[] = [];
-  const batches: Array<Array<{ path: string; text: string }>> = [];
-  for (const file of splitPatchFiles(inputs.testPatch)) {
-    const current = batches.at(-1);
-    const size = current?.reduce((total, item) => total + item.text.length, 0) ?? 0;
-    if (current && size + file.text.length <= TQ_BATCH_CHARS) current.push(file);
-    else batches.push([{ path: file.path, text: file.text }]);
+/** How many agents of one type the work needs: one per `charsPerAgent`, at least 1, at most the items or the cap. */
+function agentCount(chars: number, charsPerAgent: number, items: number): number {
+  return Math.max(1, Math.min(MAX_AGENTS_PER_TYPE, Math.max(1, items), Math.ceil(chars / charsPerAgent)));
+}
+
+/** Largest-first into the lightest bin, so each test agent gets a similar amount of test code. */
+function balance<T extends { text: string }>(items: T[], bins: number): T[][] {
+  const out: T[][] = Array.from({ length: bins }, () => []);
+  const sizes = new Array<number>(bins).fill(0);
+  for (const item of [...items].sort((a, b) => b.text.length - a.text.length)) {
+    const lightest = sizes.indexOf(Math.min(...sizes));
+    out[lightest]?.push(item);
+    sizes[lightest] = (sizes[lightest] ?? 0) + item.text.length;
   }
-  batches.forEach((files, index) => {
+  return out;
+}
+
+/** Contiguous slices of similar size, so hunks of one file tend to stay with one solution agent. */
+function contiguous<T extends { text: string }>(items: T[], bins: number): T[][] {
+  const total = items.reduce((sum, item) => sum + item.text.length, 0);
+  const target = total / bins;
+  const out: T[][] = [[]];
+  let size = 0;
+  for (const item of items) {
+    const current = out.at(-1) as T[];
+    if (current.length && size + item.text.length / 2 > target && out.length < bins) {
+      out.push([item]);
+      size = item.text.length;
+    } else {
+      current.push(item);
+      size += item.text.length;
+    }
+  }
+  return out;
+}
+
+/** problem.md's requirement sentences, the unit test agents divide coverage by. */
+function requirementSentences(problem: string): string[] {
+  return problem
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((sentence) => sentence.replace(/^[-*#>\s]+/, "").trim())
+    .filter((sentence) => sentence.length > 15);
+}
+
+export function planReviewers(inputs: PromptInputs): ReviewerTask[] {
+  const testFiles = splitPatchFiles(inputs.testPatch).map((file) => ({ path: file.path, text: file.text }));
+  const units = solutionUnits(inputs.solutionPatch);
+  const testAgents = agentCount(inputs.testPatch.length, TEST_CHARS_PER_AGENT, testFiles.length);
+  const solutionAgents = agentCount(inputs.solutionPatch.length, SOLUTION_CHARS_PER_AGENT, units.length);
+  const fileSlices = balance(testFiles, testAgents);
+  const sentences = requirementSentences(inputs.problem);
+  const tasks: ReviewerTask[] = [];
+  for (let index = 0; index < testAgents; index++) {
     tasks.push({
-      name: `tq-unit-${String(index).padStart(2, "0")}`,
-      kind: "tq-unit",
-      prompt: buildTqUnitPrompt(files, inputs),
+      name: `test-agent-${index + 1}`,
+      kind: "test",
+      prompt: buildTestAgentPrompt({
+        inputs,
+        files: fileSlices[index] ?? [],
+        requirements: sentences.filter((_, position) => position % testAgents === index),
+        index,
+        total: testAgents,
+      }),
     });
-  });
-  tasks.push({ name: "tq-coverage", kind: "tq-coverage", prompt: buildTqCoveragePrompt(inputs) });
-  tasks.push({ name: "audit-all", kind: "audit", prompt: buildAuditPrompt(inputs) });
-  chunk(solutionUnits(inputs.solutionPatch), SQ_UNITS_PER_BATCH).forEach((part, index) => {
+  }
+  contiguous(units, solutionAgents).forEach((slice, index, slices) => {
     tasks.push({
-      name: `sq-unit-${String(index).padStart(2, "0")}`,
-      kind: "sq-unit",
-      prompt: buildSqUnitPrompt(part, index, inputs),
+      name: `solution-agent-${index + 1}`,
+      kind: "solution",
+      prompt: buildSolutionAgentPrompt({ inputs, units: slice, index, total: slices.length }),
     });
   });
   return tasks;
@@ -199,11 +246,11 @@ export function planReviewers(inputs: PromptInputs): ReviewerTask[] {
 // Findings: normalise every reviewer answer into synthesis candidates
 // ---------------------------------------------------------------------------------------------------------------------
 
-export type FindingGroup = "unfairTests" | "testGaps" | "solutionGaps" | "solutionImprovements";
+export type FindingGroup = "unfairTests" | "testGaps" | "testImprovements" | "solutionGaps" | "solutionImprovements";
 
 interface Candidate extends SynthesisCandidate {
   source: string;
-  /** The sub-reviewer's own severity, before synthesis. */
+  /** The proposing agent's own severity, before synthesis. */
   severity: string;
   group: FindingGroup;
 }
@@ -217,11 +264,7 @@ export interface CounterTest {
 const str = (value: unknown) => (value === undefined || value === null ? "" : String(value));
 const clip = (text: string) => (text.length > CANDIDATE_TEXT_LIMIT ? `${text.slice(0, CANDIDATE_TEXT_LIMIT)}…` : text);
 const asArray = (value: unknown): Json[] => (Array.isArray(value) ? value : []);
-const norm = (text: string) =>
-  text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+const sentence = (label: string, value: unknown) => (str(value) ? ` ${label}: ${str(value)}` : "");
 
 interface CollectedFindings {
   candidates: Candidate[];
@@ -235,118 +278,56 @@ export function collectFindings(results: ReviewerResult[]): CollectedFindings {
   let testsGraded = 0;
   const add = (id: string, source: string, severity: string, group: FindingGroup, text: string) =>
     candidates.push({ id, source, severity, group, text: clip(text) });
-  const keepCounter = (defect: Json) => {
-    const patch = str(defect.counter_test_patch);
-    if (!patch.trim()) return;
-    counterTests.push({
-      id: str(defect.counter_test || defect.id) || `CT-${counterTests.length + 1}`,
-      patch,
-      cmd: str(defect.counter_test_cmd),
-    });
-  };
-  const coverageRows = new Map<string, { quote: string; statuses: string[]; tests: string[] }>();
+  const quality = (item: Json) =>
+    `[${str(item.category) || "Practice"}] ${str(item.location)}: ${str(item.finding)}${sentence("Suggested change", item.suggestedChange)}`;
 
   for (const result of results) {
     const answer: Json = result.answer;
     if (answer === undefined) continue;
-    switch (result.kind) {
-      case "tq-unit": {
-        asArray(answer.tests).forEach((test: Json, index: number) => {
-          testsGraded += 1;
-          const unsourced = asArray(test.assertions).filter((row: Json) => /^\s*none\b/i.test(str(row.source)));
-          const name = `${str(test.file)} ${str(test.name)}`.trim();
-          if (test.fairness === "Not fair" || unsourced.length) {
-            const pinned = str(test.pinned) || unsourced.map((row: Json) => str(row.what)).join("; ");
-            add(
-              `${result.name}.${index}`,
-              result.name,
-              "HIGH",
-              "unfairTests",
-              `[test-quality T5 Not fair] ${name}: pinned ${pinned}; evidence: ${str(test.evidence)}; fix: ${str(test.fix)}`,
-            );
-          }
-          const gating = asArray(test.concerns).filter((concern: unknown) => TQ_GATING_CONCERNS.has(str(concern)));
-          if (gating.length) {
-            add(
-              `${result.name}.${index}c`,
-              result.name,
-              "MEDIUM",
-              "unfairTests",
-              `[test-quality concern ${gating.join(", ")}] ${name}: ${str(test.qualityCheck)}`,
-            );
-          }
-        });
-        break;
-      }
-      case "tq-coverage": {
-        asArray(answer.coverageSuggestions).forEach((gap: Json, index: number) => {
-          add(
-            `${result.name}.${index}`,
-            result.name,
-            str(gap.severity) || "HIGH",
-            "testGaps",
-            `[test-quality coverage ${str(gap.gapKind)}${gap.g1 && gap.g1 !== "none" ? ` G1 ${str(gap.g1)}` : ""} T3/T4] ${str(gap.area)}: requirement "${str(gap.requirement)}"; wrong value that passes: ${str(gap.wrong_value_that_passes)}; suggestion: ${str(gap.suggestion)}${gap.test_change ? `; test change: ${str(gap.test_change)}` : ""}`,
-          );
-        });
-        for (const row of asArray(answer.requirements)) {
-          const key = norm(str(row.quote) || str(row.requirement));
-          if (!key) continue;
-          const entry = coverageRows.get(key) ?? {
-            quote: str(row.quote) || str(row.requirement),
-            statuses: [],
-            tests: [],
-          };
-          entry.statuses.push(str(row.status).toUpperCase());
-          entry.tests.push(...asArray(row.tests).map(str));
-          coverageRows.set(key, entry);
-        }
-        break;
-      }
-      case "audit": {
-        asArray(answer.violations).forEach((violation: Json, index: number) => {
-          keepCounter(violation);
-          const betterment = str(violation.lens) === "quality";
-          add(
-            `audit.${str(violation.id) || index}`,
-            result.name,
-            betterment ? "MEDIUM" : "HIGH",
-            betterment ? "solutionImprovements" : "solutionGaps",
-            `[audit ${str(violation.lens)} ${str(violation.dimension)} reach=${str(violation.reach)}${violation.reading === "conflict" ? " reading=conflict" : ""}] "${str(violation.quote)}": ${str(violation.claim)}${violation.oracle ? ` (oracle: ${str(violation.oracle)})` : ""}${violation.recommendation ? `; recommendation: ${str(violation.recommendation)}` : ""}`,
-          );
-        });
-        break;
-      }
-      case "sq-unit": {
-        const units = Array.isArray(answer) ? answer : asArray(answer?.units);
-        for (const unit of units) {
-          asArray(unit?.defects).forEach((defect: Json, index: number) => {
-            keepCounter(defect);
-            add(
-              `${result.name}.${str(defect.id) || `${str(unit.unit)}-${index}`}`,
-              result.name,
-              str(defect.severity) || "HIGH",
-              "solutionGaps",
-              `[solution-quality unit ${str(defect.dimension)} reach=${str(defect.reach)}] ${str(unit.unit)}: ${str(defect.claim)}; promise "${str(defect.promise)}"${defect.input ? `; input: ${str(defect.input)}` : ""}`,
-            );
+    if (result.kind === "test") {
+      testsGraded += asArray(answer.tests).length;
+      asArray(answer.unfairTests).forEach((item: Json, index: number) => {
+        add(
+          `${result.name}.unfair${index}`,
+          result.name,
+          "HIGH",
+          "unfairTests",
+          `[unfair test] ${str(item.test)} (${str(item.file)}): ${str(item.finding)}${sentence("Details", item.details)}${sentence("Why", item.why)}${sentence("Suggested change", item.suggestedChange)}`,
+        );
+      });
+      asArray(answer.testGaps).forEach((item: Json, index: number) => {
+        add(
+          `${result.name}.gap${index}`,
+          result.name,
+          str(item.severity) || "HIGH",
+          "testGaps",
+          `[test gap] "${str(item.requirement)}": ${str(item.finding)}${sentence("Wrong implementation that passes", item.details)}${sentence("Why", item.why)}${sentence("Suggested change", item.suggestedChange)}`,
+        );
+      });
+      asArray(answer.testImprovements).forEach((item: Json, index: number) => {
+        add(`${result.name}.quality${index}`, result.name, "MEDIUM", "testImprovements", quality(item));
+      });
+    } else if (result.kind === "solution") {
+      asArray(answer.solutionGaps).forEach((item: Json, index: number) => {
+        const patch = str(item.counter_test_patch);
+        if (patch.trim()) {
+          counterTests.push({
+            id: str(item.id) || `${result.name}-CT${index + 1}`,
+            patch,
+            cmd: str(item.counter_test_cmd),
           });
         }
-        break;
-      }
-    }
-  }
-  // tq_local.partial_gates with one read: a class sentence marked PARTIAL, or any requirement marked UNTESTED
-  let rowIndex = 0;
-  for (const row of coverageRows.values()) {
-    const partial = row.statuses.filter((status) => status === "PARTIAL").length;
-    const untested = row.statuses.includes("UNTESTED");
-    if (untested || (partial >= 1 && CLASS_RX.test(row.quote))) {
-      add(
-        `tq-coverage.row${rowIndex++}`,
-        "tq-coverage",
-        "HIGH",
-        "testGaps",
-        `[test-quality requirement ${untested ? "UNTESTED" : "PARTIAL"} T4] "${row.quote}" (tests: ${[...new Set(row.tests)].join(", ") || "none"})`,
-      );
+        add(
+          `${result.name}.${str(item.id) || `wrong${index}`}`,
+          result.name,
+          "HIGH",
+          "solutionGaps",
+          `[wrong output] Input: ${str(item.input)}${sentence("Expected", item.expectedOutput)}${sentence("Received", item.received)}${sentence("Why", item.why)}${sentence("Suggested change", item.suggestedChange)}`,
+        );
+      });
+      asArray(answer.solutionImprovements).forEach((item: Json, index: number) => {
+        add(`${result.name}.quality${index}`, result.name, "MEDIUM", "solutionImprovements", quality(item));
+      });
     }
   }
   return { candidates, counterTests, testsGraded };
@@ -387,15 +368,19 @@ function gradeFindings(candidates: Candidate[], synthesis: ReviewerResult[]): Gr
     const verdict = str(vote?.verdict).toUpperCase();
     const criterion = str(vote?.as);
     let group = candidate.group;
+    const isQuality = (QUALITY_CATEGORIES as readonly string[]).includes(criterion);
     // reference_pass: a test finding the reference itself would fail is a solution defect ("as":"S1")
     if (/^S\d/i.test(criterion) && (group === "testGaps" || group === "unfairTests")) group = "solutionGaps";
-    if (group === "solutionGaps" && /^S[234]/i.test(criterion)) group = "solutionImprovements";
+    if (isQuality && group === "solutionGaps") group = "solutionImprovements";
+    if (isQuality && (group === "testGaps" || group === "unfairTests")) group = "testImprovements";
+    const improvement = group === "testImprovements" || group === "solutionImprovements";
     const failedLeg = str(vote?.failed_leg);
     return {
       id: candidate.id,
       group,
       dropped: verdict === "DROP",
-      level: !vote ? "UNSYNTHESISED" : verdict === "HIGH" ? "HIGH" : "MEDIUM",
+      // code-quality findings are the hosted checks' non-blocking list: they never gate
+      level: !vote ? "UNSYNTHESISED" : verdict === "HIGH" && !improvement ? "HIGH" : "MEDIUM",
       criterion,
       finding: candidate.text,
       why: str(vote?.why),
@@ -412,6 +397,7 @@ export interface AuditResult {
   solutionQuality: "PASS" | "FAIL" | "REVIEW";
   unfairTests: AuditFinding[];
   testGaps: AuditFinding[];
+  testImprovements: AuditFinding[];
   solutionGaps: AuditFinding[];
   solutionImprovements: AuditFinding[];
   /** Findings synthesis rejected as wrong. */
@@ -442,6 +428,7 @@ function summarize(opts: {
   const groups = {
     unfairTests: pick("unfairTests"),
     testGaps: pick("testGaps"),
+    testImprovements: pick("testImprovements"),
     solutionGaps: pick("solutionGaps"),
     solutionImprovements: pick("solutionImprovements"),
   };
@@ -460,7 +447,7 @@ function summarize(opts: {
         : "PASS";
   return {
     verdict,
-    testQuality: areaVerdict([...groups.unfairTests, ...groups.testGaps]),
+    testQuality: areaVerdict([...groups.unfairTests, ...groups.testGaps, ...groups.testImprovements]),
     solutionQuality: areaVerdict([...groups.solutionGaps, ...groups.solutionImprovements]),
     ...groups,
     droppedCount: opts.graded.length - kept.length,
@@ -494,6 +481,7 @@ function sumUsage(results: ReviewerResult[]): TokenUsage {
 export const GROUP_TITLES: Record<FindingGroup, string> = {
   unfairTests: "Unfair tests",
   testGaps: "Test gaps",
+  testImprovements: "Test improvements",
   solutionGaps: "Solution gaps",
   solutionImprovements: "Solution improvements",
 };
@@ -504,7 +492,7 @@ function renderMarkdown(result: AuditResult, config: AuditorConfig): string {
   const md = [
     `# Auditor: ${result.verdict}`,
     "",
-    `Test Quality ${result.testQuality} · Solution Quality ${result.solutionQuality} · ${count("unfairTests")} unfair-test, ${count("testGaps")} test-gap, ${count("solutionGaps")} solution-gap, ${count("solutionImprovements")} improvement findings · ${result.testsGraded} tests graded · ${formatDuration(result.durationMs)} · claude ${config.modelId} effort ${config.thinkingLevel}`,
+    `Test Quality ${result.testQuality} · Solution Quality ${result.solutionQuality} · ${count("unfairTests")} unfair-test, ${count("testGaps")} test-gap, ${count("testImprovements")} test-improvement, ${count("solutionGaps")} solution-gap, ${count("solutionImprovements")} solution-improvement findings · ${result.testsGraded} tests graded · ${formatDuration(result.durationMs)} · claude ${config.modelId} effort ${config.thinkingLevel}`,
     "",
     "A finding gates only when synthesis keeps it HIGH. No counter-test or mutant was executed: legs that need execution were decided from the files.",
   ];
@@ -597,11 +585,12 @@ export async function runAudit(opts: {
 
     const tasks = planReviewers(inputs);
     let done = 0;
-    progress(`Reviewers: 0/${tasks.length} done`);
+    const typed = `${tasks.filter((task) => task.kind === "test").length} test + ${tasks.filter((task) => task.kind === "solution").length} solution agents`;
+    progress(`${typed}: 0/${tasks.length} done`);
     const reviewers = await runPool(tasks, config.concurrency, async (task) => {
       const result = await runReviewer(task, workspace, config, signal);
       done += 1;
-      progress(`Reviewers: ${done}/${tasks.length} done`);
+      progress(`${typed}: ${done}/${tasks.length} done`);
       return result;
     });
     cancelled();
@@ -612,7 +601,7 @@ export async function runAudit(opts: {
       kind: "synthesis",
       prompt: buildSynthesisPrompt(part),
     }));
-    progress(`Synthesis of ${collected.candidates.length} findings...`);
+    progress(`Combined synthesis of ${collected.candidates.length} findings...`);
     const synthesis = await runPool(synthTasks, config.concurrency, (task) =>
       runReviewer(task, workspace, config, signal),
     );

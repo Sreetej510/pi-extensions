@@ -123,13 +123,6 @@ export interface SolverReviewConfig {
   timeoutMinutes: number;
 }
 
-export type QualityTestSolutionMode = "sequential" | "parallel";
-
-export interface QualityCheckConfig {
-  /** `sequential` runs Solution Quality only after Test Quality passes; `parallel` starts both together. */
-  testSolutionMode: QualityTestSolutionMode;
-}
-
 export interface PromptHumanizerConfig {
   /** Number of humanizer drafts to request from CoreWeave (1–10). */
   candidateCount?: number;
@@ -149,8 +142,6 @@ export interface ChecksConfig {
   solverReview?: SolverReviewConfig;
   /** Local Claude CLI settings for the `auditor` tool. */
   auditor?: AuditorConfig;
-  /** Settings for the `quality-check` tool. */
-  qualityCheck?: QualityCheckConfig;
   /** Project folders where the agent-callable analysis tools are enabled. */
   enabledProjects?: string[];
   /** Candidate-count settings for the opt-in agent-prompt humanizer. */

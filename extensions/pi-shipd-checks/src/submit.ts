@@ -12,7 +12,7 @@ import { Text } from "@earendil-works/pi-tui";
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { Type } from "typebox";
-import { loadFargateConfig, loadQualityCheckConfig } from "./config.js";
+import { loadFargateConfig } from "./config.js";
 import { runFargatePatchPrecheck } from "./fargate-runner.js";
 import { runCreatePatches, snapshotGitHead } from "./git.js";
 import { formatDuration } from "./report.js";
@@ -26,9 +26,7 @@ export const SHIPD_PROMPT_QUALITY_SHA_ENTRY = "shipd_prompt_quality_sha";
 const DEFAULT_STORAGE_STATE_PATH = join(homedir(), ".pi", "agent", "shipd-auth", "shipd.ai.json");
 const PATCH_PRECHECK_TIMEOUT_MINUTES = 15;
 const SHIPD_AUTH_URL = "https://shipd.ai/";
-const INITIAL_WAIT_MS = 300_000;
 const RECHECK_INTERVAL_MS = 90_000;
-const PROMPT_QUALITY_INITIAL_WAIT_MS = 120_000;
 const PROMPT_QUALITY_RECHECK_INTERVAL_MS = 30_000;
 const UI_TIMEOUT_MS = 5_000;
 const REPORT_PREVIEW_TIMEOUT_MS = 20_000;
@@ -41,15 +39,32 @@ const CHALLENGE_FORM_TIMEOUT_MS = 30_000;
 const CHALLENGE_FORM_POLL_INTERVAL_MS = 200;
 const QUALITY_UI_RETRY_ATTEMPTS = 3;
 const QUALITY_UI_RETRY_DELAY_MS = 250;
-const QUALITY_RUN_START_TIMEOUT_MS = 2_000;
+/** Verify checks build a Docker image first, so Shipd can take a while to show a started run. */
+const QUALITY_RUN_START_TIMEOUT_MS = 30_000;
 const QUALITY_ACTION_READY_TIMEOUT_MS = 30_000;
-const QUALITY_NAMES = ["Task Prompt Quality", "Test Quality", "Solution Quality"] as const;
-/** Test Quality concerns that never fail the check; they are also removed from the returned concerns. */
-const IGNORED_TEST_CONCERNS: ReadonlySet<string> = new Set(["timing_sensitivity"]);
+/** Shipd's Step 1 checks; each must have passed at least once before Step 2 (Solution Quality, Reward Hacking) unlocks. */
+const STEP_ONE_CHECKS = ["Verify Tests", "Verify Solution", "Verify Flakiness", "Task Prompt Quality"] as const;
+const QUALITY_NAMES = [...STEP_ONE_CHECKS, "Solution Quality", "Reward Hacking", "Test Quality"] as const;
+/** After a stage runs, give Shipd time to start or unlock the next step before reading its status. */
+const STAGE_SETTLE_MS = 15_000;
+/** How long a check may stay locked behind its upstream step once that step has passed. */
+const LOCKED_CHECK_TIMEOUT_MS = 120_000;
+const LOCKED_CHECK_POLL_INTERVAL_MS = 5_000;
 const PROMPT_PRESERVATION_NOTE =
   "Keep agent_prompt.md unchanged if possible—small edits can make it fail. Prefer aligning tests and solution to the prompt; only if the prompt is demonstrably wrong, make the smallest correction while preserving its human style.";
 
 type QualityName = (typeof QUALITY_NAMES)[number];
+
+/** How long to leave the browser closed before the first status check. */
+const INITIAL_WAIT_MS: Record<QualityName, number> = {
+  "Task Prompt Quality": 90_000,
+  "Verify Tests": 10 * 60_000,
+  "Verify Solution": 10 * 60_000,
+  "Verify Flakiness": 10 * 60_000,
+  "Reward Hacking": 10 * 60_000,
+  "Solution Quality": 12 * 60_000,
+  "Test Quality": 12 * 60_000,
+};
 type JsonRecord = Record<string, unknown>;
 
 const submitShipdParams = Type.Object({});
@@ -62,11 +77,6 @@ interface SubmissionFiles {
 
 interface QualityReport {
   [key: string]: unknown;
-}
-
-interface ExtractedReport {
-  quality: QualityName;
-  parsed: QualityReport;
 }
 
 function clean(value: string | undefined): string {
@@ -232,7 +242,8 @@ function qualityRow(page: Page, quality: QualityName): Locator {
 }
 
 function isBusy(rowText: string): boolean {
-  return /(?:starting|queued|pending|running|processing|reviewing|finalizing|building|evaluating|checking|\d+%)/i.test(
+  // "Waiting for Verify Solution" marks a check Shipd has queued behind its upstream step.
+  return /(?:starting|queued|pending|waiting|running|processing|reviewing|finalizing|building|evaluating|checking|\d+\s*%)/i.test(
     rowText,
   );
 }
@@ -306,7 +317,9 @@ async function qualityRowLoaded(page: Page, quality: QualityName): Promise<boole
   const label = qualityLabel(page, quality);
   if ((await label.count()) !== 1 || !(await label.isVisible())) return false;
   const row = qualityRow(page, quality);
-  if ((await row.locator('button[title^="Run"], button[title^="Re-run"]').count()) > 0) return true;
+  // Locked rows (for example Test Quality before Solution Quality passes) show a disabled button
+  // whose title explains the lock instead of Run/Re-run.
+  if ((await row.locator("button").count()) > 0) return true;
   return isBusy(clean(await row.innerText()));
 }
 
@@ -593,6 +606,7 @@ async function clickAndConfirm(page: Page, quality: QualityName, signal?: AbortS
     let runButtonBefore = false;
     let rerunTitle: string | null = null;
     let confirmation = "";
+    let confirmed = false;
     try {
       const row = qualityRow(page, quality);
       const beforeText = clean(await row.innerText());
@@ -651,21 +665,22 @@ async function clickAndConfirm(page: Page, quality: QualityName, signal?: AbortS
       const confirm = dialog.getByRole("button", { name: /confirm/i });
       if ((await confirm.count()) !== 1) throw new Error(`${quality}: rerun confirmation button was not found.`);
       await confirm.click({ timeout: UI_TIMEOUT_MS });
+      confirmed = true;
 
       const startedRowText = await waitForQualityRunStart(page, quality, staleBefore, runButtonBefore, signal);
-      if (startedRowText !== undefined) {
-        return {
-          quality: displayQualityName(quality),
-          status: "started",
-          rerunTitle,
-          confirmation,
-          rowTextAfterConfirm: startedRowText,
-        };
-      }
-      lastFailure = `${quality}: the confirmation was accepted, but the stale status did not clear and no running state appeared.`;
+      return {
+        quality: displayQualityName(quality),
+        status: startedRowText === undefined ? "unconfirmed" : "started",
+        rerunTitle,
+        confirmation,
+        rowTextAfterConfirm: startedRowText ?? clean(await qualityRow(page, quality).innerText()),
+      };
     } catch (error) {
       if (signal?.aborted) throw new Error("Cancelled by user.");
       lastFailure = error instanceof Error ? error.message : String(error);
+      // Once Shipd accepted the confirmation the run is queued (and paid for); clicking again could
+      // start a second run. Leave it to the status polling, which re-runs only a check still idle.
+      if (confirmed) return { quality: displayQualityName(quality), status: "unconfirmed", rerunTitle, confirmation };
     }
 
     const startedRowText = await qualityRunStartedRowText(page, quality, staleBefore, runButtonBefore).catch(
@@ -691,6 +706,10 @@ interface QualityStatus {
   rowText: string;
   busy: boolean;
   shouldRun: boolean;
+  /** A completed report exists (the row offers Re-run rather than Run). */
+  hasReport: boolean;
+  /** Set while an upstream step blocks the check; its disabled button's title says why. */
+  lockReason?: string;
 }
 
 async function readQualityStatuses(
@@ -707,7 +726,20 @@ async function readQualityStatuses(
     const row = label.locator("..");
     const rowText = clean(await row.innerText());
     const hasRunButton = (await row.locator('button[title^="Run"]').count()) > 0;
-    statuses.push({ quality, rowText, busy: isBusy(rowText), shouldRun: hasRunButton || isStale(rowText) });
+    const hasReport = (await row.locator('button[title^="Re-run"]').count()) > 0;
+    const lockButton = row.locator('button[disabled]:not([title^="Run"]):not([title^="Re-run"])').first();
+    const lockReason =
+      !hasRunButton && !hasReport && (await lockButton.count()) > 0
+        ? clean((await lockButton.getAttribute("title")) ?? "") || "Locked until an earlier step passes."
+        : undefined;
+    statuses.push({
+      quality,
+      rowText,
+      busy: isBusy(rowText),
+      shouldRun: hasRunButton || isStale(rowText),
+      hasReport,
+      ...(lockReason ? { lockReason } : {}),
+    });
   }
   return statuses;
 }
@@ -761,7 +793,7 @@ async function getQualityExpander(page: Page, quality: QualityName): Promise<Loc
   return expander;
 }
 
-async function extractQualityReport(page: Page, quality: QualityName, signal?: AbortSignal): Promise<ExtractedReport> {
+async function openQualityReport(page: Page, quality: QualityName, signal?: AbortSignal): Promise<Locator> {
   checkCancelled(signal);
   const expander = await getQualityExpander(page, quality);
   await expander.click();
@@ -775,8 +807,16 @@ async function extractQualityReport(page: Page, quality: QualityName, signal?: A
       .innerText()
       .catch(() => ""),
   );
-  if (heading !== quality) throw new Error(`${quality}: expanded the wrong report dialog (${heading || "unknown"}).`);
+  // The title may carry a status badge after the name, for example "Test Quality Stale".
+  if (heading !== quality && !heading.startsWith(`${quality} `)) {
+    throw new Error(`${quality}: expanded the wrong report dialog (${heading || "unknown"}).`);
+  }
+  return dialog;
+}
 
+/** Prompt Quality still shows its result as raw JSON. */
+async function readJsonReport(page: Page, quality: QualityName, signal?: AbortSignal): Promise<QualityReport> {
+  const dialog = await openQualityReport(page, quality, signal);
   const code = dialog.locator("pre code").last();
   if (!(await code.isVisible().catch(() => false))) {
     const rawButton = dialog
@@ -796,19 +836,140 @@ async function extractQualityReport(page: Page, quality: QualityName, signal?: A
   const rawOutput = await code.innerText();
   const parsed = parseJson(rawOutput, quality);
   await page.keyboard.press("Escape").catch(() => undefined);
-  return { quality, parsed };
+  return parsed;
 }
 
-async function extractQualityReportWithRetry(
+interface FeedbackItem {
+  category?: string;
+  location?: string;
+  finding?: string;
+  details?: string;
+  why?: string;
+  suggestedChange?: string;
+  [label: string]: string | undefined;
+}
+
+interface FeedbackReport {
+  verdict?: string;
+  /** The feedback SUMMARY line, or for checks without feedback (Verify Solution) the text under the verdict. */
+  summary?: string;
+  blocking: FeedbackItem[];
+  nonBlocking: FeedbackItem[];
+}
+
+interface RawFeedbackItem {
+  header: Array<{ text: string; mono: boolean }>;
+  paragraphs: Array<{ label: string; text: string }>;
+}
+
+function camelCaseLabel(label: string): string {
+  const words = label
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  return words.map((word, index) => (index === 0 ? word : `${word[0]?.toUpperCase()}${word.slice(1)}`)).join("");
+}
+
+function toFeedbackItem(raw: RawFeedbackItem): FeedbackItem {
+  const item: FeedbackItem = {};
+  const tags = raw.header.filter((tag) => !/^\d+\.$/.test(tag.text));
+  const location = tags.find((tag) => tag.mono)?.text;
+  const category = tags.find((tag) => !tag.mono)?.text;
+  if (category) item.category = category;
+  if (location) item.location = location;
+  const unlabeled = raw.paragraphs.filter((paragraph) => !paragraph.label).map((paragraph) => paragraph.text);
+  if (unlabeled[0]) item.finding = unlabeled[0];
+  if (unlabeled.length > 1) item.details = unlabeled.slice(1).join("\n\n");
+  for (const paragraph of raw.paragraphs) {
+    if (paragraph.label) item[camelCaseLabel(paragraph.label)] = paragraph.text;
+  }
+  return item;
+}
+
+/**
+ * Read a check's verdict and "Feedback for the author" from its report dialog. Feedback groups are
+ * headed "BLOCKING: N issues" or "<GROUP> (not blocking)"; each item has a header (its number, or a
+ * category and a file location) followed by paragraphs, some labelled in bold ("Why:", "Suggested change:").
+ */
+async function readFeedbackReport(page: Page, quality: QualityName, signal?: AbortSignal): Promise<FeedbackReport> {
+  const dialog = await openQualityReport(page, quality, signal);
+  const raw = await dialog.evaluate((root) => {
+    const squash = (value: string) => value.replace(/\s+/g, " ").trim();
+    // Keep inline code visible to the agent as `code`.
+    const richText = (node: Node, skip?: Node): string =>
+      [...node.childNodes]
+        .filter((child) => child !== skip)
+        .map((child) =>
+          child.nodeType === Node.TEXT_NODE
+            ? (child.textContent ?? "")
+            : child.nodeName === "CODE"
+              ? ` \`${child.textContent ?? ""}\` `
+              : richText(child),
+        )
+        .join("");
+    const text = (node: Element | null | undefined) => squash(node?.textContent ?? "");
+    const verdictLabel = [...root.querySelectorAll("p")].find((p) => text(p).toLowerCase() === "verdict");
+    const verdictBlock = verdictLabel?.parentElement;
+    const verdict = text(verdictLabel?.nextElementSibling);
+    const feedback = [...root.querySelectorAll("section")].find((section) =>
+      /feedback for the author/i.test(text(section.querySelector("h3"))),
+    );
+    const summaryParagraph = feedback
+      ? [...feedback.querySelectorAll("p")].find((p) => /^summary:?$/i.test(text(p.querySelector(":scope > strong"))))
+      : undefined;
+    const next = verdictBlock?.nextElementSibling;
+    const description =
+      !feedback && next?.tagName === "DIV" && !next.querySelector("pre, code, section") ? text(next) : "";
+    const summary = summaryParagraph ? squash(text(summaryParagraph).replace(/^summary:\s*/i, "")) : description;
+    const groups = feedback
+      ? [...feedback.querySelectorAll("h4")].map((heading) => ({
+          heading: text(heading),
+          items: [...(heading.parentElement?.querySelectorAll(":scope > ol > li, :scope > ul > li") ?? [])].map(
+            (li) => {
+              const body = li.firstElementChild ?? li;
+              const header = body.querySelector(":scope > div");
+              return {
+                header: [...(header?.querySelectorAll("span") ?? [])].map((span) => ({
+                  text: text(span),
+                  mono: span.className.includes("font-mono"),
+                })),
+                paragraphs: [...body.querySelectorAll(":scope > p")].map((p) => {
+                  const strong = p.querySelector(":scope > strong");
+                  return {
+                    label: strong ? text(strong).replace(/:$/, "") : "",
+                    text: squash(richText(p, strong ?? undefined)),
+                  };
+                }),
+              };
+            },
+          ),
+        }))
+      : [];
+    return { verdict, summary, groups };
+  });
+  await page.keyboard.press("Escape").catch(() => undefined);
+
+  const report: FeedbackReport = { blocking: [], nonBlocking: [] };
+  if (raw.verdict) report.verdict = raw.verdict.toUpperCase();
+  if (raw.summary) report.summary = raw.summary;
+  for (const group of raw.groups) {
+    const blocking = /\bblocking\b/i.test(group.heading) && !/not blocking|non-blocking/i.test(group.heading);
+    (blocking ? report.blocking : report.nonBlocking).push(...group.items.map(toFeedbackItem));
+  }
+  return report;
+}
+
+async function readReportWithRetry<T>(
   page: Page,
   quality: QualityName,
+  read: (page: Page, quality: QualityName, signal?: AbortSignal) => Promise<T>,
   signal?: AbortSignal,
-): Promise<ExtractedReport> {
+): Promise<T> {
   let lastFailure = "The report dialog could not be opened.";
   for (let attempt = 1; attempt <= QUALITY_UI_RETRY_ATTEMPTS; attempt += 1) {
     checkCancelled(signal);
     try {
-      return await extractQualityReport(page, quality, signal);
+      return await read(page, quality, signal);
     } catch (error) {
       if (signal?.aborted) throw new Error("Cancelled by user.");
       lastFailure = error instanceof Error ? error.message : String(error);
@@ -887,66 +1048,53 @@ function buildPromptQualityResult(report: QualityReport | undefined): JsonRecord
   return result;
 }
 
-function buildTestQualityResult(testReport: QualityReport | undefined): JsonRecord {
-  const coverageSuggestions = Array.isArray(testReport?.coverageSuggestions) ? testReport.coverageSuggestions : [];
-  const unfairnessTests = Array.isArray(testReport?.tests)
-    ? testReport.tests
-        .filter(isRecord)
-        .map((item) =>
-          Array.isArray(item.concerns)
-            ? {
-                ...item,
-                concerns: item.concerns.filter(
-                  (concern: unknown) => typeof concern !== "string" || !IGNORED_TEST_CONCERNS.has(concern),
-                ),
-              }
-            : item,
-        )
-        .filter((item) => item.fairness === "Not fair" || (Array.isArray(item.concerns) && item.concerns.length > 0))
-        .map((item) =>
-          item.fairness === "Not fair" && Array.isArray(item.concerns) && item.concerns.length === 0
-            ? { ...item, concerns: ["Not fully fair"] }
-            : item,
-        )
-    : [];
-  const reportedUnfairnessCount =
-    typeof testReport?.unfairTestCount === "number" && Number.isFinite(testReport.unfairTestCount)
-      ? Math.max(0, Math.floor(testReport.unfairTestCount))
-      : 0;
-  const unfairnessCount = Math.max(unfairnessTests.length, reportedUnfairnessCount);
-  const testPasses = Boolean(testReport) && unfairnessCount === 0 && coverageSuggestions.length === 0;
-  return !testReport
-    ? { verdict: "FAIL", reason: "No completed Test Quality report was available." }
-    : testPasses
-      ? { verdict: "PASS" }
-      : {
-          verdict: "FAIL",
-          ...(coverageSuggestions.length > 0 ? { coverageSuggestions } : {}),
-          unfairnessCount,
-          ...(unfairnessTests.length > 0 ? { tests: unfairnessTests } : {}),
-        };
+/** Verify checks report a verdict and a one-line reason; their result is returned only when they fail. */
+function buildVerifyCheckResult(quality: QualityName, report: FeedbackReport | undefined): JsonRecord {
+  const name = displayQualityName(quality);
+  if (!report?.verdict) return { verdict: "FAIL", reason: `No completed ${name} report was available.` };
+  if (report.verdict === "PASS") return { verdict: "PASS" };
+  return {
+    verdict: "FAIL",
+    reason: report.summary || `${name} failed; open its report on Shipd for the build and test logs.`,
+  };
 }
 
-function buildSolutionQualityResult(solutionReport: QualityReport | undefined): JsonRecord {
-  const solutionPasses = Boolean(solutionReport) && hasPerfectSolutionEvaluation(solutionReport?.evaluation);
-  return !solutionReport
-    ? { verdict: "FAIL", reason: "No completed Solution Quality report was available." }
-    : solutionPasses
-      ? { verdict: "PASS" }
-      : { verdict: "FAIL", failures: solutionQualityFailures(solutionReport.evaluation) };
+/** Checks that only have to have passed once (a stale pass is fine); a current failure stops the run for the user. */
+const RUN_ONCE_CHECK_KEYS = {
+  "Verify Tests": "verifyTests",
+  "Verify Flakiness": "verifyFlakiness",
+  "Reward Hacking": "rewardHacking",
+} as const satisfies Partial<Record<QualityName, string>>;
+
+type RunOnceCheck = keyof typeof RUN_ONCE_CHECK_KEYS;
+
+function askUserAction(failed: string[]): string {
+  return `Stop and ask the user how to proceed: ${failed.join(", ")} failed on the current draft. These checks must pass at least once; do not change the task or re-run them to fix this without the user's direction.`;
 }
 
-/** Solution Quality is omitted when it was not run: in sequential mode, after Test Quality failed. */
-function buildAgentResult(
-  promptQuality: JsonRecord,
-  testQuality: JsonRecord,
-  solutionQuality?: JsonRecord,
-): JsonRecord {
+/**
+ * Solution Quality, Reward Hacking and Test Quality fail only on blocking issues (as Shipd's verdict does).
+ * Non-blocking issues are returned for the agent to consider but never fail the check.
+ */
+function buildFeedbackResult(quality: QualityName, report: FeedbackReport | undefined): JsonRecord {
+  if (!report?.verdict) {
+    return { verdict: "FAIL", reason: `No completed ${displayQualityName(quality)} report was available.` };
+  }
+  const passed = report.verdict === "PASS" && report.blocking.length === 0;
+  return {
+    verdict: passed ? "PASS" : "FAIL",
+    ...(!passed && report.blocking.length === 0 && report.summary ? { reason: report.summary } : {}),
+    ...(report.blocking.length > 0 ? { blocking: report.blocking } : {}),
+    ...(report.nonBlocking.length > 0 ? { nonBlocking: report.nonBlocking } : {}),
+  };
+}
+
+/** Each later check is present only if it ran: a failing gate stops the stages after it. */
+function buildAgentResult(promptQuality: JsonRecord, checks: JsonRecord): JsonRecord {
   return {
     promptQuality,
     ...(promptQuality.verdict === "PASS" ? { note: PROMPT_PRESERVATION_NOTE } : {}),
-    testQuality,
-    ...(solutionQuality ? { solutionQuality } : {}),
+    ...checks,
   };
 }
 
@@ -959,90 +1107,22 @@ function compactFeedback(value: unknown, maxLength = 400): string | undefined {
   return `${clipped.slice(0, boundary > 0 ? boundary : maxLength).trim()}…`;
 }
 
-function solutionQualityFailures(evaluation: unknown): JsonRecord[] {
-  if (!isRecord(evaluation)) return [{ feedback: "No scored Solution Quality evaluation was available." }];
-
-  const issues = Array.isArray(evaluation.issues) ? evaluation.issues.filter(isRecord) : [];
-  const failures = Object.entries(evaluation).filter(
-    ([, value]) =>
-      isRecord(value) &&
-      typeof value.score === "number" &&
-      typeof value.max_score === "number" &&
-      value.score !== value.max_score,
-  );
-  if (failures.length === 0) {
-    return [
-      { feedback: compactFeedback(evaluation.summary) ?? "One or more required scores did not meet its maximum." },
-    ];
-  }
-
-  return failures.map(([criterion, value]) => {
-    if (!isRecord(value)) return { criterion };
-    const normalizedCriterion = criterion.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const issue = issues.find((candidate) => {
-      const issueCriterion =
-        typeof candidate.criterion === "string" ? candidate.criterion.toLowerCase().replace(/[^a-z0-9]/g, "") : "";
-      return (
-        issueCriterion && (normalizedCriterion.endsWith(issueCriterion) || issueCriterion.endsWith(normalizedCriterion))
-      );
-    });
-    const feedback = compactFeedback(issue?.detail ?? value.reasoning ?? evaluation.summary);
-    return {
-      criterion,
-      score: value.score,
-      max_score: value.max_score,
-      ...(typeof issue?.title === "string" ? { title: issue.title } : {}),
-      ...(feedback ? { feedback } : {}),
-    };
-  });
-}
-
-function hasPerfectSolutionEvaluation(evaluation: unknown): boolean {
-  if (!isRecord(evaluation)) return false;
-  const requiredCriteria = ["code_quality", "solution_comprehensiveness"];
-  if (
-    !requiredCriteria.every((key) => {
-      const criterion = evaluation[key];
-      return isRecord(criterion) && typeof criterion.score === "number" && typeof criterion.max_score === "number";
-    })
-  ) {
-    return false;
-  }
-  const scoredCriteria = Object.values(evaluation).filter(
-    (value): value is JsonRecord => isRecord(value) && ("score" in value || "max_score" in value),
-  );
-  return scoredCriteria.every(
-    (criterion) =>
-      typeof criterion.score === "number" &&
-      typeof criterion.max_score === "number" &&
-      criterion.score === criterion.max_score,
-  );
+function feedbackSummary(check: JsonRecord): string {
+  const blocking = Array.isArray(check.blocking) ? check.blocking.length : 0;
+  const nonBlocking = Array.isArray(check.nonBlocking) ? check.nonBlocking.length : 0;
+  const counts = [
+    ...(blocking > 0 ? [`${blocking} blocking`] : []),
+    ...(nonBlocking > 0 ? [`${nonBlocking} non-blocking`] : []),
+  ];
+  if (typeof check.reason === "string") counts.push(check.reason);
+  return [String(check.verdict ?? "skipped"), ...counts].join(" · ");
 }
 
 function qualitySummaryText(details: unknown, theme: Theme): string[] {
   const value = isRecord(details) ? details : {};
-  const testQualityDetails = isRecord(value.testQuality) ? value.testQuality : undefined;
-  const testQuality = testQualityDetails ?? {};
   const promptQuality = isRecord(value.promptQuality) ? value.promptQuality : {};
-  const solutionQualityDetails = isRecord(value.solutionQuality) ? value.solutionQuality : undefined;
-  const solutionQuality = solutionQualityDetails ?? {};
-  const unfairnessCount =
-    typeof testQuality.unfairnessCount === "number"
-      ? testQuality.unfairnessCount
-      : Array.isArray(testQuality.tests)
-        ? testQuality.tests.length
-        : 0;
-  const suggestionCount = Array.isArray(testQuality.coverageSuggestions) ? testQuality.coverageSuggestions.length : 0;
   const promptComments = Array.isArray(promptQuality.comments) ? promptQuality.comments : [];
   const promptCommentCount = promptComments.length;
-  const testSummary =
-    testQuality.verdict === null || testQuality.verdict === undefined
-      ? "skipped"
-      : testQuality.verdict === "PASS"
-        ? "PASS"
-        : typeof testQuality.reason === "string"
-          ? `FAIL · ${testQuality.reason}`
-          : `${unfairnessCount} unfairness · ${suggestionCount} suggestions`;
   const promptSummary =
     promptQuality.verdict === null || promptQuality.verdict === undefined
       ? "skipped"
@@ -1053,15 +1133,6 @@ function qualitySummaryText(details: unknown, theme: Theme): string[] {
           : typeof promptQuality.reason === "string"
             ? `${promptQuality.verdict} · ${promptQuality.reason}`
             : `${promptQuality.verdict} · ${promptCommentCount} major comment${promptCommentCount === 1 ? "" : "s"}`;
-  const solutionFailures = Array.isArray(solutionQuality.failures) ? solutionQuality.failures : [];
-  const solutionSummary =
-    solutionQuality.verdict === null || solutionQuality.verdict === undefined
-      ? "skipped"
-      : solutionQuality.verdict === "PASS"
-        ? "PASS"
-        : typeof solutionQuality.reason === "string"
-          ? `FAIL · ${solutionQuality.reason}`
-          : `${solutionFailures.length} solution-quality issue${solutionFailures.length === 1 ? "" : "s"}`;
   const promptCommentDetails = promptComments.flatMap((item) =>
     isRecord(item)
       ? [
@@ -1075,9 +1146,20 @@ function qualitySummaryText(details: unknown, theme: Theme): string[] {
     `  ${theme.fg("accent", "Prompt Quality")}  ${theme.fg("muted", promptSummary)}`,
     ...promptCommentDetails,
   ];
-  if (testQualityDetails) lines.push(`  ${theme.fg("accent", "Test Quality")}  ${theme.fg("muted", testSummary)}`);
-  if (solutionQualityDetails)
-    lines.push(`  ${theme.fg("accent", "Solution Quality")}  ${theme.fg("muted", solutionSummary)}`);
+  const checks: Array<[string, string]> = [
+    ["verifySolution", "Verify Solution"],
+    ["verifyTests", "Verify Tests"],
+    ["verifyFlakiness", "Verify Flakiness"],
+    ["rewardHacking", "Reward Hacking"],
+    ["solutionQuality", "Solution Quality"],
+    ["testQuality", "Test Quality"],
+  ];
+  for (const [key, label] of checks) {
+    const check = value[key];
+    if (isRecord(check)) lines.push(`  ${theme.fg("accent", label)}  ${theme.fg("muted", feedbackSummary(check))}`);
+  }
+  if (typeof value.action === "string")
+    lines.push(`  ${theme.fg("warning", "Stopped: ask the user before continuing")}`);
   return lines;
 }
 
@@ -1274,7 +1356,9 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
     promptSnippet: "Submit the working-directory patches to Shipd",
     promptGuidelines: [
       "Use only when the user asks to evaluate the current Shipd task.",
-      "Run the staged prompt, patch-precheck, test, and solution checks; cache only passing prompt hashes in this session.",
+      "Run the staged checks in Shipd's order: prompt, patch precheck, Verify Solution, then Solution Quality, then Test Quality; cache only passing prompt hashes in this session.",
+      "Verify Tests, Verify Flakiness and Reward Hacking only have to have passed once (a stale pass is fine); they are returned only when they fail. If the result has an `action`, stop and ask the user before changing anything.",
+      "Only blocking issues fail a check. Non-blocking issues are returned as optional improvements; validate each before changing code.",
       "Return compact pass verdicts and concise, scenario-specific failure feedback. Never submit the challenge.",
     ],
     parameters: submitShipdParams,
@@ -1348,17 +1432,40 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         const promptQualityCached = promptQualitySha === promptSha;
 
         let precheck: PatchPrecheckResult | null = null;
-        const runQualityStage = async (qualities: readonly QualityName[]): Promise<void> => {
+        /** Run and wait for the given checks where needed; resolves true if any check ran or was already running. */
+        const runQualityStage = async (qualities: readonly QualityName[]): Promise<boolean> => {
           const stagePage = page;
           if (!browser || !stagePage) throw new Error("Shipd quality page was unavailable.");
+          if (qualities.length === 0) return false;
           onUpdate?.({
             content: [{ type: "text", text: `Checking ${qualities.map(displayQualityName).join(" and ")} status...` }],
             details: undefined,
           });
-          const initialStatuses = await readQualityStatusesWithRetry(stagePage, signal, qualities);
-          const isPromptQualityStage = qualities.includes("Task Prompt Quality");
-          const initialWaitMs = isPromptQualityStage ? PROMPT_QUALITY_INITIAL_WAIT_MS : INITIAL_WAIT_MS;
-          const recheckIntervalMs = isPromptQualityStage ? PROMPT_QUALITY_RECHECK_INTERVAL_MS : RECHECK_INTERVAL_MS;
+          let initialStatuses = await readQualityStatusesWithRetry(stagePage, signal, qualities);
+          // A check stays locked briefly after its upstream step passes; Shipd may also start it itself.
+          const unlockDeadline = Date.now() + LOCKED_CHECK_TIMEOUT_MS;
+          let locked = initialStatuses.filter((status) => status.lockReason && !status.busy);
+          while (locked.length > 0) {
+            if (Date.now() >= unlockDeadline) {
+              throw new Error(
+                locked
+                  .map((status) => `${displayQualityName(status.quality)} is locked: ${status.lockReason}`)
+                  .join(" "),
+              );
+            }
+            onUpdate?.({
+              content: [
+                {
+                  type: "text",
+                  text: `Waiting for ${locked.map((s) => displayQualityName(s.quality)).join(", ")} to unlock...`,
+                },
+              ],
+              details: undefined,
+            });
+            await sleep(LOCKED_CHECK_POLL_INTERVAL_MS, signal);
+            initialStatuses = await readQualityStatusesWithRetry(stagePage, signal, qualities);
+            locked = initialStatuses.filter((status) => status.lockReason && !status.busy);
+          }
           const qualitiesToMonitor = initialStatuses.filter((status) => status.busy).map((status) => status.quality);
           for (const quality of qualities) {
             const status = initialStatuses.find((item) => item.quality === quality);
@@ -1379,9 +1486,14 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
               ],
               details: undefined,
             });
-            return;
+            return false;
           }
 
+          // Every monitored check must finish before the stage ends, so wait for the slowest one.
+          const initialWaitMs = Math.max(...qualitiesToMonitor.map((quality) => INITIAL_WAIT_MS[quality]));
+          const recheckIntervalMs = qualitiesToMonitor.every((quality) => quality === "Task Prompt Quality")
+            ? PROMPT_QUALITY_RECHECK_INTERVAL_MS
+            : RECHECK_INTERVAL_MS;
           onUpdate?.({
             content: [
               {
@@ -1420,7 +1532,8 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
             if (!statusPage) throw new Error("Shipd quality status page was unavailable after reopening.");
             let statuses = await readQualityStatusesWithRetry(statusPage, signal, qualitiesToMonitor);
             for (const status of statuses) {
-              if (!status.busy && status.shouldRun) await clickAndConfirm(statusPage, status.quality, signal);
+              if (!status.busy && status.shouldRun && !status.lockReason)
+                await clickAndConfirm(statusPage, status.quality, signal);
             }
             statuses = await readQualityStatusesWithRetry(statusPage, signal, qualitiesToMonitor);
             if (statuses.every((status) => !status.busy && !status.shouldRun)) break;
@@ -1444,6 +1557,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
             page = undefined;
             nextCheckAt = Date.now() + recheckIntervalMs;
           }
+          return true;
         };
 
         // Every run opens the job link and syncs all draft fields first, so each later stage
@@ -1475,7 +1589,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           if (!page) throw new Error("Shipd page was closed before Prompt Quality report extraction.");
           onUpdate?.({ content: [{ type: "text", text: "Extracting Prompt Quality report..." }], details: undefined });
           const promptReport = (await hasQualityReport(page, "Task Prompt Quality"))
-            ? (await extractQualityReportWithRetry(page, "Task Prompt Quality", signal)).parsed
+            ? await readReportWithRetry(page, "Task Prompt Quality", readJsonReport, signal)
             : undefined;
           promptQuality = buildPromptQualityResult(promptReport);
           if (promptQuality.verdict !== "PASS") {
@@ -1530,54 +1644,115 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         await rm(precheckDir, { recursive: true, force: true });
         precheckDir = undefined;
 
-        // Read per run so a /checks --config change applies without restarting pi.
-        const runInParallel = loadQualityCheckConfig().testSolutionMode === "parallel";
+        const finish = (checks: JsonRecord) => {
+          const result = buildAgentResult(promptQuality, checks);
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        };
+        const readFeedback = async (quality: QualityName): Promise<FeedbackReport | undefined> => {
+          const reportPage = page;
+          if (!reportPage)
+            throw new Error(`Shipd page was closed before ${displayQualityName(quality)} report extraction.`);
+          onUpdate?.({
+            content: [{ type: "text", text: `Extracting ${displayQualityName(quality)} report...` }],
+            details: undefined,
+          });
+          return (await hasQualityReport(reportPage, quality))
+            ? await readReportWithRetry(reportPage, quality, readFeedbackReport, signal)
+            : undefined;
+        };
+        const readRunOnceResult = async (quality: RunOnceCheck): Promise<JsonRecord> => {
+          const report = await readFeedback(quality);
+          return quality === "Reward Hacking"
+            ? buildFeedbackResult(quality, report)
+            : buildVerifyCheckResult(quality, report);
+        };
+        // A run-once check must have passed once; a stale pass is fine. It runs when it has never run,
+        // or when its latest result failed and is stale. A running check is waited for, since its
+        // report is unreadable until it finishes. A current failure is not re-run: same input, same result.
+        const runOnceChecksToRun = async (qualities: readonly RunOnceCheck[]): Promise<RunOnceCheck[]> => {
+          const statusPage = page;
+          if (!statusPage) throw new Error("Shipd page was closed before reading the run-once checks.");
+          const toRun: RunOnceCheck[] = [];
+          for (const status of await readQualityStatusesWithRetry(statusPage, signal, qualities)) {
+            const quality = status.quality as RunOnceCheck;
+            if (status.busy || !status.hasReport) toRun.push(quality);
+            else if (isStale(status.rowText) && (await readRunOnceResult(quality)).verdict !== "PASS")
+              toRun.push(quality);
+          }
+          return toRun;
+        };
+        // Only failures are returned; a check still running is skipped.
+        const readRunOnceFailures = async (qualities: readonly RunOnceCheck[]): Promise<JsonRecord> => {
+          const statusPage = page;
+          if (!statusPage) throw new Error("Shipd page was closed before reading the run-once checks.");
+          const failures: JsonRecord = {};
+          for (const status of await readQualityStatusesWithRetry(statusPage, signal, qualities)) {
+            if (status.busy || !status.hasReport) continue;
+            const quality = status.quality as RunOnceCheck;
+            const result = await readRunOnceResult(quality);
+            if (result.verdict !== "PASS") failures[RUN_ONCE_CHECK_KEYS[quality]] = result;
+          }
+          return failures;
+        };
+        const askUser = (failures: JsonRecord, checks: JsonRecord = {}) => {
+          const failed = (Object.keys(RUN_ONCE_CHECK_KEYS) as RunOnceCheck[])
+            .filter((quality) => RUN_ONCE_CHECK_KEYS[quality] in failures)
+            .map(displayQualityName);
+          return finish({ ...checks, ...failures, action: askUserAction(failed) });
+        };
+        // After a step runs, Shipd starts or unlocks the next one; reload once it has had time to.
+        const settleAfterStage = async (ran: boolean): Promise<void> => {
+          if (!ran || !page) return;
+          onUpdate?.({
+            content: [{ type: "text", text: "Waiting for Shipd to start the next step..." }],
+            details: undefined,
+          });
+          await sleep(STAGE_SETTLE_MS, signal);
+          await navigateAuthenticated(page, targetUrl, signal);
+        };
+
         onUpdate?.({
           content: [
-            {
-              type: "text",
-              text: `Fargate patch prechecks passed; opening Shipd for ${runInParallel ? "Test and Solution Quality" : "Test Quality"}...`,
-            },
+            { type: "text", text: "Fargate patch prechecks passed; opening Shipd to unlock Solution Quality..." },
           ],
           details: undefined,
         });
         const finalPage = await openShipdPage(executablePath, storageStatePath, targetUrl, signal);
         browser = finalPage.browser;
         page = finalPage.page;
-        await runQualityStage(runInParallel ? ["Test Quality", "Solution Quality"] : ["Test Quality"]);
 
-        if (!page) throw new Error("Shipd quality status page was closed before Test Quality report extraction.");
-        onUpdate?.({ content: [{ type: "text", text: "Extracting Test Quality report..." }], details: undefined });
-        const testReport = (await hasQualityReport(page, "Test Quality"))
-          ? (await extractQualityReportWithRetry(page, "Test Quality", signal)).parsed
-          : undefined;
-        const testQuality = buildTestQualityResult(testReport);
-        if (!runInParallel) {
-          if (testQuality.verdict !== "PASS") {
-            const result = buildAgentResult(promptQuality, testQuality);
-            return {
-              content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-              details: result,
-            };
-          }
+        // Step 2 unlocks only when every Step 1 check has passed at least once (a stale pass is fine)
+        // and Verify Solution is current and passing.
+        const [promptStatus] = await readQualityStatusesWithRetry(finalPage.page, signal, ["Task Prompt Quality"]);
+        const unlockChecks: QualityName[] = [
+          "Verify Solution",
+          ...(await runOnceChecksToRun(["Verify Tests", "Verify Flakiness"])),
+          ...(promptStatus?.hasReport ? [] : ["Task Prompt Quality" as const]),
+        ];
+        const unlockRan = await runQualityStage(unlockChecks);
+        const verifySolution = buildVerifyCheckResult("Verify Solution", await readFeedback("Verify Solution"));
+        if (verifySolution.verdict !== "PASS") return finish({ verifySolution });
+        const stepOneFailures = await readRunOnceFailures(["Verify Tests", "Verify Flakiness"]);
+        if (Object.keys(stepOneFailures).length > 0) return askUser(stepOneFailures);
 
-          onUpdate?.({
-            content: [{ type: "text", text: "Test Quality passed; running Solution Quality..." }],
-            details: undefined,
-          });
-          await runQualityStage(["Solution Quality"]);
-        }
+        await settleAfterStage(unlockRan);
+        // Like the Step 1 checks, Reward Hacking only has to have passed once; a stale pass is fine.
+        const stepTwoRan = await runQualityStage([
+          "Solution Quality",
+          ...(await runOnceChecksToRun(["Reward Hacking"])),
+        ]);
+        const solutionQuality = buildFeedbackResult("Solution Quality", await readFeedback("Solution Quality"));
+        const rewardHackingFailure = await readRunOnceFailures(["Reward Hacking"]);
+        if (Object.keys(rewardHackingFailure).length > 0) return askUser(rewardHackingFailure, { solutionQuality });
+        if (solutionQuality.verdict !== "PASS") return finish({ solutionQuality });
 
-        if (!page) throw new Error("Shipd quality status page was closed before Solution Quality report extraction.");
-        onUpdate?.({ content: [{ type: "text", text: "Extracting Solution Quality report..." }], details: undefined });
-        const solutionReport = (await hasQualityReport(page, "Solution Quality"))
-          ? (await extractQualityReportWithRetry(page, "Solution Quality", signal)).parsed
-          : undefined;
-        const result = buildAgentResult(promptQuality, testQuality, buildSolutionQualityResult(solutionReport));
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          details: result,
-        };
+        await settleAfterStage(stepTwoRan);
+        await runQualityStage(["Test Quality"]);
+        const testQuality = buildFeedbackResult("Test Quality", await readFeedback("Test Quality"));
+        return finish({ solutionQuality, testQuality });
       } catch (error) {
         if (signal?.aborted) throw new Error("Cancelled by user.");
         throw error;

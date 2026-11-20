@@ -18,9 +18,9 @@ The agent-callable `auditor` tool replaces the old `gap-finder` and `solution-pr
 
 1. Runs `create_patches.sh` when the project has one, to refresh `test.patch` and `solution.patch` from the working tree, then requires `agent_prompt.md`, `test.patch` and `solution.patch`.
 2. Snapshots git `HEAD` into a temp workspace as the pinned base (`repo/`), next to `review_assets/` holding `agent_prompt.md` (as problem.md), `test.patch` with its `test.sh` section removed, `solution.patch`, and standalone copies of new test files. Neither patch is applied.
-3. Runs read-only Claude Code CLI reviewers on this machine (`Read`, `Grep`, `Glob` only; your local `claude` login), several at a time, one read each: Local Test Quality per-file fairness batches (one per ~60 KB of test files), one coverage read, the solution audit over ten lenses (paths, identity, ordering, variants, numeric, compose, metadata, lifecycle, behaviour, and the quality lens for solution betterment: repo conventions, dead code, duplication, unrelated changes, AI artefacts), and per-unit Solution Quality on every `solution.patch` hunk (12 hunks per reviewer). The embedded `rules.md` families the old tools used go into these prompts: fairness rules into per-test Test Quality, test-gap rules into coverage, solution-gap rules into the audit and per-unit reads. Prompts also carry hosted calibration distilled into general patterns (`src/auditor-data.ts`), not quotes from past tasks. A typical task needs about 6–8 sessions.
-4. Runs synthesis (one session per 50 findings) over every finding with the hosted proof legs (failing case, wrong implementation, promise citation, load-bearing check, provenance, materiality, reference pass, exercised environment). A finding gates only when synthesis keeps it HIGH; findings synthesis rejects as wrong are dropped.
-5. Returns the findings grouped as `details.unfairTests`, `details.testGaps`, `details.solutionGaps` and `details.solutionImprovements`, each with `level` (`HIGH` gates, `MEDIUM` is the fix-before-upload list), `criterion`, `finding` and the synthesis reasoning, plus `details.verdict` (`BLOCK`, `REVIEW`, `PASS` or `INCOMPLETE`), `details.testQuality`, `details.solutionQuality`, `details.counterTests` (not executed) and reviewer statuses. It writes only one file, the report `.pi/shipd-checks/<runId>-auditor.md`; reviewer prompts and answers are not kept.
+3. Runs typed read-only Claude Code CLI agents on this machine (`Read`, `Grep`, `Glob` only; your local `claude` login) in parallel. **Test agents** own `test.patch`: unfair tests (including shared-helper coupling and tests that contradict other tests in the suite), missing coverage (including interrupted processes, existing lifecycle operations and mirror cases), and non-blocking test code quality (Clutter, Conventions, Design, Practice). **Solution agents** own `solution.patch`: concrete wrong outputs (input, expected output, received, including kill-and-restart sequences, portability and regressions of existing operations) and non-blocking solution code quality (Practice, Clutter, Design, Conventions, Scope, Stale callers). The count of each type follows the patch sizes (one test agent per ~70 KB of `test.patch`, one solution agent per ~50 KB of `solution.patch`, 1–4 each); test agents split the test files and the prompt's requirement sentences, solution agents split the changed hunks. The agents are instructed to be as hard to pass as the hosted checks: assume findings exist, sweep twice, and report borderline candidates for synthesis to judge. The embedded `rules.md` families go to the type they belong to (fairness and test-gap rules to test agents, solution-gap rules to solution agents), and the prompts carry hosted calibration distilled into general patterns (`src/auditor-data.ts`), not quotes from past tasks.
+4. Runs one combined synthesis (one session per 60 findings) that reads problem.md and both patches, merges duplicates across agents, and applies the hosted proof legs (failing case, wrong implementation, promise citation, load-bearing check, provenance, materiality, reference pass, exercised environment). A finding gates only when synthesis keeps it HIGH; it drops only findings the files show are wrong. Code-quality findings never gate.
+5. Returns the findings grouped as `details.unfairTests`, `details.testGaps`, `details.testImprovements`, `details.solutionGaps` and `details.solutionImprovements`, each with `level` (`HIGH` gates, `MEDIUM` is the fix-before-upload list), `criterion`, `finding` and the synthesis reasoning, plus `details.verdict` (`BLOCK`, `REVIEW`, `PASS` or `INCOMPLETE`), `details.testQuality`, `details.solutionQuality`, `details.counterTests` (not executed) and reviewer statuses. It writes only one file, the report `.pi/shipd-checks/<runId>-auditor.md`; reviewer prompts and answers are not kept.
 
 The opt-in `humanize-agent-prompt` tool reads the complete current-project `agent_prompt.md`, requests 3 experimental
 rewrite drafts from the CoreWeave Nemotron LoRA, scores every draft through a configured HTTPS detector endpoint, and
@@ -38,24 +38,42 @@ exact prompt content. The last passing prompt hash is stored as a custom entry i
 hash matches, it skips the Shipd Prompt Quality check entirely and reports a cached `PASS`; if it differs or is absent, it
 checks the refreshed status of the synced draft and runs only when the check is stale or has a `Run` button. Otherwise it
 uses the current report. A new hash is saved only after Prompt Quality passes. On failure, only `promptQuality` is returned; there are no Test/Solution results or `stoppedReason`.
-Only after Prompt Quality passes or has a matching cached pass does it run the Fargate patch precheck against a clean `HEAD`;
-only if that passes does it run Test Quality, and only if Test Quality passes does it run Solution Quality. A failing Test Quality (any unfair test or coverage suggestion) returns `promptQuality` and `testQuality` without running Solution Quality. Setting **Test and Solution Quality** to `parallel` in `/checks --config` starts both together after the precheck and always returns both reports, even when Test Quality fails. Each check runs fresh jobs, reruns stale reports, skips
-current reports, and waits for started jobs. It returns only the useful report data:
-`details.testQuality.verdict`, `details.testQuality.coverageSuggestions`, `details.testQuality.unfairnessCount`, and
-`details.testQuality.tests` filtered to blocks whose `concerns` array is non-empty or whose `fairness` is exactly `"Not fair"`,
-`details.promptQuality` and its verdict, reason, and major non-AI comments (only `category`, `quote`, and `suggestion`; AI-category comments are omitted), plus
-`details.solutionQuality.verdict` and its evaluation fields with `level` and `overall_feedback` removed. Fairness-only blocks
-with an empty `concerns` array are marked `Not fully fair`. The `timing_sensitivity` concern is ignored: it is removed from `concerns` first, so it never fails the check on its own. Test Quality is `PASS` only when there are no filtered unfair
-tests, reported `unfairTestCount` is zero (when present), and coverage suggestions are empty. Prompt Quality is `PASS` only when the completed report and evaluation
+Only after Prompt Quality passes or has a matching cached pass does it run the Fargate patch precheck against a clean `HEAD`.
+Then it follows Shipd's three steps. Step 1 holds Verify Tests, Verify Solution, Verify Flakiness and Prompt Quality;
+Step 2 (Solution Quality and Reward Hacking) unlocks only when every Step 1 check has passed at least once and Verify
+Solution is current and passing. Verify Solution is re-run whenever it is stale. Verify Tests, Verify Flakiness and
+Reward Hacking only have to have passed once, so a stale pass is fine and is never re-run; the tool runs one of them
+only when it has never run or its latest result is a stale failure, and waits for one that is already running. A
+failing Verify Solution returns `promptQuality` and `verifySolution` (verdict and Shipd's reason). If Verify Tests,
+Verify Flakiness or Reward Hacking still fails on the current draft, the tool returns it as `verifyTests`,
+`verifyFlakiness` or `rewardHacking` plus an `action` telling the agent to stop and ask the user, and runs nothing
+further. These checks, like Verify Solution, are returned only when they fail. Next it runs Solution Quality (and Reward Hacking when it needs a run); if Solution Quality fails it
+returns it without running Test Quality, which Shipd keeps locked until Solution Quality passes. Otherwise it runs Test
+Quality. Verify Solution, Solution Quality and Test Quality start fresh jobs, rerun stale reports, skip current
+reports, and wait for started or queued jobs (a row reading `Waiting for …` counts as queued). After a step runs it
+waits 15 seconds and reloads before the next step, because Shipd may start or unlock that step itself; a check still
+locked two minutes later is reported as an error.
+
+Solution Quality, Reward Hacking and Test Quality reports are read from each report's "Feedback for the author"
+section, not raw JSON. Each returns `verdict`, plus `blocking` and `nonBlocking` arrays of items with `finding`,
+`details`, `why` and `suggestedChange` (and `category`/`location` when Shipd gives them), and `reason` when a failure
+has no blocking items. Only blocking issues fail a check, as in Shipd's verdict; non-blocking issues are returned for
+the agent to validate and consider, but never fail it. `details.promptQuality` returns the verdict, reason, and major
+non-AI comments (only `category`, `quote`, and `suggestion`; AI-category comments are omitted); Prompt Quality is still
+read from its raw JSON and is `PASS` only when the completed report and evaluation
 verdicts are both `PASS`, `requirementCount` is not blocking, and the AI gate does not flag the prompt. The prompt is
 flagged as AI when a Prompt Quality comment category identifies AI (for example, `ai_generated`). AI-category quote and suggestion details are omitted; guidance recommends humanizer for a broader rewrite or a small targeted manual edit for a recent change. A cached Prompt Quality pass is marked
-`cached: true`. Test and Solution Quality return compact `PASS` results; failures include only actionable feedback. Prompt
+`cached: true`. Prompt
 Quality failures return a concise reason or major comments. Returned quality results omit `completed` and `skipped`. Its
 compact UI is labeled `Quality Checks`, shows live elapsed time, and summarizes each stage; it does not print full pass
 criteria in the tool description. It takes no parameters. Transient status and report-dialog operations retry up to three
-times; after clicking Run, the tool verifies the stale state clears or the job shows running before it begins polling. It
+times; after clicking Run, the tool waits up to 30 seconds for the stale state to clear or the job to show running. Once Shipd accepts
+the confirmation it never clicks Run again in that attempt, because the run is already queued; a run that has not shown up
+yet is left to the polling, which re-runs a check only if it is still stale and idle at its first status check. It
 uses one fresh headless browser tab at a time: for Prompt Quality
-it checks after 2 minutes, then every 30 seconds; for Test and Solution Quality it checks after 5 minutes, then reopens
+it checks after 90 seconds, then every 30 seconds; for the other checks it first checks after 10 minutes (Verify
+Tests, Verify Solution, Verify Flakiness and Reward Hacking) or 12 minutes (Solution Quality and Test Quality); when
+several run together it waits for the longest, then reopens
 every 90 seconds until those jobs finish, with no client-side overall timeout. If all checks are current, it uses existing
 reports without starting a job. Each browser context blocks images, fonts, and media to reduce memory use. It does not click the final orange
 challenge-submit button. Authentication comes from `SHIPD_STORAGE_STATE` or the saved state created by
@@ -76,7 +94,7 @@ Shipd tokens; do not run overlapping invocations for the same challenge.
 |---|---|
 | `/checks` | Open a menu for config or solve |
 | `/checks --solve` | Run isolated Claude CLI solvers and base/new tests, then use a local Claude CLI reviewer to assess test fairness and failed agents |
-| `/checks --config` | Configure Solver model (Claude), Claude solver effort, timeout, parallel agent count, the Claude reviewer, whether `quality-check` runs Test and Solution Quality sequentially or in parallel, and the auditor tool |
+| `/checks --config` | Configure Solver model (Claude), Claude solver effort, timeout, parallel agent count, the Claude reviewer, and the auditor tool |
 | `/shipd:auth` | Open a browser for first-time Shipd sign-in and save the session |
 | `/shipd:link <url>` | Save the Shipd job link for the current chat session |
 | `/analyze:on` | Enable the `auditor` and prompt-humanizer tools for the current project |
@@ -86,10 +104,9 @@ Shipd tokens; do not run overlapping invocations for the same challenge.
 
 ## Configuration
 
-`/checks --config` opens the row-based settings menu with three sections:
+`/checks --config` opens the row-based settings menu with two sections:
 
 - **Solver**: Solver model (Claude: `haiku`, `sonnet`, or `opus`), solver effort (`low`, `medium`, `high`, `xhigh`, or `max`), one-shot timeout (10–90 minutes), parallel agent count, and the Claude reviewer model (default `opus`), effort (default `high`), and timeout (10–60 minutes; default 20), stored under `solverReview` in `checks-config.json`. Solver effort defaults to `low` when unset and is passed explicitly to Claude. Diffs, agent output, `agent_steps.jsonl` traces, base/new logs, and the local reviewer assessment are saved under `.pi/shipd-checks/<runId>/` and summarized in `shipd_report.json`.
-- **Quality Checks**: whether the `quality-check` tool runs Test and Solution Quality `sequential` (default; Solution Quality runs only after Test Quality passes) or `parallel` (both start together and both reports are returned), stored under `qualityCheck` in `checks-config.json`. The setting is read after the patch precheck on each run, so a change applies without restarting pi.
 - **Analysis Tools**: whether the analysis tools are enabled for this project, and the `auditor` tool's Claude settings: model (`haiku`, `sonnet`, or `opus`; default `opus`), effort (default `high`), timeout per reviewer (10–90 minutes; default 40), and parallel reviewers (1–8; default 4), stored under `auditor` in `checks-config.json` (an `autoReview` block from earlier versions is still read). Fargate resources are selected automatically and are not configurable in this menu.
 
 For each Claude solver, `shipd_report.json` records CLI-reported input/cache/output token totals, final and peak request-context token counts, context-window size/utilization, API-call count, and cost when available. When the CLI explicitly reports thinking tokens, `totalTokens` subtracts them from raw input-plus-output; otherwise it remains the raw total. The raw total is also recorded when a subtraction is made. The local Claude reviewer records the CLI-reported usage and cost. Per-agent, reviewer, and aggregate usage appears once under `solverTokenUsage`; `solverRunSummary` contains outcomes, aggregate test counts, and per-suite JUnit counts, while `solverReview` contains the assessment and reviewer model settings.
@@ -205,7 +222,7 @@ apply any selected draft locally.
 ```
 
 Use ↑/↓ to select a row and Enter/Space to change it. Settings are saved to `~/.pi/agent/checks-config.json`; solver
-settings are nested under `solverGap`, the solve reviewer under `solverReview`, the `quality-check` mode under `qualityCheck`, and the auditor under `auditor`.
+settings are nested under `solverGap`, the solve reviewer under `solverReview`, and the auditor under `auditor`.
 
 ## Install
 
@@ -234,7 +251,7 @@ Or, for local development, point at the entry point directly:
 | File | Responsibility |
 |---|---|
 | `src/index.ts` | Extension entry point: message renderer, cancel shortcut, command registration |
-| `src/submit.ts` | `quality-check`: Playwright draft filling, sequential quality checks, scheduled polling, and report extraction |
+| `src/submit.ts` | `quality-check`: Playwright draft syncing, Shipd's staged checks, scheduled polling, and report extraction |
 | `src/command.ts` | The `/checks` command: argument parsing, `--config` flow, run orchestration |
 | `src/agents.ts` | Runs the `--solve` benchmark review through the local Claude CLI |
 | `src/analyze.ts` | The agent-callable `auditor` tool (rendering, result text) and humanizer registration |
