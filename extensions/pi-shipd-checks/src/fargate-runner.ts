@@ -34,7 +34,7 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { prepareCodexLoginForRun } from "./codex-auth.js";
-import { FARGATE_PREQUALITY_PROFILE, resolveFargateResources } from "./config.js";
+import { FARGATE_PREQUALITY_PROFILE, resolveFargateResources, solverGapTestTimeoutMinutes } from "./config.js";
 import { type FargateDockerPlan, parseFargateDockerfile } from "./fargate-docker.js";
 import { bashQuote, toSlashPath } from "./git.js";
 import { SOLVER_ARTIFACTS_DIRNAME } from "./solvergap.js";
@@ -50,6 +50,8 @@ import type {
 const TASK_CONTAINER_NAME = "shipd-worker";
 const WORKER_S3_NAME = "fargate-worker.mjs";
 const URL_EXPIRY_SECONDS = 55 * 60;
+/** Task budget beyond the solver and test timeouts: image setup, Codex install, diff capture and result upload. */
+const TASK_SETUP_SLACK_MINUTES = 30;
 const POLL_MS = 5000;
 
 type WorkerSolverResult = SolverRunResult & {
@@ -128,6 +130,10 @@ async function runFargateWorker(opts: {
   const workerPath = findWorkerPath();
   const solverConfig = opts.solverConfig;
   const agentTimeoutMinutes = opts.mode === "solver" ? Math.max(1, Math.floor(solverConfig?.timeoutMinutes ?? 20)) : 0;
+  const testTimeoutMinutes = opts.mode === "solver" ? solverGapTestTimeoutMinutes(solverConfig?.testTimeoutMinutes) : 0;
+  // Whole-task budget: setup, then (in parallel) each solver's Codex session followed by its base and new test runs,
+  // plus slack for image setup, diff capture and result upload.
+  const solverTaskMinutes = agentTimeoutMinutes + 2 * testTimeoutMinutes + TASK_SETUP_SLACK_MINUTES;
   const directS3 = Boolean(fargateConfig.taskRoleArn);
   const workerCodexAuthPath =
     opts.mode === "solver" ? join(tmpdir(), `.shipd-fargate-codex-auth-${randomUUID()}.json`) : undefined;
@@ -164,13 +170,13 @@ async function runFargateWorker(opts: {
       );
     const testPatchPath = join(opts.repoDir, "test.patch");
     if (opts.mode === "solver" && !existsSync(testPatchPath))
-      throw new Error("Missing test.patch; it is applied only after each solver finishes.");
+      throw new Error("create_patches.sh did not create test.patch, which is applied after each solver finishes.");
     if (workerCodexAuthPath) {
       // The solvers use a copy of the local ChatGPT login. Refresh it here first whenever it might expire (or be
       // refreshed by Codex) before the task, including every Spot retry, can finish: a refresh on Fargate would
       // rotate the refresh token and sign out the local login.
       const maxRetries = Math.min(3, Math.max(0, Math.floor(fargateConfig.maxRetries ?? 1)));
-      const runWindowMinutes = Math.max(60, (maxRetries + 1) * Math.max(10, agentTimeoutMinutes * 4 + 15) + 15);
+      const runWindowMinutes = Math.max(60, (maxRetries + 1) * solverTaskMinutes + 15);
       const login = await prepareCodexLoginForRun({
         minValidityMs: runWindowMinutes * 60_000,
         signal: opts.cancelSignal,
@@ -200,9 +206,7 @@ async function runFargateWorker(opts: {
       fargateConfig,
     );
     const timeoutMinutes =
-      opts.mode === "solver"
-        ? Math.max(10, agentTimeoutMinutes * 4 + 15)
-        : Math.max(1, Math.floor(opts.precheckTimeoutMinutes ?? 20));
+      opts.mode === "solver" ? solverTaskMinutes : Math.max(1, Math.floor(opts.precheckTimeoutMinutes ?? 20));
     const solverCount = opts.mode === "solver" ? Math.max(1, Math.floor(solverConfig?.solverCount ?? 1)) : 0;
     const maxRetries = Math.min(3, Math.max(0, Math.floor(fargateConfig.maxRetries ?? 1)));
     let lastFailure = "Fargate task did not produce a result.";
@@ -274,6 +278,7 @@ async function runFargateWorker(opts: {
                 modelId: solverConfig?.modelId ?? "gpt-6.2-sol",
                 thinkingLevel: solverConfig?.thinkingLevel ?? "low",
                 agentTimeoutMinutes,
+                testTimeoutMinutes,
                 taskPrompt: opts.taskPrompt,
               }
             : {}),

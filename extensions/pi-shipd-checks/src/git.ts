@@ -302,11 +302,25 @@ export async function snapshotGitHead(
 
 const CREATE_PATCHES_TIMEOUT_MS = 120_000;
 
-/** Runs the project's `create_patches.sh` to regenerate test.patch and solution.patch; throws with its output on failure. */
-export async function runCreatePatches(pi: ExtensionAPI, cwd: string, signal?: AbortSignal): Promise<void> {
+/** Throws when create_patches.sh exited successfully without creating the given patch files. */
+export function requirePatchesCreated(cwd: string, files: readonly string[]): void {
+  const missing = files.filter((file) => !existsSync(join(cwd, file)));
+  if (missing.length) throw new Error(`create_patches.sh did not create ${missing.join(", ")}.`);
+}
+
+/**
+ * Runs the project's `create_patches.sh`, which creates test.patch and solution.patch; throws with its output on
+ * failure. The patches are not checked beforehand: the script is their only source.
+ */
+export async function runCreatePatches(
+  pi: ExtensionAPI,
+  cwd: string,
+  signal?: AbortSignal,
+  timeoutMs = CREATE_PATCHES_TIMEOUT_MS,
+): Promise<void> {
   const run = await pi.exec(getShellExecutable(), ["create_patches.sh"], {
     cwd,
-    timeout: CREATE_PATCHES_TIMEOUT_MS,
+    timeout: timeoutMs,
     signal,
   });
   if (run.killed || run.code !== 0) {

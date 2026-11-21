@@ -145,6 +145,9 @@ export function runCodex(opts: {
     `model_reasoning_effort=${opts.config.thinkingLevel}`,
     "--sandbox",
     "read-only",
+    // Offline review, like the former Read/Grep/Glob-only Claude reviewers.
+    "-c",
+    "web_search=disabled",
     "--skip-git-repo-check",
     "--ephemeral",
   ];

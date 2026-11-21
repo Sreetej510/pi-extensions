@@ -28,14 +28,15 @@ import {
   type SynthesisCandidate,
 } from "./auditor-prompts.js";
 import { extractJsonAnswer, runCodex } from "./codex-cli.js";
-import { getShellExecutable, loadAuditorConfig } from "./config.js";
-import { snapshotGitHead } from "./git.js";
+import { loadAuditorConfig } from "./config.js";
+import { requirePatchesCreated, runCreatePatches, snapshotGitHead } from "./git.js";
 import { extractNewFilesFromPatch, splitPatchFiles, splitPatchHunks } from "./patch.js";
 import { formatDuration, formatLocalTimestamp } from "./report.js";
 import { SOLVER_ARTIFACTS_DIRNAME } from "./solvergap.js";
 import type { AuditorConfig, TokenUsage } from "./types.js";
 
-export const AUDITOR_REQUIRED_FILES = ["agent_prompt.md", "test.patch", "solution.patch"] as const;
+/** Needed before the audit starts; create_patches.sh then creates test.patch and solution.patch. */
+export const AUDITOR_REQUIRED_FILES = ["create_patches.sh", "agent_prompt.md"] as const;
 const PATCH_SCRIPT_TIMEOUT_MS = 5 * 60_000;
 /** One test agent per this much test.patch, up to MAX_AGENTS_PER_TYPE. */
 const TEST_CHARS_PER_AGENT = 70_000;
@@ -539,22 +540,6 @@ function renderMarkdown(result: AuditResult, config: AuditorConfig): string {
 // Entry point
 // ---------------------------------------------------------------------------------------------------------------------
 
-/** Refreshes test.patch and solution.patch from the working tree with the project's create_patches.sh, when present. */
-async function refreshPatches(pi: ExtensionAPI, cwd: string, signal: AbortSignal): Promise<void> {
-  if (!existsSync(join(cwd, "create_patches.sh"))) return;
-  const run = await pi.exec(getShellExecutable(), ["create_patches.sh"], {
-    cwd,
-    timeout: PATCH_SCRIPT_TIMEOUT_MS,
-    signal,
-  });
-  if (run.killed || run.code !== 0) {
-    const output = (run.stderr || run.stdout || "").trim().slice(-2_000);
-    throw new Error(
-      `create_patches.sh failed${run.killed ? " or timed out" : ` (exit ${run.code})`}.${output ? `\n${output}` : ""}`,
-    );
-  }
-}
-
 /** Runs the whole audit on `cwd` and writes the final report; throws on missing inputs or cancellation. */
 export async function runAudit(opts: {
   pi: ExtensionAPI;
@@ -568,11 +553,12 @@ export async function runAudit(opts: {
     if (signal.aborted) throw new Error("Cancelled by user.");
   };
   const startedAt = Date.now();
-  progress("Refreshing patches...");
-  await refreshPatches(pi, cwd, signal);
-  cancelled();
   const missing = AUDITOR_REQUIRED_FILES.filter((file) => !existsSync(join(cwd, file)));
   if (missing.length) throw new Error(`Missing required file(s) in the project root: ${missing.join(", ")}`);
+  progress("Running create_patches.sh...");
+  await runCreatePatches(pi, cwd, signal, PATCH_SCRIPT_TIMEOUT_MS);
+  cancelled();
+  requirePatchesCreated(cwd, ["test.patch", "solution.patch"]);
   const config = loadAuditorConfig();
   const workspace = join(tmpdir(), `checks-auditor-${randomUUID()}`);
   try {

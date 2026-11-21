@@ -98,7 +98,10 @@ export interface SolverGapConfig {
   modelId: string;
   /** Codex CLI solver reasoning effort, passed as `-c model_reasoning_effort=<level>`. */
   thinkingLevel: CodexReasoningEffort;
+  /** Timeout for each solver's Codex session. */
   timeoutMinutes: number;
+  /** Timeout for each test suite run (base, then new) after a solver finishes; defaults to 15 minutes. */
+  testTimeoutMinutes?: number;
   /** Number of parallel solver agents to run. */
   solverCount: number;
 }

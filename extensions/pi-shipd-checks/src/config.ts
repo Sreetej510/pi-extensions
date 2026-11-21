@@ -23,6 +23,9 @@ export const SETTINGS_PATH = join(getAgentDir(), "settings.json");
 export const SOLVER_GAP_TIMEOUT_MIN_MINUTES = 10;
 export const SOLVER_GAP_TIMEOUT_MAX_MINUTES = 90;
 export const SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES = 20;
+export const SOLVER_GAP_TEST_TIMEOUT_MIN_MINUTES = 5;
+export const SOLVER_GAP_TEST_TIMEOUT_MAX_MINUTES = 60;
+export const SOLVER_GAP_DEFAULT_TEST_TIMEOUT_MINUTES = 15;
 
 export const SOLVER_GAP_SOLVER_COUNT_MIN = 1;
 export const SOLVER_GAP_SOLVER_COUNT_MAX = 5;
@@ -178,6 +181,7 @@ export function loadSolverGapConfig(): SolverGapConfig {
         Math.max(SOLVER_GAP_TIMEOUT_MIN_MINUTES, solverGap.timeoutMinutes as number),
       )
     : SOLVER_GAP_DEFAULT_TIMEOUT_MINUTES;
+  const testTimeoutMinutes = solverGapTestTimeoutMinutes(solverGap.testTimeoutMinutes);
   const solverCount = Number.isInteger(solverGap.solverCount)
     ? Math.min(SOLVER_GAP_SOLVER_COUNT_MAX, Math.max(SOLVER_GAP_SOLVER_COUNT_MIN, solverGap.solverCount as number))
     : SOLVER_GAP_DEFAULT_SOLVER_COUNT;
@@ -185,8 +189,16 @@ export function loadSolverGapConfig(): SolverGapConfig {
     modelId: codexModel(solverGap.modelId, CODEX_SOLVER_DEFAULT_MODEL),
     thinkingLevel: codexEffort(solverGap.thinkingLevel, "low"),
     timeoutMinutes,
+    testTimeoutMinutes,
     solverCount,
   };
+}
+
+/** Per-suite solver test timeout, clamped to the configurable range (default when unset or invalid). */
+export function solverGapTestTimeoutMinutes(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(SOLVER_GAP_TEST_TIMEOUT_MAX_MINUTES, Math.max(SOLVER_GAP_TEST_TIMEOUT_MIN_MINUTES, Math.floor(value)))
+    : SOLVER_GAP_DEFAULT_TEST_TIMEOUT_MINUTES;
 }
 
 /** Save solver settings without touching the rest of the config. */

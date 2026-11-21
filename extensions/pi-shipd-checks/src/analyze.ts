@@ -24,7 +24,7 @@ function registerAuditorTool(pi: ExtensionAPI): void {
     description:
       "Use only when explicitly asked to audit the task, find test gaps, check test fairness, or precheck the solution. " +
       "Runs a local Codex CLI replica of the hosted Auto Review over agent_prompt.md, test.patch and solution.patch " +
-      "(refreshed with create_patches.sh when present; test.sh is ignored). Test agents find unfair tests, test gaps and " +
+      "(created by create_patches.sh before every run; test.sh is ignored). Test agents find unfair tests, test gaps and " +
       "test code-quality issues; solution agents find wrong outputs and solution code-quality issues; a combined " +
       "synthesis checks every finding against the hosted proof legs. It never writes or " +
       "modifies project files other than its report.",

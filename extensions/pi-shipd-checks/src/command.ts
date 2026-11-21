@@ -21,8 +21,11 @@ import {
   loadSolverGapConfig,
   loadSolverReviewConfig,
   persistFargateResourceUsage,
+  SOLVER_GAP_DEFAULT_TEST_TIMEOUT_MINUTES,
   SOLVER_GAP_SOLVER_COUNT_MAX,
   SOLVER_GAP_SOLVER_COUNT_MIN,
+  SOLVER_GAP_TEST_TIMEOUT_MAX_MINUTES,
+  SOLVER_GAP_TEST_TIMEOUT_MIN_MINUTES,
   SOLVER_GAP_TIMEOUT_MAX_MINUTES,
   SOLVER_GAP_TIMEOUT_MIN_MINUTES,
   SOLVER_REVIEW_TIMEOUT_MAX_MINUTES,
@@ -33,7 +36,7 @@ import {
   setAnalyzeProjectEnabled,
 } from "./config.js";
 import { runFargateCodexBenchmark } from "./fargate-runner.js";
-import { runCreatePatches, snapshotGitHead } from "./git.js";
+import { requirePatchesCreated, runCreatePatches, snapshotGitHead } from "./git.js";
 import { extractNewFilesFromPatch } from "./patch.js";
 import { PROGRESS_WIDGET_KEY, renderProgressLines } from "./progress.js";
 import { buildRunSummary, formatLocalTimestamp, loadExistingReport, mergeReport, REQUIRED_FILES } from "./report.js";
@@ -81,6 +84,7 @@ type ConfigRowId =
   | "solver-model"
   | "solvergap-thinking"
   | "solvergap-timeout"
+  | "solvergap-test-timeout"
   | "solvergap-solver-count"
   | "solverreview-model"
   | "solverreview-effort"
@@ -112,7 +116,7 @@ function buildConfigRows(
     {
       id: "solver-model",
       section: "Solver",
-      label: "Solver model (Codex)",
+      label: "Solver model",
       value: solverGap.modelId,
       kind: "cycle",
       values: [...CODEX_MODELS],
@@ -139,6 +143,19 @@ function buildConfigRows(
       ).map((v) => `${v} min`),
     },
     {
+      id: "solvergap-test-timeout",
+      section: "Solver",
+      label: "Solver test timeout",
+      value: `${solverGap.testTimeoutMinutes ?? SOLVER_GAP_DEFAULT_TEST_TIMEOUT_MINUTES} min`,
+      kind: "cycle",
+      values: Array.from(
+        {
+          length: Math.floor((SOLVER_GAP_TEST_TIMEOUT_MAX_MINUTES - SOLVER_GAP_TEST_TIMEOUT_MIN_MINUTES) / 5) + 1,
+        },
+        (_, i) => SOLVER_GAP_TEST_TIMEOUT_MIN_MINUTES + i * 5,
+      ).map((v) => `${v} min`),
+    },
+    {
       id: "solvergap-solver-count",
       section: "Solver",
       label: "Parallel agents",
@@ -152,7 +169,7 @@ function buildConfigRows(
     {
       id: "solverreview-model",
       section: "Solver",
-      label: "Solver reviewer model (Codex)",
+      label: "Reviewer model",
       value: solverReview.modelId,
       kind: "cycle",
       values: [...CODEX_MODELS],
@@ -160,7 +177,7 @@ function buildConfigRows(
     {
       id: "solverreview-effort",
       section: "Solver",
-      label: "Solver reviewer effort",
+      label: "Reviewer effort",
       value: solverReview.thinkingLevel,
       kind: "cycle",
       values: [...CODEX_REASONING_EFFORTS],
@@ -168,7 +185,7 @@ function buildConfigRows(
     {
       id: "solverreview-timeout",
       section: "Solver",
-      label: "Solver reviewer timeout",
+      label: "Reviewer timeout",
       value: `${solverReview.timeoutMinutes} min`,
       kind: "cycle",
       values: Array.from(
@@ -187,7 +204,7 @@ function buildConfigRows(
     {
       id: "auditor-model",
       section: "Analysis Tools",
-      label: "Auditor model (Codex)",
+      label: "Auditor model",
       value: auditor.modelId,
       kind: "cycle",
       values: [...CODEX_MODELS],
@@ -303,6 +320,12 @@ class ConfigMenuComponent {
       }
       if (row.id === "solvergap-timeout") {
         saveSolverGapConfig({ ...solverGap, timeoutMinutes: Number.parseInt(nextValue, 10) });
+        this.refresh();
+        this.onCycleSaved();
+        return;
+      }
+      if (row.id === "solvergap-test-timeout") {
+        saveSolverGapConfig({ ...solverGap, testTimeoutMinutes: Number.parseInt(nextValue, 10) });
         this.refresh();
         this.onCycleSaved();
         return;
@@ -495,9 +518,10 @@ export function registerChecksCommand(pi: ExtensionAPI) {
       const config = loadChecksConfig();
       const reviewerConfig = loadSolverReviewConfig();
       const reviewerModelName = `codex-cli/${reviewerConfig.modelId}`;
-      const requiredFiles = [...REQUIRED_FILES, "Dockerfile", "test.patch"];
-      const missingFiles = (files: string[]) => files.filter((file) => !existsSync(join(ctx.cwd, file)));
-      const missing = missingFiles(["create_patches.sh", ...requiredFiles]);
+      // test.patch and solution.patch come from create_patches.sh, so only the script itself is checked here.
+      const missing = ["create_patches.sh", ...REQUIRED_FILES, "Dockerfile"].filter(
+        (file) => !existsSync(join(ctx.cwd, file)),
+      );
       if (missing.length) {
         ctx.ui.notify(`Missing required file(s): ${missing.join(", ")}`, "error");
         return;
@@ -524,14 +548,10 @@ export function registerChecksCommand(pi: ExtensionAPI) {
       ctx.ui.notify(`checks (${tokens.join(" ")}) started. Press ${CANCEL_SHORTCUT_LABEL} to cancel.`, "info");
       let tempDir: string | undefined;
       try {
-        // Regenerate test.patch and solution.patch first, like the quality checks do.
+        // Let create_patches.sh create test.patch and solution.patch first, like the quality checks do.
         await runCreatePatches(pi, ctx.cwd, abort.signal);
         if (abort.signal.aborted) return;
-        const missingAfterPatches = missingFiles(requiredFiles);
-        if (missingAfterPatches.length) {
-          ctx.ui.notify(`Missing required file(s) after create_patches.sh: ${missingAfterPatches.join(", ")}`, "error");
-          return;
-        }
+        requirePatchesCreated(ctx.cwd, ["test.patch"]);
         const taskPrompt = readFileSync(join(ctx.cwd, "agent_prompt.md"), "utf-8");
         const dir = join(tmpdir(), `checks-${randomUUID()}`);
         mkdirSync(dir, { recursive: true });

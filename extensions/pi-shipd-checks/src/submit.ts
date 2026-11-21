@@ -14,7 +14,7 @@ import { chromium } from "playwright-core";
 import { Type } from "typebox";
 import { loadFargateConfig } from "./config.js";
 import { runFargatePatchPrecheck } from "./fargate-runner.js";
-import { runCreatePatches, snapshotGitHead } from "./git.js";
+import { requirePatchesCreated, runCreatePatches, snapshotGitHead } from "./git.js";
 import { formatDuration } from "./report.js";
 import type { PatchPrecheckResult } from "./types.js";
 
@@ -278,15 +278,15 @@ async function readSubmissionFiles(pi: ExtensionAPI, cwd: string, signal?: Abort
   const missing = [
     ["create_patches.sh", scriptPath],
     ["agent_prompt.md", promptPath],
-    ["test.patch", testPatchPath],
-    ["solution.patch", solutionPatchPath],
   ]
     .filter(([, path]) => !existsSync(path))
     .map(([name]) => name);
   if (missing.length) throw new Error(`Missing required file(s) in the working directory: ${missing.join(", ")}`);
 
   checkCancelled(signal);
+  // create_patches.sh is the only source of the patches.
   await runCreatePatches(pi, cwd, signal);
+  requirePatchesCreated(cwd, ["test.patch", "solution.patch"]);
 
   checkCancelled(signal);
   const [taskPrompt, testPatch, solutionPatch] = await Promise.all([

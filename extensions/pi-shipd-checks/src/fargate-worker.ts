@@ -158,6 +158,7 @@ function loadBootstrap(): WorkerMode {
     ...(mode === "solver"
       ? [
           ["agentTimeoutMinutes", "SHIPD_AGENT_TIMEOUT_MINUTES"],
+          ["testTimeoutMinutes", "SHIPD_TEST_TIMEOUT_MINUTES"],
           ["solverCount", "SHIPD_SOLVER_COUNT"],
         ]
       : []),
@@ -1069,6 +1070,7 @@ function restrictedWorkspaceEnv(sourceEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv
     "SHIPD_CODEX_MODEL",
     "SHIPD_CODEX_EFFORT",
     "SHIPD_AGENT_TIMEOUT_MINUTES",
+    "SHIPD_TEST_TIMEOUT_MINUTES",
     "SHIPD_SOLVER_COUNT",
     "SHIPD_RESOURCE_PROFILE",
     "SHIPD_MODE",
@@ -1136,6 +1138,9 @@ function codexToolRestrictionArgs(): string[] {
   return [
     "-c",
     `model_catalog_json=${JSON.stringify(SOLVER_MODEL_CATALOG_PATH)}`,
+    // Web search is a hosted tool that prompt-input cannot show, so prepareSolverToolset cannot verify it: disable it here.
+    "-c",
+    'web_search="disabled"',
     "-c",
     "tools.update_plan={enabled=true}",
     "-c",
@@ -1467,7 +1472,8 @@ async function runSolver(
   if (diffResult.code !== 0)
     error = error ?? `Could not capture solver diff: ${diffResult.stderr || diffResult.stdout}`;
   await restoreChangedTests(workspace.solverDir, workspace.baselineCommit, env);
-  const testTimeoutMs = timeoutMinutes * 60 * 1000;
+  // Each suite (base, then new) gets its own limit, separate from the Codex session's.
+  const testTimeoutMs = Number.parseInt(requiredEnv("SHIPD_TEST_TIMEOUT_MINUTES"), 10) * 60 * 1000;
   const testEnv = restrictedWorkspaceEnv(env);
   let baseTests: SolverTestResult;
   let newTests: SolverTestResult;

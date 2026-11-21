@@ -47,7 +47,7 @@ const INLINE_LIMIT = 150_000;
 
 export const QUALITY_CATEGORIES = ["Clutter", "Conventions", "Design", "Practice", "Scope", "Stale callers"] as const;
 
-const WORKSPACE = `Workspace (your current directory; you have read-only tools):
+const WORKSPACE = `Workspace (your current directory). Read it with read-only shell commands (for example rg, sed -n, head, ls, find); the sandbox blocks writes, and you must not run tests, builds or installs:
 - ${REPO_DIR}/ is the pinned repository at its base commit. Neither patch is applied there: reconstruct patched code from the diffs.
 - ${PROBLEM} is the task description given to solvers (problem.md).
 - ${TEST_PATCH} holds the hidden tests; ${SOLUTION_PATCH} is the reference solution.

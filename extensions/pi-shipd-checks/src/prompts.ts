@@ -185,7 +185,8 @@ export function buildSolverReviewPrompt(
       (hasReferenceSolution
         ? "a 'Suggested improvements to our solution' section with the comparison findings (or say none found); "
         : "") +
-      "and prompt/test/diff/log evidence for every attribution. Clearly label uncertain conclusions. Do not edit " +
-      "files or run commands.",
+      "and prompt/test/diff/log evidence for every attribution. Clearly label uncertain conclusions. Read files with " +
+      "read-only shell commands (for example rg, sed -n, head, ls, find); the sandbox is read-only. Do not edit files, " +
+      "apply patches, install packages, or run tests or builds.",
   ].join("\n");
 }
