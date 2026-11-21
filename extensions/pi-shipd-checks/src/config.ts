@@ -1,5 +1,5 @@
 /**
- * Global config (~/.pi/agent/checks-config.json) for the Claude CLI benchmark, reviewer and auditor settings, and Fargate resources, plus helpers for reading
+ * Global config (~/.pi/agent/checks-config.json) for the Codex CLI benchmark, reviewer and auditor settings, and Fargate resources, plus helpers for reading
  * pi's own settings.json (enabled models, shell path) used by unrelated tools.
  */
 
@@ -9,11 +9,10 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
   AuditorConfig,
   ChecksConfig,
-  ClaudeThinkingLevel,
+  CodexReasoningEffort,
   FargateConfig,
   FargateResourceProfile,
   FargateResourceUsage,
-  PromptHumanizerConfig,
   SolverGapConfig,
   SolverReviewConfig,
   ThinkingLevel,
@@ -40,10 +39,28 @@ export const AUDITOR_CONCURRENCY_MIN = 1;
 export const AUDITOR_CONCURRENCY_MAX = 8;
 export const AUDITOR_DEFAULT_CONCURRENCY = 4;
 
-export const HUMANIZER_MIN_CANDIDATE_COUNT = 1;
-export const HUMANIZER_MAX_CANDIDATE_COUNT = 10;
-export const HUMANIZER_DEFAULT_CANDIDATE_COUNT = 3;
-export const HUMANIZER_DEFAULT_TOP_COUNT = 2;
+/** Codex CLI models offered in `/checks --config`; any other saved model ID is passed through unchanged. */
+export const CODEX_MODELS = ["gpt-6-luna", "gpt-6.2-sol", "gpt-6.2-astra"] as const;
+export const CODEX_REASONING_EFFORTS: readonly CodexReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
+const CODEX_SOLVER_DEFAULT_MODEL = "gpt-6.2-sol";
+const CODEX_REVIEWER_DEFAULT_MODEL = "gpt-6.2-astra";
+/** Claude aliases saved by earlier versions, mapped to the comparable Codex tier. */
+const LEGACY_CLAUDE_MODELS: Record<string, string> = {
+  haiku: "gpt-6-luna",
+  sonnet: "gpt-6.2-sol",
+  opus: "gpt-6.2-astra",
+};
+
+function codexModel(value: unknown, fallback: string): string {
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  const model = value.trim();
+  if (LEGACY_CLAUDE_MODELS[model]) return LEGACY_CLAUDE_MODELS[model];
+  return /^claude/i.test(model) ? fallback : model;
+}
+
+function codexEffort(value: unknown, fallback: CodexReasoningEffort): CodexReasoningEffort {
+  return CODEX_REASONING_EFFORTS.includes(value as CodexReasoningEffort) ? (value as CodexReasoningEffort) : fallback;
+}
 
 export const FARGATE_RESOURCE_PROFILES = {
   small: { cpu: 1, memoryMiB: 2048 },
@@ -151,7 +168,7 @@ export function persistFargateResourceUsage(cwd: string, usage: FargateResourceU
   if (next !== config) saveChecksConfig(next);
 }
 
-/** Solver settings are independent of Pi model configuration because solvers now use Claude CLI. */
+/** Solver settings are independent of Pi model configuration because solvers use Codex CLI. */
 export function loadSolverGapConfig(): SolverGapConfig {
   const raw = readRawChecksConfig().solverGap;
   const solverGap = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Partial<SolverGapConfig>) : {};
@@ -164,20 +181,12 @@ export function loadSolverGapConfig(): SolverGapConfig {
   const solverCount = Number.isInteger(solverGap.solverCount)
     ? Math.min(SOLVER_GAP_SOLVER_COUNT_MAX, Math.max(SOLVER_GAP_SOLVER_COUNT_MIN, solverGap.solverCount as number))
     : SOLVER_GAP_DEFAULT_SOLVER_COUNT;
-  const thinkingLevels: ClaudeThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
   return {
-    modelId: ["haiku", "sonnet", "opus"].includes(solverGap.modelId ?? "") ? (solverGap.modelId as string) : "sonnet",
-    thinkingLevel:
-      solverGap.thinkingLevel && thinkingLevels.includes(solverGap.thinkingLevel) ? solverGap.thinkingLevel : "low",
+    modelId: codexModel(solverGap.modelId, CODEX_SOLVER_DEFAULT_MODEL),
+    thinkingLevel: codexEffort(solverGap.thinkingLevel, "low"),
     timeoutMinutes,
     solverCount,
   };
-}
-
-/** Path of the local Claude setup-token file used by Fargate solver runs, if configured. */
-export function loadClaudeOAuthTokenFile(): string | undefined {
-  const file = readRawChecksConfig().claudeOAuthTokenFile;
-  return typeof file === "string" && file.trim() ? file.trim() : undefined;
 }
 
 /** Save solver settings without touching the rest of the config. */
@@ -188,7 +197,7 @@ export function saveSolverGapConfig(solverGap: SolverGapConfig): void {
   writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, solverGap }, null, 2), "utf-8");
 }
 
-/** Local Claude CLI settings for the `/checks --solve` fairness reviewer; independent of Pi model configuration. */
+/** Local Codex CLI settings for the `/checks --solve` fairness reviewer; independent of Pi model configuration. */
 export function loadSolverReviewConfig(): SolverReviewConfig {
   const raw = readRawChecksConfig().solverReview;
   const solverReview =
@@ -199,15 +208,9 @@ export function loadSolverReviewConfig(): SolverReviewConfig {
         Math.max(SOLVER_REVIEW_TIMEOUT_MIN_MINUTES, solverReview.timeoutMinutes as number),
       )
     : SOLVER_REVIEW_DEFAULT_TIMEOUT_MINUTES;
-  const thinkingLevels: ClaudeThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
   return {
-    modelId: ["haiku", "sonnet", "opus"].includes(solverReview.modelId ?? "")
-      ? (solverReview.modelId as string)
-      : "opus",
-    thinkingLevel:
-      solverReview.thinkingLevel && thinkingLevels.includes(solverReview.thinkingLevel)
-        ? solverReview.thinkingLevel
-        : "high",
+    modelId: codexModel(solverReview.modelId, CODEX_REVIEWER_DEFAULT_MODEL),
+    thinkingLevel: codexEffort(solverReview.thinkingLevel, "high"),
     timeoutMinutes,
   };
 }
@@ -219,7 +222,7 @@ export function saveSolverReviewConfig(solverReview: SolverReviewConfig): void {
   writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, solverReview }, null, 2), "utf-8");
 }
 
-/** Local Claude CLI settings for the `auditor` tool; a saved `autoReview` block from earlier versions still applies. */
+/** Local Codex CLI settings for the `auditor` tool; a saved `autoReview` block from earlier versions still applies. */
 export function loadAuditorConfig(): AuditorConfig {
   const config = readRawChecksConfig();
   const raw = config.auditor ?? config.autoReview;
@@ -230,11 +233,9 @@ export function loadAuditorConfig(): AuditorConfig {
   const concurrency = Number.isInteger(auditor.concurrency)
     ? Math.min(AUDITOR_CONCURRENCY_MAX, Math.max(AUDITOR_CONCURRENCY_MIN, auditor.concurrency as number))
     : AUDITOR_DEFAULT_CONCURRENCY;
-  const thinkingLevels: ClaudeThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
   return {
-    modelId: ["haiku", "sonnet", "opus"].includes(auditor.modelId ?? "") ? (auditor.modelId as string) : "opus",
-    thinkingLevel:
-      auditor.thinkingLevel && thinkingLevels.includes(auditor.thinkingLevel) ? auditor.thinkingLevel : "high",
+    modelId: codexModel(auditor.modelId, CODEX_REVIEWER_DEFAULT_MODEL),
+    thinkingLevel: codexEffort(auditor.thinkingLevel, "high"),
     timeoutMinutes,
     concurrency,
   };
@@ -245,34 +246,6 @@ export function saveAuditorConfig(auditor: AuditorConfig): void {
   const dir = dirname(CONFIG_PATH);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify({ ...raw, auditor }, null, 2), "utf-8");
-}
-
-/** Candidate counts for the humanizer can be configured even when reviewer models are unset. */
-export function loadPromptHumanizerConfig(): {
-  candidateCount: number;
-  topCount: number;
-  coreweaveApiKeyFile?: string;
-} {
-  const raw = readRawChecksConfig().promptHumanizer;
-  const config = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as PromptHumanizerConfig) : {};
-  const isHumanizerCount = (value: unknown): value is number =>
-    typeof value === "number" &&
-    Number.isInteger(value) &&
-    value >= HUMANIZER_MIN_CANDIDATE_COUNT &&
-    value <= HUMANIZER_MAX_CANDIDATE_COUNT;
-  const candidateCount = isHumanizerCount(config.candidateCount)
-    ? config.candidateCount
-    : HUMANIZER_DEFAULT_CANDIDATE_COUNT;
-  const configuredTopCount = isHumanizerCount(config.topCount) ? config.topCount : HUMANIZER_DEFAULT_TOP_COUNT;
-  const coreweaveApiKeyFile =
-    typeof config.coreweaveApiKeyFile === "string" && config.coreweaveApiKeyFile.trim()
-      ? config.coreweaveApiKeyFile.trim()
-      : undefined;
-  return {
-    candidateCount,
-    topCount: Math.min(configuredTopCount, candidateCount),
-    coreweaveApiKeyFile,
-  };
 }
 
 /** Read the existing checks config without requiring model settings to be configured yet. */

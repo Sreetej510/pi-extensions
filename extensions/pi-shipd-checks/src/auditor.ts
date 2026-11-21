@@ -1,6 +1,6 @@
 /**
  * The `auditor` tool's engine: a local replica of the hosted Auto Review for the tests and the solution, ported from
- * the shipd-workflow rulebook (shipd-v5/rulebook). Read-only Claude CLI reviewers run on this machine:
+ * the shipd-workflow rulebook (shipd-v5/rulebook). Read-only Codex CLI reviewers run on this machine:
  *   round 1: typed agents run in parallel: test agents own test.patch (unfair tests, missing coverage, test code
  *            quality) and solution agents own solution.patch (wrong outputs, solution code quality). How many of each
  *            type run depends on the size of each patch; each agent gets its own slice;
@@ -27,7 +27,7 @@ import {
   type SolutionUnit,
   type SynthesisCandidate,
 } from "./auditor-prompts.js";
-import { extractJsonAnswer, runClaude } from "./claude-cli.js";
+import { extractJsonAnswer, runCodex } from "./codex-cli.js";
 import { getShellExecutable, loadAuditorConfig } from "./config.js";
 import { snapshotGitHead } from "./git.js";
 import { extractNewFilesFromPatch, splitPatchFiles, splitPatchHunks } from "./patch.js";
@@ -76,7 +76,7 @@ async function runReviewer(
   let last: ReviewerResult | undefined;
   // a stalled or unparsable headless answer is retried once (answer_runner.py)
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const run = await runClaude({ cwd, prompt: task.prompt, config, signal });
+    const run = await runCodex({ cwd, prompt: task.prompt, config, signal });
     const answer = run.status === "ok" ? extractJsonAnswer(run.text) : undefined;
     last = {
       name: task.name,
@@ -492,7 +492,7 @@ function renderMarkdown(result: AuditResult, config: AuditorConfig): string {
   const md = [
     `# Auditor: ${result.verdict}`,
     "",
-    `Test Quality ${result.testQuality} · Solution Quality ${result.solutionQuality} · ${count("unfairTests")} unfair-test, ${count("testGaps")} test-gap, ${count("testImprovements")} test-improvement, ${count("solutionGaps")} solution-gap, ${count("solutionImprovements")} solution-improvement findings · ${result.testsGraded} tests graded · ${formatDuration(result.durationMs)} · claude ${config.modelId} effort ${config.thinkingLevel}`,
+    `Test Quality ${result.testQuality} · Solution Quality ${result.solutionQuality} · ${count("unfairTests")} unfair-test, ${count("testGaps")} test-gap, ${count("testImprovements")} test-improvement, ${count("solutionGaps")} solution-gap, ${count("solutionImprovements")} solution-improvement findings · ${result.testsGraded} tests graded · ${formatDuration(result.durationMs)} · codex ${config.modelId} effort ${config.thinkingLevel}`,
     "",
     "A finding gates only when synthesis keeps it HIGH. No counter-test or mutant was executed: legs that need execution were decided from the files.",
   ];

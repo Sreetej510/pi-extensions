@@ -1,10 +1,10 @@
-/** The `--solve` fairness reviewer: one read-only local Claude CLI session over all solver runs. */
+/** The `--solve` fairness reviewer: one read-only local Codex CLI session over all solver runs. */
 
-import { runClaude } from "./claude-cli.js";
+import { runCodex } from "./codex-cli.js";
 import { buildSolverReviewPrompt } from "./prompts.js";
 import type { SolverReviewConfig, SolverReviewResult, SolverRunResult } from "./types.js";
 
-/** Runs the benchmark fairness reviewer as one read-only local Claude CLI session, like the auditor reviewers. */
+/** Runs the benchmark fairness reviewer as one read-only local Codex CLI session, like the auditor reviewers. */
 export async function runSolverReview(opts: {
   tempDir: string;
   config: SolverReviewConfig;
@@ -16,7 +16,7 @@ export async function runSolverReview(opts: {
   hasReferenceSolution: boolean;
   cancelSignal: AbortSignal;
 }): Promise<SolverReviewResult> {
-  const run = await runClaude({
+  const run = await runCodex({
     cwd: opts.tempDir,
     prompt: buildSolverReviewPrompt(
       opts.taskPrompt,
@@ -33,6 +33,6 @@ export async function runSolverReview(opts: {
   if (run.status !== "ok") {
     return { status: run.status, text, ...tokenUsage, ...(run.error ? { error: run.error } : {}) };
   }
-  if (!text) return { status: "error", text: "Local Claude reviewer returned no text.", error: "No reviewer output." };
+  if (!text) return { status: "error", text: "Local Codex reviewer returned no text.", error: "No reviewer output." };
   return { status: "ok", text, ...tokenUsage };
 }

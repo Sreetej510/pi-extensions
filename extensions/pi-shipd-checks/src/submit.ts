@@ -1014,7 +1014,7 @@ function aiPromptFailure(evaluation: JsonRecord): JsonRecord {
   const result: JsonRecord = {
     verdict: "FAIL",
     reason:
-      "Prompt Quality flagged this prompt as AI. Use humanize-agent-prompt for a broader rewrite, or make a small targeted manual change if the flag is due to a recent edit.",
+      "Prompt Quality flagged this prompt as AI. Rewrite the flagged parts of agent_prompt.md in plainer, more direct language, or make a small targeted manual change if the flag is due to a recent edit.",
   };
   const comments = getMajorPromptComments(evaluation).filter((comment) => !isAIPromptCategory(comment.category));
   if (comments.length > 0) result.comments = comments;

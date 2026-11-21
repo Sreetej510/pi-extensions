@@ -5,11 +5,11 @@
  */
 
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "off";
-export type ClaudeThinkingLevel = "low" | "medium" | "high" | "xhigh" | "max";
+/** Codex CLI `model_reasoning_effort` levels offered in settings. */
+export type CodexReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type Verdict = "PASS" | "FAIL";
 
-/** Claude CLI model and execution settings for Fargate solvers, retained under `solverGap` for config compatibility. */
 export type FargateResourceProfile = "small" | "medium" | "large";
 
 export type PatchPrecheckPhase =
@@ -94,20 +94,20 @@ export interface FargateConfig {
 }
 
 export interface SolverGapConfig {
-  /** Claude Code CLI model alias or model ID used by the Fargate solvers. */
+  /** Codex CLI model ID used by the Fargate solvers. */
   modelId: string;
-  /** Claude Code CLI solver effort passed explicitly through as `--effort`. */
-  thinkingLevel: ClaudeThinkingLevel;
+  /** Codex CLI solver reasoning effort, passed as `-c model_reasoning_effort=<level>`. */
+  thinkingLevel: CodexReasoningEffort;
   timeoutMinutes: number;
   /** Number of parallel solver agents to run. */
   solverCount: number;
 }
 
 export interface AuditorConfig {
-  /** Claude Code CLI model alias or model ID used by the `auditor` tool's reviewers. */
+  /** Codex CLI model ID used by the `auditor` tool's reviewers. */
   modelId: string;
-  /** Claude Code CLI reviewer effort passed through as `--effort`. */
-  thinkingLevel: ClaudeThinkingLevel;
+  /** Codex CLI reviewer reasoning effort, passed as `-c model_reasoning_effort=<level>`. */
+  thinkingLevel: CodexReasoningEffort;
   /** Timeout for each reviewer invocation. */
   timeoutMinutes: number;
   /** Number of reviewer invocations run at the same time. */
@@ -115,37 +115,24 @@ export interface AuditorConfig {
 }
 
 export interface SolverReviewConfig {
-  /** Claude Code CLI model alias or model ID used by the local `/checks --solve` fairness reviewer. */
+  /** Codex CLI model ID used by the local `/checks --solve` fairness reviewer. */
   modelId: string;
-  /** Claude Code CLI reviewer effort passed through as `--effort`. */
-  thinkingLevel: ClaudeThinkingLevel;
+  /** Codex CLI reviewer reasoning effort, passed as `-c model_reasoning_effort=<level>`. */
+  thinkingLevel: CodexReasoningEffort;
   /** Timeout for the reviewer invocation. */
   timeoutMinutes: number;
 }
 
-export interface PromptHumanizerConfig {
-  /** Number of humanizer drafts to request from CoreWeave (1–10). */
-  candidateCount?: number;
-  /** Maximum number of cutoff-passing drafts to return (1–10, capped at candidateCount). */
-  topCount?: number;
-  /** Optional path to a local CoreWeave API-key file; the secret itself is never stored in this config. */
-  coreweaveApiKeyFile?: string;
-}
-
-/** Single combined `checks-config.json`: Claude benchmark/review settings and local analysis-tool settings. */
+/** Single combined `checks-config.json`: Codex benchmark/review settings and local analysis-tool settings. */
 export interface ChecksConfig {
-  /** Optional local file containing a Claude setup-token for Fargate solver runs. */
-  claudeOAuthTokenFile?: string;
   fargate?: FargateConfig;
   solverGap?: SolverGapConfig;
-  /** Local Claude CLI settings for the `/checks --solve` fairness reviewer. */
+  /** Local Codex CLI settings for the `/checks --solve` fairness reviewer. */
   solverReview?: SolverReviewConfig;
-  /** Local Claude CLI settings for the `auditor` tool. */
+  /** Local Codex CLI settings for the `auditor` tool. */
   auditor?: AuditorConfig;
   /** Project folders where the agent-callable analysis tools are enabled. */
   enabledProjects?: string[];
-  /** Candidate-count settings for the opt-in agent-prompt humanizer. */
-  promptHumanizer?: PromptHumanizerConfig;
 }
 
 export interface ReviewReport {
@@ -177,7 +164,7 @@ export interface CommandOption {
   description: string;
 }
 
-/** A test-suite run performed by the harness after one Claude CLI solver invocation. */
+/** A test-suite run performed by the harness after one Codex CLI solver invocation. */
 export interface SolverTestResult {
   exitCode: number;
   passed: boolean;
@@ -191,7 +178,7 @@ export interface SolverTestResult {
   timedOut?: boolean;
 }
 
-/** Aggregate token metrics reported by Claude Code or a local Pi model session. */
+/** Aggregate token metrics reported by Codex CLI or a local Pi model session. */
 export interface TokenUsage {
   inputTokens?: number;
   cacheReadInputTokens?: number;
@@ -213,7 +200,7 @@ export interface TokenUsage {
   costUsd?: number;
 }
 
-/** Outcome of one isolated Claude CLI solver run; base/new tests are independently verified afterward. */
+/** Outcome of one isolated Codex CLI solver run; base/new tests are independently verified afterward. */
 export interface SolverRunResult {
   index: number;
   status: "ok" | "timedOut" | "cancelled" | "error";
@@ -234,7 +221,7 @@ export interface SolverRunResult {
   artifactsDir?: string;
 }
 
-/** Read-only Claude CLI reviewer assessment of all agent solutions and the repository's tests. */
+/** Read-only Codex CLI reviewer assessment of all agent solutions and the repository's tests. */
 export interface SolverReviewResult {
   status: "ok" | "timedOut" | "cancelled" | "error";
   text: string;

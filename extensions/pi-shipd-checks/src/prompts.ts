@@ -108,7 +108,7 @@ export function buildReviewerPrompt(role: ReviewerRole, rubric: string, fairness
   return parts.join("\n");
 }
 
-// ── Claude CLI benchmark solvers and local Claude CLI fairness reviewer ─────
+// ── Codex CLI benchmark solvers and local Codex CLI fairness reviewer ──────
 
 function solverOutcomeLine(result: SolverRunResult): string {
   const tests = (value: boolean | undefined) => (value === undefined ? "not run" : value ? "PASS" : "FAIL");

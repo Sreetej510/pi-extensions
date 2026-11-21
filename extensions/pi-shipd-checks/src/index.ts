@@ -1,14 +1,14 @@
 /**
  * Shipd Checks Extension for pi
  *
- * The agent-callable `auditor` (a local Claude CLI replica of the hosted Auto Review: unfair tests, test gaps,
- * solution gaps and improvements), prompt humanization, Shipd quality checks, and a Claude CLI benchmark runner for
+ * The agent-callable `auditor` (a local Codex CLI replica of the hosted Auto Review: unfair tests, test gaps,
+ * solution gaps and improvements), Shipd quality checks, and a Codex CLI benchmark runner for
  * tasks described by `agent_prompt.md`.
  *
  * Benchmark flow:
  *   1. Snapshot git HEAD without touching the working tree; copy only agent_prompt.md as task input.
- *   2. Run independent Claude CLI solvers in Fargate, then execute base/new tests and save their logs.
- *   3. Run a read-only local Claude CLI reviewer over the prompt, patched tests, all diffs, and all results.
+ *   2. Run independent Codex CLI solvers in Fargate, then execute base/new tests and save their logs.
+ *   3. Run a read-only local Codex CLI reviewer over the prompt, patched tests, all diffs, and all results.
  *   4. Post the assessment and merge benchmark results into shipd_report.json.
  *
  * Commands:
@@ -17,19 +17,20 @@
  *   /shipd:auth             open a browser for first-time Shipd sign-in
  *   /shipd:link <url>       save the Shipd job link for this chat session
  *   /checks                 open a menu for config or solve
- *   /checks --config        configure Claude solver, reviewer and auditor settings
- *   /checks --solve         run Claude solvers, base/new tests, and a fairness review
+ *   /checks --config        configure Codex solver, reviewer and auditor settings
+ *   /checks --solve         run Codex solvers, base/new tests, and a fairness review
  * Shortcut: Ctrl+Shift+X cancels an in-progress /checks run.
  *
  * File layout:
  *   index.ts     extension entry point (this file) — renderer, shortcut, command registration
  *   command.ts   /checks command: argument parsing, settings, and run orchestration
- *   agents.ts    the --solve fairness reviewer (one Claude CLI session)
- *   analyze.ts   the agent-callable auditor tool (and humanizer registration)
- *   auditor*.ts  the auditor's engine: Claude CLI reviewers, synthesis, grouping, report; prompts and calibration data
- *   claude-cli.ts  read-only local Claude CLI runner shared by the auditor and the --solve reviewer
+ *   agents.ts    the --solve fairness reviewer (one Codex CLI session)
+ *   analyze.ts   the agent-callable auditor tool
+ *   auditor*.ts  the auditor's engine: Codex CLI reviewers, synthesis, grouping, report; prompts and calibration data
+ *   codex-cli.ts   read-only local Codex CLI runner shared by the auditor and the --solve reviewer
+ *   codex-auth.ts  pre-run check and forced refresh of the local Codex login used by Fargate solvers
  *   prompts.ts   task and reviewer prompt text
- *   fargate-runner.ts/worker.ts remote Claude solver/test execution and report transport
+ *   fargate-runner.ts/worker.ts remote Codex solver/test execution and report transport
  *   report.ts    shipd_report.json load/merge/summary logic
  *   config.ts    ~/.pi/agent/checks-config.json + settings.json helpers
  *   git.ts       clean git HEAD snapshot into a scratch directory
@@ -59,24 +60,26 @@ const CANCEL_SHORTCUT = Key.ctrlShift("x");
 
 export default function shipdChecksExtension(pi: ExtensionAPI) {
   pi.registerCommand("analyze:on", {
-    description: "Enable the auditor and prompt-humanizer tools for this project folder",
+    description: "Enable the auditor tool for this project folder",
     handler: async (_args, ctx) => {
       setAnalyzeEnabled(pi, ctx.cwd, true);
-      ctx.ui.notify("Auditor and prompt-humanizer tools ON in this project", "info");
+      ctx.ui.notify("Auditor tool ON in this project", "info");
     },
   });
 
   pi.registerCommand("analyze:off", {
-    description: "Disable the auditor and prompt-humanizer tools for this project folder",
+    description: "Disable the auditor tool for this project folder",
     handler: async (_args, ctx) => {
       setAnalyzeEnabled(pi, ctx.cwd, false);
-      ctx.ui.notify("Auditor and prompt-humanizer tools OFF in this project", "info");
+      ctx.ui.notify("Auditor tool OFF in this project", "info");
     },
   });
 
   pi.registerMessageRenderer<{
     gapsCount?: number;
     showGaps?: boolean;
+    showCodexBenchmark?: boolean;
+    /** Written by versions that ran Claude CLI solvers; kept so older session messages still render. */
     showClaudeBenchmark?: boolean;
     solverDetails?: SolverSummaryDetail[];
     solverReviewStatus?: "ok" | "timedOut" | "error";
@@ -101,11 +104,11 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
       );
     }
 
-    if (details.showClaudeBenchmark) {
+    if (details.showCodexBenchmark ?? details.showClaudeBenchmark) {
       const solvers = details.solverDetails ?? [];
       const passCount = solvers.filter((s) => s.passed).length;
       container.addChild(new Spacer(1));
-      addLine(theme.bold(theme.fg("accent", "Claude agent run")));
+      addLine(theme.bold(theme.fg("accent", "Codex agent run")));
       for (const s of solvers) {
         const statusIcon = s.passed ? theme.fg("success", "✓") : theme.fg("error", "✗");
         const statusLabel = s.passed ? "both suites passed" : s.status === "ok" ? "test failure" : s.status;
@@ -156,7 +159,7 @@ export default function shipdChecksExtension(pi: ExtensionAPI) {
   registerChecksCommand(pi);
 }
 
-/** Keeps the auditor and humanizer tools visible only while enabled (like HPC tools). */
+/** Keeps the auditor tool visible only while enabled (like HPC tools). */
 function registerAnalysisToolsSync(pi: ExtensionAPI) {
   pi.on("session_start", (event, ctx) => {
     // New, resume, reload, fork — load the persisted setting for this session.

@@ -36,7 +36,7 @@ export interface MergeReportInput {
   gapAnalysisIncomplete: boolean;
   gapFinderStatus: string;
   gapFilterStatus: string;
-  runClaudeBenchmark: boolean;
+  runCodexBenchmark: boolean;
   solverConfig?: SolverGapConfig;
   solverResults: SolverRunResult[];
   fargateResourceUsage?: FargateResourceUsage;
@@ -58,7 +58,7 @@ export function mergeReport(input: MergeReportInput): Record<string, unknown> {
       merged.testGapAnalysisNote = `Gap analysis did not fully complete (sentence finder: ${input.gapFinderStatus}, review: ${input.gapFilterStatus}); testGaps may be incomplete.`;
     } else delete merged.testGapAnalysisNote;
   }
-  if (input.runClaudeBenchmark) {
+  if (input.runCodexBenchmark) {
     delete merged.model;
     delete merged.thinkingLevel;
     if (input.solverConfig) {
@@ -168,7 +168,7 @@ export interface RunSummary {
   details: {
     gapsCount: number;
     showGaps: boolean;
-    showClaudeBenchmark: boolean;
+    showCodexBenchmark: boolean;
     solverDetails: SolverSummaryDetail[];
     solverReviewStatus?: SolverReviewResult["status"];
     solverReviewText?: string;
@@ -178,21 +178,21 @@ export interface RunSummary {
 export function buildRunSummary(opts: {
   merged: Record<string, unknown>;
   runGapFinder: boolean;
-  runClaudeBenchmark: boolean;
+  runCodexBenchmark: boolean;
 }): RunSummary {
   const gapsCount = Array.isArray(opts.merged.testGaps) ? opts.merged.testGaps.length : 0;
   const solverDetails: SolverSummaryDetail[] =
-    opts.runClaudeBenchmark && Array.isArray(opts.merged.solverRunSummary)
+    opts.runCodexBenchmark && Array.isArray(opts.merged.solverRunSummary)
       ? (opts.merged.solverRunSummary as SolverSummaryDetail[]).map((s) => ({ ...s, durationMs: s.durationMs ?? 0 }))
       : [];
   const review = opts.merged.solverReview as SolverReviewResult | undefined;
   const parts: string[] = [];
   if (opts.runGapFinder) parts.push(gapsCount > 0 ? `${gapsCount} test gap(s) found` : "no test gaps found");
-  if (opts.runClaudeBenchmark) {
+  if (opts.runCodexBenchmark) {
     const basePassed = solverDetails.filter((solver) => solver.basePassed).length;
     const newPassed = solverDetails.filter((solver) => solver.newPassed).length;
     parts.push(
-      `${solverDetails.length} Claude agent(s): base ${basePassed}/${solverDetails.length}, new ${newPassed}/${solverDetails.length}`,
+      `${solverDetails.length} Codex agent(s): base ${basePassed}/${solverDetails.length}, new ${newPassed}/${solverDetails.length}`,
     );
     parts.push(`review ${review?.status ?? "not completed"}`);
   }
@@ -201,7 +201,7 @@ export function buildRunSummary(opts: {
     details: {
       gapsCount,
       showGaps: opts.runGapFinder,
-      showClaudeBenchmark: opts.runClaudeBenchmark,
+      showCodexBenchmark: opts.runCodexBenchmark,
       solverDetails,
       solverReviewStatus: review?.status,
       solverReviewText: review?.text,

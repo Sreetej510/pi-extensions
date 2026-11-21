@@ -1,10 +1,27 @@
-import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  chmodSync,
+  chownSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join, posix as posixPath } from "node:path";
 import { gzipSync } from "node:zlib";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { XMLParser } from "fast-xml-parser";
+import {
+  codexFinalText,
+  codexRolloutContextUsage,
+  codexStreamError,
+  codexTokenUsage,
+  parseCodexEvents,
+} from "./codex-cli.js";
 import { TaskResourceUsageSampler } from "./resource-usage.js";
 import type {
   FargateResourceProfile,
@@ -45,7 +62,6 @@ let taskPrompt = "";
 let testPatchSource: { kind: "url"; value: string } | { kind: "s3"; bucket: string; key: string } | undefined;
 let testPatchContent: Promise<string> | undefined;
 
-const CLAUDE_CONFIG_DIR = "/opt/shipd-claude";
 const SOLVERS_DIR = "/work/solvers";
 const TAIL_CHARS = 4000;
 const WORKSPACE_PYTHON_WRAPPER = [
@@ -77,7 +93,7 @@ function loadBootstrap(): WorkerMode {
 
   const directKeys =
     mode === "solver"
-      ? ["bucket", "region", "sourceKey", "claudeTokenKey", "testPatchKey", "resultKey"]
+      ? ["bucket", "region", "sourceKey", "codexAuthKey", "testPatchKey", "resultKey"]
       : ["bucket", "region", "sourceKey", "resultKey"];
   const directS3 = directKeys.every((key) => typeof bootstrap[key] === "string" && bootstrap[key]);
   if (mode === "solver") {
@@ -100,15 +116,15 @@ function loadBootstrap(): WorkerMode {
   const envNames: Record<string, string> = {
     planB64: "SHIPD_PLAN_B64",
     resourceProfile: "SHIPD_RESOURCE_PROFILE",
-    modelId: "SHIPD_CLAUDE_MODEL",
-    thinkingLevel: "SHIPD_CLAUDE_EFFORT",
+    modelId: "SHIPD_CODEX_MODEL",
+    thinkingLevel: "SHIPD_CODEX_EFFORT",
   };
   if (directS3) {
     const directFields = [
       ["bucket", "SHIPD_S3_BUCKET"],
       ["region", "SHIPD_S3_REGION"],
       ["sourceKey", "SHIPD_S3_SOURCE_KEY"],
-      ...(mode === "solver" ? [["claudeTokenKey", "SHIPD_S3_CLAUDE_TOKEN_KEY"]] : []),
+      ...(mode === "solver" ? [["codexAuthKey", "SHIPD_S3_CODEX_AUTH_KEY"]] : []),
       ...(mode === "solver" ? [["testPatchKey", "SHIPD_S3_TEST_PATCH_KEY"]] : []),
       ["resultKey", "SHIPD_S3_RESULT_KEY"],
     ] as const;
@@ -120,7 +136,7 @@ function loadBootstrap(): WorkerMode {
   } else {
     const transportFields = [
       ["sourceUrl", "SHIPD_SOURCE_URL"],
-      ...(mode === "solver" ? [["claudeTokenUrl", "SHIPD_CLAUDE_TOKEN_URL"]] : []),
+      ...(mode === "solver" ? [["codexAuthUrl", "SHIPD_CODEX_AUTH_URL"]] : []),
       ["resultPutUrl", "SHIPD_RESULT_PUT_URL"],
       ["resultGetUrl", "SHIPD_RESULT_GET_URL"],
     ] as const;
@@ -135,8 +151,8 @@ function loadBootstrap(): WorkerMode {
     if (typeof value !== "string" || value.length === 0) throw new Error(`Invalid Fargate bootstrap field: ${key}.`);
     process.env[envNames[key] as string] = value;
   }
-  if (mode === "solver" && !["low", "medium", "high", "xhigh", "max"].includes(requiredEnv("SHIPD_CLAUDE_EFFORT")))
-    throw new Error("Invalid Claude CLI thinking level.");
+  if (mode === "solver" && !["low", "medium", "high", "xhigh", "max"].includes(requiredEnv("SHIPD_CODEX_EFFORT")))
+    throw new Error("Invalid Codex CLI reasoning effort.");
   const numericFields = [
     ["timeoutMinutes", "SHIPD_TIMEOUT_MINUTES"],
     ...(mode === "solver"
@@ -192,22 +208,28 @@ async function downloadObject(bucket: string, key: string, destination: string):
   writeFileSync(destination, Buffer.from(body), { mode: 0o600 });
 }
 
-async function downloadClaudeOAuthToken(): Promise<string> {
-  const tokenPath = "/tmp/shipd-claude-oauth-token";
+/** Downloads the host's (freshly checked) Codex login; each solver gets its own copy in a private CODEX_HOME. */
+async function downloadCodexAuth(): Promise<string> {
+  const authPath = "/tmp/shipd-codex-auth.json";
   try {
     if (directS3Enabled()) {
-      await downloadObject(requiredEnv("SHIPD_S3_BUCKET"), requiredEnv("SHIPD_S3_CLAUDE_TOKEN_KEY"), tokenPath);
+      await downloadObject(requiredEnv("SHIPD_S3_BUCKET"), requiredEnv("SHIPD_S3_CODEX_AUTH_KEY"), authPath);
     } else {
-      const response = await fetch(requiredEnv("SHIPD_CLAUDE_TOKEN_URL"));
-      if (!response.ok) throw new Error(`Claude OAuth token download failed (${response.status}).`);
-      writeFileSync(tokenPath, Buffer.from(await response.arrayBuffer()), { mode: 0o600 });
+      const response = await fetch(requiredEnv("SHIPD_CODEX_AUTH_URL"));
+      if (!response.ok) throw new Error(`Codex login download failed (${response.status}).`);
+      writeFileSync(authPath, Buffer.from(await response.arrayBuffer()), { mode: 0o600 });
     }
-    chmodSync(tokenPath, 0o600);
-    const token = readFileSync(tokenPath, "utf-8").trim();
-    if (!token || /\s/.test(token)) throw new Error("The Claude OAuth token file is empty or invalid.");
-    return token;
+    chmodSync(authPath, 0o600);
+    const auth = readFileSync(authPath, "utf-8").trim();
+    try {
+      const parsed = JSON.parse(auth) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    } catch {
+      throw new Error("The Codex login file is empty or invalid.");
+    }
+    return auth;
   } finally {
-    rmSync(tokenPath, { force: true });
+    rmSync(authPath, { force: true });
   }
 }
 
@@ -889,34 +911,7 @@ function isTestScriptChmod(command: string): boolean {
   return /^chmod\s+\S+\s+(?:\S*\/)?test\.sh$/.test(normalized);
 }
 
-let setprivPath: string | undefined;
-
-async function ensureSetpriv(plan: DockerPlan, env: NodeJS.ProcessEnv): Promise<string> {
-  const existing = await runCommand("command -v setpriv", plan.workdir, env, 30_000);
-  if (existing.code === 0 && existing.stdout.trim()) return existing.stdout.trim();
-  const install = [
-    "set -eu",
-    "if command -v apt-get >/dev/null 2>&1; then",
-    "  apt-get update -qq",
-    "  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq util-linux",
-    "elif command -v apk >/dev/null 2>&1; then",
-    "  apk add --no-cache util-linux",
-    "elif command -v dnf >/dev/null 2>&1; then",
-    "  dnf install -y util-linux",
-    "elif command -v yum >/dev/null 2>&1; then",
-    "  yum install -y util-linux",
-    "elif command -v zypper >/dev/null 2>&1; then",
-    "  zypper --non-interactive install util-linux",
-    "else",
-    '  echo "Claude solver isolation requires setpriv; install util-linux in the project Dockerfile." >&2',
-    "  exit 1",
-    "fi",
-  ].join("\n");
-  await requiredCommand(install, plan.workdir, env, 10 * 60 * 1000);
-  return (await requiredCommand("command -v setpriv", plan.workdir, env, 30_000)).stdout.trim();
-}
-
-async function initializeSource(plan: DockerPlan, env: NodeJS.ProcessEnv, installClaudeCli: boolean): Promise<void> {
+async function initializeSource(plan: DockerPlan, env: NodeJS.ProcessEnv, installCodexCli: boolean): Promise<void> {
   const archive = "/tmp/shipd-source.tar.gz";
   if (directS3Enabled()) {
     await downloadObject(requiredEnv("SHIPD_S3_BUCKET"), requiredEnv("SHIPD_S3_SOURCE_KEY"), archive);
@@ -945,10 +940,9 @@ async function initializeSource(plan: DockerPlan, env: NodeJS.ProcessEnv, instal
     if (isTestScriptChmod(command)) continue;
     await requiredCommand(command, plan.workdir, env, 15 * 60 * 1000);
   }
-  if (installClaudeCli) {
-    setprivPath = await ensureSetpriv(plan, env);
-    await requiredCommand("npm install --global @anthropic-ai/claude-code", plan.workdir, env, 10 * 60 * 1000);
-    await requiredCommand("claude --version", plan.workdir, env, 30_000);
+  if (installCodexCli) {
+    await requiredCommand(`npm install --global @openai/codex@${CODEX_CLI_VERSION}`, plan.workdir, env, 10 * 60 * 1000);
+    await requiredCommand("codex --version", plan.workdir, env, 30_000);
   }
 }
 
@@ -974,8 +968,8 @@ async function prepareSolver(
     `rm -f ${quote(posixPath.join(solverDir, "solution.patch"))} ${quote(posixPath.join(solverDir, "test.patch"))}`,
     `git -C ${quote(solverDir)} init -q`,
     `git config --global --add safe.directory ${quote(solverDir)}`,
-    `git -C ${quote(solverDir)} config user.email claude-solver@shipd-checks.local`,
-    `git -C ${quote(solverDir)} config user.name shipd-checks-claude-solver`,
+    `git -C ${quote(solverDir)} config user.email codex-solver@shipd-checks.local`,
+    `git -C ${quote(solverDir)} config user.name shipd-checks-codex-solver`,
     `if [ -f ${quote(posixPath.join(solverDir, "test.sh"))} ]; then sed -i 's/\\r$//' ${quote(posixPath.join(solverDir, "test.sh"))}; fi`,
     `git -C ${quote(solverDir)} add -A`,
     `git -C ${quote(solverDir)} commit -q -m baseline --allow-empty`,
@@ -1012,56 +1006,47 @@ function findUnprivilegedIdentity(index: number): { uid: number; gid: number } {
   return { uid: user.uid, gid: user.gid };
 }
 
-function claudeEnvironment(
-  name: string,
-  projectDir: string,
-  oauthToken: string,
-  identity: { uid: number; gid: number },
-): NodeJS.ProcessEnv {
-  const configDir = join("/tmp", `shipd-claude-${name}`);
+const CODEX_HOMES_DIR = "/work/shipd-codex";
+/** Codex CLI version installed on Fargate; the solver tool restrictions below were verified against it. */
+const CODEX_CLI_VERSION = "0.171.0";
+/** The only tools a solver may see, like Claude's former `--tools Bash`. Verified before every run (fail closed). */
+const SOLVER_ALLOWED_TOOLS = ["exec_command", "write_stdin", "update_plan"] as const;
+/** Features that add model-visible tools (sub-agents, sleep, images, apps, plugins, goals, suggestions, skills). */
+const SOLVER_DISABLED_FEATURES = [
+  "multi_agent",
+  "collaboration_modes",
+  "sleep_tool",
+  "view_image",
+  "apps",
+  "plugins",
+  "goals",
+  "image_generation",
+  "tool_suggest",
+  "skill_search",
+] as const;
+const SOLVER_MODEL_CATALOG_PATH = join(CODEX_HOMES_DIR, "model-catalog.json");
+
+/**
+ * Codex runs under the solver's unprivileged UID with a private HOME and CODEX_HOME (no auth.json), so its commands cannot
+ * touch root-owned files, the other solvers' workspaces, or the worker's AWS/transport secrets. CODEX_HOME holds this
+ * solver's copy of the host's ChatGPT login (auth.json); the host refreshed it beforehand so Codex never has to refresh
+ * it here. CODEX_HOME lives outside /tmp because Codex refuses to install its helper binaries under the temp dir.
+ */
+function codexEnvironment(name: string, authJson: string, identity: { uid: number; gid: number }): NodeJS.ProcessEnv {
+  const codexHome = join(CODEX_HOMES_DIR, name);
   const homeDir = join("/tmp", `shipd-home-${name}`);
-  const shellDir = join("/tmp", `shipd-shell-${name}`);
-  const shellPath = join(shellDir, "bash");
-  if (!setprivPath) throw new Error("The solver subprocess identity wrapper is unavailable.");
-  rmSync(configDir, { recursive: true, force: true });
+  rmSync(codexHome, { recursive: true, force: true });
   rmSync(homeDir, { recursive: true, force: true });
-  rmSync(shellDir, { recursive: true, force: true });
-  mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  mkdirSync(CODEX_HOMES_DIR, { recursive: true, mode: 0o755 });
+  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
   mkdirSync(homeDir, { recursive: true, mode: 0o700 });
-  mkdirSync(shellDir, { recursive: true, mode: 0o755 });
-  writeFileSync(
-    join(homeDir, ".claude.json"),
-    JSON.stringify({
-      hasCompletedOnboarding: true,
-      hasTrustDialogAccepted: true,
-      projects: { [projectDir]: { hasTrustDialogAccepted: true } },
-    }),
-    { encoding: "utf-8", mode: 0o600 },
-  );
-  const ownership = `${identity.uid}:${identity.gid}`;
-  for (const path of [configDir, homeDir]) {
-    const status = spawnSync("chown", ["-R", ownership, path], { stdio: "ignore" });
-    if (status.status !== 0) throw new Error(`Could not grant Claude access to its isolated ${path} config.`);
-  }
-  const shellWrapper = [
-    "#!/bin/bash",
-    'if [[ "$1" == "--version" ]]; then exec /bin/bash "$@"; fi',
-    `exec ${quote(setprivPath)} --reuid=${identity.uid} --regid=${identity.gid} --clear-groups -- /usr/bin/env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN_FILE -u CLAUDE_CONFIG_DIR -u CLAUDE_CODE_SUBPROCESS_ENV_SCRUB /bin/bash "$@"`,
-  ].join("\n");
-  writeFileSync(shellPath, `${shellWrapper}\n`, { encoding: "utf-8", mode: 0o755 });
-  chmodSync(shellPath, 0o755);
-  const agentEnv = restrictedWorkspaceEnv(process.env);
+  const authPath = join(codexHome, "auth.json");
+  writeFileSync(authPath, authJson, { encoding: "utf-8", mode: 0o600 });
+  for (const path of [codexHome, homeDir, authPath]) chownSync(path, identity.uid, identity.gid);
   return {
-    ...agentEnv,
+    ...restrictedWorkspaceEnv(process.env),
     HOME: homeDir,
-    CLAUDE_CONFIG_DIR: configDir,
-    CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
-    // Fargate blocks the user namespaces that Claude's bwrap-based scrub needs.
-    // The trusted shell wrapper instead strips credentials and drops to the solver UID.
-    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0",
-    CLAUDE_CODE_SHELL: shellPath,
-    CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1",
-    CLAUDE_CODE_DISABLE_NON_ESSENTIAL_TRAFFIC: "1",
+    CODEX_HOME: codexHome,
   };
 }
 
@@ -1070,33 +1055,30 @@ function restrictedWorkspaceEnv(sourceEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   for (const name of [
     "SHIPD_BOOTSTRAP_URL",
     "SHIPD_SOURCE_URL",
-    "SHIPD_CLAUDE_TOKEN_URL",
+    "SHIPD_CODEX_AUTH_URL",
     "SHIPD_TEST_PATCH_URL",
     "SHIPD_RESULT_PUT_URL",
     "SHIPD_RESULT_GET_URL",
     "SHIPD_S3_BUCKET",
     "SHIPD_S3_REGION",
     "SHIPD_S3_SOURCE_KEY",
-    "SHIPD_S3_CLAUDE_TOKEN_KEY",
+    "SHIPD_S3_CODEX_AUTH_KEY",
     "SHIPD_S3_TEST_PATCH_KEY",
     "SHIPD_S3_RESULT_KEY",
     "SHIPD_PLAN_B64",
-    "SHIPD_CLAUDE_MODEL",
-    "SHIPD_CLAUDE_EFFORT",
+    "SHIPD_CODEX_MODEL",
+    "SHIPD_CODEX_EFFORT",
     "SHIPD_AGENT_TIMEOUT_MINUTES",
     "SHIPD_SOLVER_COUNT",
     "SHIPD_RESOURCE_PROFILE",
     "SHIPD_MODE",
     "SHIPD_TIMEOUT_MINUTES",
-    "CLAUDE_CONFIG_DIR",
-    "CLAUDE_CODE_SHELL",
-    "CLAUDE_CODE_SHELL_PREFIX",
-    "CLAUDE_CODE_OAUTH_TOKEN_FILE",
+    "CODEX_HOME",
     "BASH_ENV",
     "ENV",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
+    "CODEX_API_KEY",
+    "CODEX_ACCESS_TOKEN",
+    "OPENAI_API_KEY",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
@@ -1114,198 +1096,189 @@ function restrictedWorkspaceEnv(sourceEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   return env;
 }
 
-function jsonRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function numericValue(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
-}
-
-function sumUsageField(records: Record<string, unknown>[], field: string): number | undefined {
-  const values = records
-    .map((record) => numericValue(record[field]))
-    .filter((value): value is number => value !== undefined);
-  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : undefined;
-}
-
-function extractClaudeTokenUsage(result: Record<string, unknown>): TokenUsage | undefined {
-  const usage = jsonRecord(result.usage);
-  if (!usage) return undefined;
-  const modelUsage = jsonRecord(result.modelUsage);
-  const models = modelUsage
-    ? Object.values(modelUsage)
-        .map(jsonRecord)
-        .filter((value): value is Record<string, unknown> => Boolean(value))
-    : [];
-  const inputTokens = numericValue(usage.input_tokens) ?? sumUsageField(models, "inputTokens");
-  const cacheReadInputTokens =
-    numericValue(usage.cache_read_input_tokens) ?? sumUsageField(models, "cacheReadInputTokens");
-  const cacheCreationInputTokens =
-    numericValue(usage.cache_creation_input_tokens) ?? sumUsageField(models, "cacheCreationInputTokens");
-  const outputTokens = numericValue(usage.output_tokens) ?? sumUsageField(models, "outputTokens");
-  const outputTokenDetails = jsonRecord(usage.output_tokens_details);
-  const iterations = Array.isArray(usage.iterations)
-    ? usage.iterations.map(jsonRecord).filter((value): value is Record<string, unknown> => Boolean(value))
-    : [];
-  const thinkingTokens =
-    numericValue(outputTokenDetails?.thinking_tokens) ??
-    numericValue(outputTokenDetails?.thinkingTokens) ??
-    numericValue(usage.thinking_tokens) ??
-    numericValue(usage.thinkingTokens) ??
-    sumUsageField(iterations, "thinking_tokens") ??
-    sumUsageField(iterations, "thinkingTokens") ??
-    sumUsageField(models, "thinkingTokens") ??
-    sumUsageField(models, "thinking_tokens") ??
-    numericValue(result.thinking_tokens) ??
-    numericValue(result.thinkingTokens);
-  const hasUsage = [inputTokens, cacheReadInputTokens, cacheCreationInputTokens, outputTokens, thinkingTokens].some(
-    (value) => value !== undefined,
-  );
-  if (!hasUsage) return undefined;
-
-  const input = inputTokens ?? 0;
-  const cacheRead = cacheReadInputTokens ?? 0;
-  const cacheCreation = cacheCreationInputTokens ?? 0;
-  const output = outputTokens ?? 0;
-  const totalInputTokens = input + cacheRead + cacheCreation;
-  const rawTotalTokens = totalInputTokens + output;
-  const deductibleThinkingTokens =
-    outputTokens !== undefined && thinkingTokens !== undefined ? Math.min(thinkingTokens, output) : 0;
-  const totalTokens = rawTotalTokens - deductibleThinkingTokens;
-  const iterationContextSizes = iterations.map(
-    (iteration) =>
-      (numericValue(iteration.input_tokens) ?? 0) +
-      (numericValue(iteration.cache_read_input_tokens) ?? 0) +
-      (numericValue(iteration.cache_creation_input_tokens) ?? 0),
-  );
-  const finalContextTokens = iterationContextSizes.at(-1);
-  const contextWindowValues = models
-    .map((model) => numericValue(model.contextWindow))
-    .filter((value): value is number => value !== undefined);
-  const contextWindow = contextWindowValues.length > 0 ? Math.max(...contextWindowValues) : undefined;
-  return {
-    ...(inputTokens !== undefined ? { inputTokens } : {}),
-    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
-    ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
-    ...(outputTokens !== undefined ? { outputTokens } : {}),
-    ...(thinkingTokens !== undefined ? { thinkingTokens } : {}),
-    totalInputTokens,
-    totalTokens,
-    ...(thinkingTokens !== undefined && outputTokens !== undefined ? { rawTotalTokens } : {}),
-    ...(finalContextTokens !== undefined ? { finalContextTokens } : {}),
-    ...(iterationContextSizes.length > 0 ? { peakContextTokens: Math.max(...iterationContextSizes) } : {}),
-    ...(contextWindow !== undefined ? { contextWindow } : {}),
-    ...(finalContextTokens !== undefined && contextWindow !== undefined
-      ? { contextWindowUtilizationPercent: Number(((finalContextTokens / contextWindow) * 100).toFixed(2)) }
-      : {}),
-    ...(iterations.length > 0 ? { modelCalls: iterations.length } : {}),
-    ...(numericValue(result.total_cost_usd) !== undefined ? { costUsd: numericValue(result.total_cost_usd) } : {}),
-  };
-}
-
-function parseClaudeStreamRecords(stdout: string): Record<string, unknown>[] {
+/** Drops reasoning items from the persisted `codex exec --json` event trace, like the old thinking-block scrub. */
+function sanitizeCodexStepTrace(stdout: string): string {
   return stdout
     .split(/\r?\n/)
-    .map((line) => {
+    .filter((line) => {
       try {
-        return jsonRecord(JSON.parse(line));
+        const record = JSON.parse(line) as { item?: { type?: unknown } } | null;
+        return record?.item?.type !== "reasoning";
       } catch {
-        return undefined;
-      }
-    })
-    .filter((record): record is Record<string, unknown> => record !== undefined);
-}
-
-function streamAssistantText(records: Record<string, unknown>[]): string | undefined {
-  const text = records.flatMap((record) => {
-    if (record.type !== "assistant") return [];
-    const message = jsonRecord(record.message);
-    if (!Array.isArray(message?.content)) return [];
-    return message.content
-      .map(jsonRecord)
-      .filter((content): content is Record<string, unknown> => content?.type === "text")
-      .map((content) => (typeof content.text === "string" ? content.text : ""));
-  });
-  const joined = text.join("").trim();
-  return joined || undefined;
-}
-
-function sanitizeClaudeStepTrace(stdout: string): string {
-  return stdout
-    .split(/\r?\n/)
-    .map((line) => {
-      try {
-        const record = jsonRecord(JSON.parse(line));
-        if (record?.type !== "assistant") return line;
-        const message = jsonRecord(record.message);
-        if (!Array.isArray(message?.content)) return line;
-        const content = message.content.filter((block) => {
-          const type = jsonRecord(block)?.type;
-          return type !== "thinking" && type !== "redacted_thinking";
-        });
-        return content.length === message.content.length
-          ? line
-          : JSON.stringify({ ...record, message: { ...message, content } });
-      } catch {
-        return line;
+        return true;
       }
     })
     .join("\n");
 }
 
-function parseClaudeOutput(stdout: string, stderr: string): { text: string; tokenUsage?: TokenUsage } {
-  let parsed: Record<string, unknown> | undefined;
-  const trimmed = stdout.trim();
-  try {
-    parsed = jsonRecord(JSON.parse(trimmed));
-  } catch {
-    const records = parseClaudeStreamRecords(stdout);
-    parsed =
-      records
-        .slice()
-        .reverse()
-        .find((record) => record.type === "result") ?? records.at(-1);
-    if (!parsed) {
-      const start = trimmed.indexOf("{");
-      const end = trimmed.lastIndexOf("}");
-      if (start >= 0 && end > start) {
-        try {
-          parsed = jsonRecord(JSON.parse(trimmed.slice(start, end + 1)));
-        } catch {
-          parsed = undefined;
-        }
-      }
-    }
-    if (!parsed) return { text: `${stdout}\n${stderr}`.trim() };
-    const outputText = typeof parsed.result === "string" ? parsed.result : (streamAssistantText(records) ?? trimmed);
-    const text = [outputText, stderr.trim()].filter(Boolean).join("\n");
-    return { text, tokenUsage: extractClaudeTokenUsage(parsed) };
-  }
-  if (!parsed) return { text: `${stdout}\n${stderr}`.trim() };
-  const outputText = typeof parsed.result === "string" ? parsed.result : stdout.trim();
-  const text = [outputText, stderr.trim()].filter(Boolean).join("\n");
-  return { text, tokenUsage: extractClaudeTokenUsage(parsed) };
+function parseCodexOutput(stdout: string, stderr: string): { text: string; tokenUsage?: TokenUsage; error?: string } {
+  const records = parseCodexEvents(stdout);
+  const outputText = codexFinalText(records) || (records.length ? "" : stdout.trim());
+  const error = codexStreamError(records);
+  const text = [outputText, error, stderr.trim()].filter(Boolean).join("\n");
+  const tokenUsage = codexTokenUsage(records);
+  return { text, ...(tokenUsage ? { tokenUsage } : {}), ...(error ? { error } : {}) };
 }
 
-function claudeInvocation(tools: string, model: string, thinkingLevel: string): string {
+/** Credential variables Codex must never pass to the commands it runs (on top of its default KEY, SECRET and TOKEN excludes). */
+const CODEX_CREDENTIAL_VARIABLES = [
+  "CODEX_API_KEY",
+  "CODEX_ACCESS_TOKEN",
+  "OPENAI_API_KEY",
+  "AWS_*",
+  "ECS_*",
+  "SHIPD_*",
+];
+
+/** Config that restricts a solver to SOLVER_ALLOWED_TOOLS: direct (non code-mode) tools from an edited model catalog,
+ * no sub-agents/apply_patch/experimental tools, extra features off, update_plan on and request_user_input off. */
+function codexToolRestrictionArgs(): string[] {
   return [
-    "claude",
-    "--print",
+    "-c",
+    `model_catalog_json=${JSON.stringify(SOLVER_MODEL_CATALOG_PATH)}`,
+    "-c",
+    "tools.update_plan={enabled=true}",
+    "-c",
+    "tools.experimental_request_user_input={enabled=false}",
+    ...SOLVER_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
+  ];
+}
+
+/** Model-visible tool names in `codex debug prompt-input` output (including any nested in a code-mode `exec` tool). */
+function promptInputToolNames(stdout: string): string[] {
+  const items = JSON.parse(stdout) as unknown;
+  const names = new Set<string>();
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
+    const record = jsonObject(value);
+    if (!record) return;
+    if (typeof record.name === "string" && ["function", "custom", "namespace"].includes(String(record.type))) {
+      if (record.type !== "namespace") names.add(record.name);
+      if (record.name === "exec" && typeof record.description === "string")
+        for (const match of record.description.matchAll(/\n#+ `([a-z_][a-z0-9_]*)`/g)) names.add(match[1] as string);
+    }
+    Object.values(record).forEach(walk);
+  };
+  const list = Array.isArray(items) ? items : [];
+  walk(jsonObject(list[0])?.type === "additional_tools" ? list[0] : list);
+  return [...names].sort();
+}
+
+function jsonObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+/**
+ * Writes the solver model catalog (Codex's bundled catalog, edited for direct tools only) and then asks Codex which
+ * tools a solver would see. Anything other than exactly SOLVER_ALLOWED_TOOLS fails the run before any solver starts.
+ */
+async function prepareSolverToolset(env: NodeJS.ProcessEnv): Promise<void> {
+  const setupHome = join(CODEX_HOMES_DIR, "toolset-check");
+  rmSync(setupHome, { recursive: true, force: true });
+  mkdirSync(CODEX_HOMES_DIR, { recursive: true, mode: 0o755 });
+  mkdirSync(setupHome, { recursive: true, mode: 0o700 });
+  const setupEnv = { ...restrictedWorkspaceEnv(env), CODEX_HOME: setupHome };
+  try {
+    const models = await requiredCommand("codex debug models", "/work", setupEnv, 120_000);
+    const catalog = JSON.parse(models.stdout) as { models?: Record<string, unknown>[] };
+    if (!Array.isArray(catalog.models) || catalog.models.length === 0)
+      throw new Error("Codex returned an empty model catalog.");
+    for (const model of catalog.models) {
+      model.tool_mode = "direct";
+      delete model.multi_agent_version;
+      model.apply_patch_tool_type = null;
+      model.experimental_supported_tools = [];
+      model.supports_search_tool = false;
+    }
+    writeFileSync(SOLVER_MODEL_CATALOG_PATH, JSON.stringify(catalog), { encoding: "utf-8", mode: 0o644 });
+    chmodSync(SOLVER_MODEL_CATALOG_PATH, 0o644);
+    const check = await requiredCommand(
+      [
+        "codex",
+        "debug",
+        "prompt-input",
+        "-c",
+        `model=${JSON.stringify(requiredEnv("SHIPD_CODEX_MODEL"))}`,
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        'sandbox_mode="danger-full-access"',
+        "-c",
+        "cli_auth_credentials_store=file",
+        ...codexToolRestrictionArgs(),
+        "toolset check",
+      ]
+        .map(quote)
+        .join(" "),
+      "/work",
+      setupEnv,
+      120_000,
+    );
+    const tools = promptInputToolNames(check.stdout);
+    const expected = [...SOLVER_ALLOWED_TOOLS].sort();
+    if (tools.join(",") !== expected.join(","))
+      throw new Error(
+        `Codex solver tool restriction failed: expected ${expected.join(", ")} but Codex ${CODEX_CLI_VERSION} exposes ${tools.join(", ") || "no tools"}.`,
+      );
+  } finally {
+    rmSync(setupHome, { recursive: true, force: true });
+  }
+}
+
+/** Adds final/peak context size and context-window utilization from the solver's Codex session rollout. */
+function withRolloutContextUsage(usage: TokenUsage | undefined, codexHome: string | undefined): TokenUsage | undefined {
+  if (!codexHome) return usage;
+  const rollouts: string[] = [];
+  const collect = (dir: string): void => {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) collect(path);
+      else if (entry.name.endsWith(".jsonl")) rollouts.push(path);
+    }
+  };
+  collect(join(codexHome, "sessions"));
+  if (rollouts.length === 0) return usage;
+  const context = codexRolloutContextUsage(
+    rollouts
+      .sort()
+      .map((path) => readFileSync(path, "utf-8"))
+      .join("\n"),
+  );
+  return context ? { ...(usage ?? {}), ...context } : usage;
+}
+
+function codexInvocation(model: string, thinkingLevel: string, solverDir: string): string {
+  return [
+    "codex",
+    "exec",
+    "--json",
+    "--color",
+    "never",
     "--model",
     model,
-    "--effort",
-    thinkingLevel,
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--no-session-persistence",
-    "--allowedTools",
-    tools,
-    "--tools",
-    tools,
+    "-c",
+    `model_reasoning_effort=${thinkingLevel}`,
+    ...codexToolRestrictionArgs(),
+    // Fargate offers neither the user namespaces nor the Landlock support Codex's Linux sandbox needs; the solver is
+    // instead confined by its unprivileged UID, private workspace, and scrubbed environment.
+    "--dangerously-bypass-approvals-and-sandbox",
+    "-c",
+    `shell_environment_policy.exclude=${JSON.stringify(CODEX_CREDENTIAL_VARIABLES)}`,
+    "-c",
+    "cli_auth_credentials_store=file",
+    "--skip-git-repo-check",
+    // No --ephemeral: the session rollout in the solver's private CODEX_HOME carries the per-request context sizes.
+    "--cd",
+    solverDir,
   ]
     .map(quote)
     .join(" ");
@@ -1423,22 +1396,22 @@ async function restoreChangedTests(solverDir: string, baselineCommit: string, en
   }
 }
 
-async function verifySolverShellIsolation(
+async function verifySolverIsolation(
   solverDir: string,
   env: NodeJS.ProcessEnv,
   identity: { uid: number; gid: number },
 ): Promise<void> {
-  const shellPath = env.CLAUDE_CODE_SHELL;
-  if (!shellPath) throw new Error("Claude solver shell isolation is not configured.");
   const checks = [
     `test "$(id -u)" = ${identity.uid}`,
-    `test -z "\${CLAUDE_CODE_OAUTH_TOKEN+x}"`,
-    `test -z "\${CLAUDE_CODE_OAUTH_TOKEN_FILE+x}"`,
-    `test -z "\${CLAUDE_CONFIG_DIR+x}"`,
+    `test -z "\${CODEX_API_KEY+x}"`,
+    `test -z "\${CODEX_ACCESS_TOKEN+x}"`,
+    `test -z "\${OPENAI_API_KEY+x}"`,
+    `test -z "\${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI+x}"`,
+    "command -v codex >/dev/null",
   ].join(" && ");
-  const result = await runCommand(`${quote(shellPath)} -c ${quote(checks)}`, solverDir, env, 30_000);
+  const result = await runCommand(checks, solverDir, restrictedWorkspaceEnv(env), 30_000, identity);
   if (result.code !== 0)
-    throw new Error("Claude solver shell failed its unprivileged-UID and credential-isolation preflight.");
+    throw new Error("Codex solver failed its unprivileged-UID and credential-isolation preflight.");
 }
 
 async function runSolver(
@@ -1446,42 +1419,42 @@ async function runSolver(
   workspace: Awaited<ReturnType<typeof prepareSolver>>,
   env: NodeJS.ProcessEnv,
   taskPromptText: string,
-  claudeOAuthToken: string,
+  codexAuth: string,
 ): Promise<WorkerSolverResult> {
   const started = Date.now();
   const timeoutMinutes = Number.parseInt(requiredEnv("SHIPD_AGENT_TIMEOUT_MINUTES"), 10);
-  const model = requiredEnv("SHIPD_CLAUDE_MODEL");
-  const thinkingLevel = requiredEnv("SHIPD_CLAUDE_EFFORT");
-  const solverEnv = claudeEnvironment(`solver-${index}`, workspace.solverDir, claudeOAuthToken, workspace.identity);
+  const model = requiredEnv("SHIPD_CODEX_MODEL");
+  const thinkingLevel = requiredEnv("SHIPD_CODEX_EFFORT");
+  const solverEnv = codexEnvironment(`solver-${index}`, codexAuth, workspace.identity);
   let agentOutput = "";
   let agentStepsGzipBase64: string | undefined;
   let tokenUsage: TokenUsage | undefined;
   let status: SolverRunResult["status"] = "error";
   let error: string | undefined;
   try {
-    await verifySolverShellIsolation(workspace.solverDir, solverEnv, workspace.identity);
+    await verifySolverIsolation(workspace.solverDir, solverEnv, workspace.identity);
     const agent = await runCommand(
-      claudeInvocation("Bash", model, thinkingLevel),
+      codexInvocation(model, thinkingLevel, workspace.solverDir),
       workspace.solverDir,
       solverEnv,
       timeoutMinutes * 60 * 1000,
-      undefined,
+      workspace.identity,
       taskPromptText,
     );
-    if (agent.stdout) agentStepsGzipBase64 = gzipSync(sanitizeClaudeStepTrace(agent.stdout)).toString("base64");
-    const parsedAgent = parseClaudeOutput(agent.stdout, agent.stderr);
+    if (agent.stdout) agentStepsGzipBase64 = gzipSync(sanitizeCodexStepTrace(agent.stdout)).toString("base64");
+    const parsedAgent = parseCodexOutput(agent.stdout, agent.stderr);
     agentOutput = parsedAgent.text;
-    tokenUsage = parsedAgent.tokenUsage;
-    status = agent.timedOut ? "timedOut" : agent.code === 0 ? "ok" : "error";
-    if (agent.code !== 0)
-      error = agent.timedOut ? "Claude CLI solver timed out." : `Claude CLI exited with code ${agent.code}.`;
+    tokenUsage = withRolloutContextUsage(parsedAgent.tokenUsage, solverEnv.CODEX_HOME);
+    status = agent.timedOut ? "timedOut" : agent.code === 0 && !parsedAgent.error ? "ok" : "error";
+    if (agent.timedOut) error = "Codex CLI solver timed out.";
+    else if (agent.code !== 0) error = `Codex CLI exited with code ${agent.code}.`;
+    else if (parsedAgent.error) error = `Codex CLI turn failed: ${parsedAgent.error}`;
   } catch (caught) {
     error = caught instanceof Error ? caught.message : String(caught);
     agentOutput = error;
   } finally {
-    rmSync(join("/tmp", `shipd-claude-solver-${index}`), { recursive: true, force: true });
+    rmSync(join(CODEX_HOMES_DIR, `solver-${index}`), { recursive: true, force: true });
     rmSync(join("/tmp", `shipd-home-solver-${index}`), { recursive: true, force: true });
-    rmSync(join("/tmp", `shipd-shell-solver-${index}`), { recursive: true, force: true });
   }
 
   const diffResult = await runCommand(
@@ -1562,12 +1535,7 @@ async function run(): Promise<void> {
   const existing = await readExistingResult(resultGetUrl);
   const completed = new Map((existing?.results ?? []).map((result) => [result.index, result]));
   const plan = planFromEnv();
-  if (mode === "solver") process.env.CLAUDE_CONFIG_DIR = CLAUDE_CONFIG_DIR;
   const env = resolvedEnvironment(plan);
-  if (mode === "solver") {
-    mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 });
-    env.CLAUDE_CONFIG_DIR = CLAUDE_CONFIG_DIR;
-  }
   mkdirSync("/work", { recursive: true });
   await initializeSource(plan, env, mode === "solver");
 
@@ -1585,8 +1553,9 @@ async function run(): Promise<void> {
     (index) => !completed.has(index),
   );
   const workspaces: Array<Awaited<ReturnType<typeof prepareSolver>>> = [];
+  await prepareSolverToolset(env);
   for (const index of pendingIndexes) workspaces.push(await prepareSolver(index, plan, env));
-  const claudeOAuthToken = await downloadClaudeOAuthToken();
+  const codexAuth = await downloadCodexAuth();
   let uploadChain = Promise.resolve();
   const record = (result: WorkerSolverResult): Promise<void> => {
     completed.set(result.index, result);
@@ -1604,7 +1573,7 @@ async function run(): Promise<void> {
     workspaces.map(async (workspace, index) => {
       const solverIndex = pendingIndexes[index];
       if (solverIndex === undefined) throw new Error("Fargate solver workspace index mismatch.");
-      const result = await runSolver(solverIndex, workspace, env, taskPrompt, claudeOAuthToken);
+      const result = await runSolver(solverIndex, workspace, env, taskPrompt, codexAuth);
       await record(result);
     }),
   );

@@ -1,4 +1,4 @@
-/** The `/checks` command: settings and the `--solve` Claude CLI benchmark. */
+/** The `/checks` command: settings and the `--solve` Codex CLI benchmark. */
 
 import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,6 +13,8 @@ import {
   AUDITOR_CONCURRENCY_MIN,
   AUDITOR_TIMEOUT_MAX_MINUTES,
   AUDITOR_TIMEOUT_MIN_MINUTES,
+  CODEX_MODELS,
+  CODEX_REASONING_EFFORTS,
   isAnalyzeProjectEnabled,
   loadAuditorConfig,
   loadChecksConfig,
@@ -30,7 +32,7 @@ import {
   saveSolverReviewConfig,
   setAnalyzeProjectEnabled,
 } from "./config.js";
-import { runFargateClaudeBenchmark } from "./fargate-runner.js";
+import { runFargateCodexBenchmark } from "./fargate-runner.js";
 import { runCreatePatches, snapshotGitHead } from "./git.js";
 import { extractNewFilesFromPatch } from "./patch.js";
 import { PROGRESS_WIDGET_KEY, renderProgressLines } from "./progress.js";
@@ -41,7 +43,7 @@ import { endReview, isReviewInProgress, startReview } from "./state.js";
 import { analyzeToolSettingChanged } from "./tool-sync.js";
 import type {
   AuditorConfig,
-  ClaudeThinkingLevel,
+  CodexReasoningEffort,
   CommandOption,
   FargateResourceUsage,
   SolverGapConfig,
@@ -56,9 +58,9 @@ const COMMAND_COMPLETIONS: readonly CommandOption[] = [
   {
     value: "--config",
     label: "--config",
-    description: "Configure Claude solvers and reviewers, and the auditor tool",
+    description: "Configure Codex solvers and reviewers, and the auditor tool",
   },
-  { value: "--solve", label: "--solve", description: "Run Claude agents on agent_prompt.md" },
+  { value: "--solve", label: "--solve", description: "Run Codex agents on agent_prompt.md" },
 ];
 
 const COMMAND_MENU_OPTIONS = ["config", "solve"] as const;
@@ -110,10 +112,10 @@ function buildConfigRows(
     {
       id: "solver-model",
       section: "Solver",
-      label: "Solver model (Claude)",
+      label: "Solver model (Codex)",
       value: solverGap.modelId,
       kind: "cycle",
-      values: ["haiku", "sonnet", "opus"],
+      values: [...CODEX_MODELS],
     },
     {
       id: "solvergap-thinking",
@@ -121,7 +123,7 @@ function buildConfigRows(
       label: "Solver effort",
       value: solverGap.thinkingLevel,
       kind: "cycle",
-      values: ["low", "medium", "high", "xhigh", "max"],
+      values: [...CODEX_REASONING_EFFORTS],
     },
     {
       id: "solvergap-timeout",
@@ -150,10 +152,10 @@ function buildConfigRows(
     {
       id: "solverreview-model",
       section: "Solver",
-      label: "Solver reviewer model (Claude)",
+      label: "Solver reviewer model (Codex)",
       value: solverReview.modelId,
       kind: "cycle",
-      values: ["haiku", "sonnet", "opus"],
+      values: [...CODEX_MODELS],
     },
     {
       id: "solverreview-effort",
@@ -161,7 +163,7 @@ function buildConfigRows(
       label: "Solver reviewer effort",
       value: solverReview.thinkingLevel,
       kind: "cycle",
-      values: ["low", "medium", "high", "xhigh", "max"],
+      values: [...CODEX_REASONING_EFFORTS],
     },
     {
       id: "solverreview-timeout",
@@ -185,10 +187,10 @@ function buildConfigRows(
     {
       id: "auditor-model",
       section: "Analysis Tools",
-      label: "Auditor model (Claude)",
+      label: "Auditor model (Codex)",
       value: auditor.modelId,
       kind: "cycle",
-      values: ["haiku", "sonnet", "opus"],
+      values: [...CODEX_MODELS],
     },
     {
       id: "auditor-effort",
@@ -196,7 +198,7 @@ function buildConfigRows(
       label: "Auditor effort",
       value: auditor.thinkingLevel,
       kind: "cycle",
-      values: ["low", "medium", "high", "xhigh", "max"],
+      values: [...CODEX_REASONING_EFFORTS],
     },
     {
       id: "auditor-timeout",
@@ -314,7 +316,7 @@ class ConfigMenuComponent {
       if (row.id.startsWith("solverreview-")) {
         const solverReview = loadSolverReviewConfig();
         if (row.id === "solverreview-model") solverReview.modelId = nextValue;
-        else if (row.id === "solverreview-effort") solverReview.thinkingLevel = nextValue as ClaudeThinkingLevel;
+        else if (row.id === "solverreview-effort") solverReview.thinkingLevel = nextValue as CodexReasoningEffort;
         else solverReview.timeoutMinutes = Number.parseInt(nextValue, 10);
         saveSolverReviewConfig(solverReview);
         this.refresh();
@@ -324,7 +326,7 @@ class ConfigMenuComponent {
       if (row.id.startsWith("auditor-")) {
         const auditor = loadAuditorConfig();
         if (row.id === "auditor-model") auditor.modelId = nextValue;
-        else if (row.id === "auditor-effort") auditor.thinkingLevel = nextValue as ClaudeThinkingLevel;
+        else if (row.id === "auditor-effort") auditor.thinkingLevel = nextValue as CodexReasoningEffort;
         else if (row.id === "auditor-timeout") auditor.timeoutMinutes = Number.parseInt(nextValue, 10);
         else auditor.concurrency = Number.parseInt(nextValue, 10);
         saveAuditorConfig(auditor);
@@ -333,7 +335,7 @@ class ConfigMenuComponent {
         return;
       }
       if (row.id === "solvergap-thinking") {
-        saveSolverGapConfig({ ...solverGap, thinkingLevel: nextValue as ClaudeThinkingLevel });
+        saveSolverGapConfig({ ...solverGap, thinkingLevel: nextValue as CodexReasoningEffort });
         this.refresh();
         this.onCycleSaved();
         return;
@@ -485,14 +487,14 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         await runConfigFlow(pi, ctx);
         return;
       }
-      const runClaudeBenchmark = true;
+      const runCodexBenchmark = true;
       if (isReviewInProgress()) {
         ctx.ui.notify("A checks run is already in progress.", "warning");
         return;
       }
       const config = loadChecksConfig();
       const reviewerConfig = loadSolverReviewConfig();
-      const reviewerModelName = `claude-cli/${reviewerConfig.modelId}`;
+      const reviewerModelName = `codex-cli/${reviewerConfig.modelId}`;
       const requiredFiles = [...REQUIRED_FILES, "Dockerfile", "test.patch"];
       const missingFiles = (files: string[]) => files.filter((file) => !existsSync(join(ctx.cwd, file)));
       const missing = missingFiles(["create_patches.sh", ...requiredFiles]);
@@ -544,7 +546,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
         let solverResults: SolverRunResult[] = [];
         let solverReview: SolverReviewResult | undefined;
         let fargateResourceUsage: FargateResourceUsage | undefined;
-        if (runClaudeBenchmark && solverConfig) {
+        if (runCodexBenchmark && solverConfig) {
           if (abort.signal.aborted) {
             ctx.ui.notify("checks: cancelled.", "warning");
             return;
@@ -575,7 +577,7 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           };
           renderSolverProgress("preparing image");
           const runId = formatLocalTimestamp().replace(/[:.]/g, "-");
-          const solverRun = await runFargateClaudeBenchmark({
+          const solverRun = await runFargateCodexBenchmark({
             pi,
             repoDir: ctx.cwd,
             snapshotDir: dir,
@@ -647,13 +649,13 @@ export function registerChecksCommand(pi: ExtensionAPI) {
           gapAnalysisIncomplete: false,
           gapFinderStatus: "ok",
           gapFilterStatus: "ok",
-          runClaudeBenchmark,
+          runCodexBenchmark,
           solverConfig,
           solverResults,
           fargateResourceUsage,
           solverReview,
         });
-        const summary = buildRunSummary({ merged, runGapFinder: false, runClaudeBenchmark });
+        const summary = buildRunSummary({ merged, runGapFinder: false, runCodexBenchmark });
         pi.sendMessage({
           customType: "shipd_checks_report",
           content: summary.content,

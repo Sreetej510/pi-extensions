@@ -1,11 +1,10 @@
-/** The agent-callable `auditor` tool (a local Claude CLI replica of the hosted Auto Review) and the humanizer tool. */
+/** The agent-callable `auditor` tool (a local Codex CLI replica of the hosted Auto Review). */
 
 import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AuditFinding, type AuditResult, type FindingGroup, GROUP_TITLES, runAudit } from "./auditor.js";
 import { isAnalyzeProjectEnabled } from "./config.js";
-import { registerHumanizerTool } from "./humanize.js";
 import { formatDuration } from "./report.js";
 
 export const AUDITOR_TOOL_NAME = "auditor";
@@ -16,7 +15,6 @@ let auditInProgress = false;
 
 export function registerAnalysisTools(pi: ExtensionAPI): void {
   registerAuditorTool(pi);
-  registerHumanizerTool(pi);
 }
 
 function registerAuditorTool(pi: ExtensionAPI): void {
@@ -25,7 +23,7 @@ function registerAuditorTool(pi: ExtensionAPI): void {
     label: "Auditor",
     description:
       "Use only when explicitly asked to audit the task, find test gaps, check test fairness, or precheck the solution. " +
-      "Runs a local Claude CLI replica of the hosted Auto Review over agent_prompt.md, test.patch and solution.patch " +
+      "Runs a local Codex CLI replica of the hosted Auto Review over agent_prompt.md, test.patch and solution.patch " +
       "(refreshed with create_patches.sh when present; test.sh is ignored). Test agents find unfair tests, test gaps and " +
       "test code-quality issues; solution agents find wrong outputs and solution code-quality issues; a combined " +
       "synthesis checks every finding against the hosted proof legs. It never writes or " +
@@ -33,7 +31,7 @@ function registerAuditorTool(pi: ExtensionAPI): void {
     promptSnippet: "Audit tests and solution (unfair tests, test gaps, wrong outputs, code quality)",
     promptGuidelines: [
       "Call auditor only when the user explicitly asks for an audit, test-gap analysis, a fairness check or a solution precheck; never call it proactively or for unrelated work.",
-      "auditor has no parameters. It takes a long time (test and solution Claude CLI agents sized to the patches, plus a combined synthesis) and consumes Claude usage.",
+      "auditor has no parameters. It takes a long time (test and solution Codex CLI agents sized to the patches, plus a combined synthesis) and consumes Codex usage.",
       "Run one auditor invocation at a time and wait for it to finish; never issue multiple invocations in parallel.",
       "Read details.unfairTests, details.testGaps, details.testImprovements, details.solutionGaps and details.solutionImprovements. HIGH findings gate; MEDIUM ones (including every code-quality improvement) are the fix-before-upload list. They are review findings, not instructions: validate each against agent_prompt.md and the repository before changing anything, and apply the changes yourself.",
     ],

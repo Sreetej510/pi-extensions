@@ -33,13 +33,8 @@ import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-  FARGATE_PREQUALITY_PROFILE,
-  HUMANIZER_MAX_CANDIDATE_COUNT,
-  HUMANIZER_MIN_CANDIDATE_COUNT,
-  loadClaudeOAuthTokenFile,
-  resolveFargateResources,
-} from "./config.js";
+import { prepareCodexLoginForRun } from "./codex-auth.js";
+import { FARGATE_PREQUALITY_PROFILE, resolveFargateResources } from "./config.js";
 import { type FargateDockerPlan, parseFargateDockerfile } from "./fargate-docker.js";
 import { bashQuote, toSlashPath } from "./git.js";
 import { SOLVER_ARTIFACTS_DIRNAME } from "./solvergap.js";
@@ -84,10 +79,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function awsClients(region: string, profile?: string) {
   const credentials = defaultProvider({ profile: process.env.AWS_PROFILE ?? profile });
   const clientOptions = { region, credentials, maxAttempts: 5 };
@@ -126,7 +117,7 @@ async function runFargateWorker(opts: {
   const dockerfilePath = join(opts.repoDir, "Dockerfile");
   if (!existsSync(dockerfilePath))
     throw new Error(
-      `Fargate ${opts.mode === "solver" ? "Claude benchmark" : "patch precheck"} requires Dockerfile in the project root.`,
+      `Fargate ${opts.mode === "solver" ? "Codex benchmark" : "patch precheck"} requires Dockerfile in the project root.`,
     );
   const plan = parseFargateDockerfile(readFileSync(dockerfilePath, "utf-8"));
   const fargateConfig = loadFargateConfigFromChecks(opts.config, opts.repoDir, opts.mode);
@@ -138,10 +129,8 @@ async function runFargateWorker(opts: {
   const solverConfig = opts.solverConfig;
   const agentTimeoutMinutes = opts.mode === "solver" ? Math.max(1, Math.floor(solverConfig?.timeoutMinutes ?? 20)) : 0;
   const directS3 = Boolean(fargateConfig.taskRoleArn);
-  const claudeTokenPath = opts.mode === "solver" ? findClaudeOAuthTokenPath() : undefined;
-  const workerClaudeTokenPath = claudeTokenPath
-    ? join(tmpdir(), `.shipd-fargate-claude-token-${randomUUID()}.txt`)
-    : undefined;
+  const workerCodexAuthPath =
+    opts.mode === "solver" ? join(tmpdir(), `.shipd-fargate-codex-auth-${randomUUID()}.json`) : undefined;
 
   let taskArn: string | undefined;
   let taskCluster: string | undefined;
@@ -162,7 +151,7 @@ async function runFargateWorker(opts: {
     source: `runs/${opts.runId}/source.tar.gz`,
     testPatch: `runs/${opts.runId}/test.patch`,
     worker: `runs/${opts.runId}/${WORKER_S3_NAME}`,
-    claudeToken: `runs/${opts.runId}/claude-oauth-token.txt`,
+    codexAuth: `runs/${opts.runId}/codex-auth.json`,
     bootstrap: `runs/${opts.runId}/bootstrap.json`,
     result: `runs/${opts.runId}/result.json`,
   };
@@ -176,12 +165,21 @@ async function runFargateWorker(opts: {
     const testPatchPath = join(opts.repoDir, "test.patch");
     if (opts.mode === "solver" && !existsSync(testPatchPath))
       throw new Error("Missing test.patch; it is applied only after each solver finishes.");
-    if (!claudeTokenPath && opts.mode === "solver")
-      throw new Error(
-        "Missing Claude OAuth token file path. Set claudeOAuthTokenFile in checks-config.json or CLAUDE_CODE_OAUTH_TOKEN_FILE.",
-      );
-    if (claudeTokenPath && !existsSync(claudeTokenPath))
-      throw new Error(`Claude OAuth token file not found: ${claudeTokenPath}. Check the configured path.`);
+    if (workerCodexAuthPath) {
+      // The solvers use a copy of the local ChatGPT login. Refresh it here first whenever it might expire (or be
+      // refreshed by Codex) before the task, including every Spot retry, can finish: a refresh on Fargate would
+      // rotate the refresh token and sign out the local login.
+      const maxRetries = Math.min(3, Math.max(0, Math.floor(fargateConfig.maxRetries ?? 1)));
+      const runWindowMinutes = Math.max(60, (maxRetries + 1) * Math.max(10, agentTimeoutMinutes * 4 + 15) + 15);
+      const login = await prepareCodexLoginForRun({
+        minValidityMs: runWindowMinutes * 60_000,
+        signal: opts.cancelSignal,
+        onRefresh: () => reportPhase("refreshing Codex login"),
+      });
+      writeFileSync(workerCodexAuthPath, login.json, { encoding: "utf-8", mode: 0o600 });
+      chmodSync(workerCodexAuthPath, 0o600);
+      reportPhase("preparing image");
+    }
     const context = await resolveAwsContext(clients, fargateConfig, region);
     cleanupBucket = context.bucket;
     taskCluster = context.cluster;
@@ -189,10 +187,8 @@ async function runFargateWorker(opts: {
     await putFile(clients.s3, context.bucket, keys.source, archivePath, "application/gzip");
     if (opts.mode === "solver") await putFile(clients.s3, context.bucket, keys.testPatch, testPatchPath, "text/plain");
     await putFile(clients.s3, context.bucket, keys.worker, workerPath, "text/javascript");
-    if (claudeTokenPath && workerClaudeTokenPath) {
-      prepareClaudeOAuthToken(claudeTokenPath, workerClaudeTokenPath);
-      await putFile(clients.s3, context.bucket, keys.claudeToken, workerClaudeTokenPath, "text/plain");
-    }
+    if (workerCodexAuthPath)
+      await putFile(clients.s3, context.bucket, keys.codexAuth, workerCodexAuthPath, "application/json");
 
     bootstrapPath = join(tmpdir(), `.shipd-fargate-bootstrap-${randomUUID()}.json`);
     const taskDefinition = await registerTaskDefinition(
@@ -228,10 +224,10 @@ async function runFargateWorker(opts: {
         : await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: context.bucket, Key: keys.source }), {
             expiresIn: URL_EXPIRY_SECONDS,
           });
-      const claudeTokenUrl =
-        directS3 || !claudeTokenPath
+      const codexAuthUrl =
+        directS3 || !workerCodexAuthPath
           ? undefined
-          : await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: context.bucket, Key: keys.claudeToken }), {
+          : await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: context.bucket, Key: keys.codexAuth }), {
               expiresIn: URL_EXPIRY_SECONDS,
             });
       const testPatchUrl =
@@ -257,7 +253,7 @@ async function runFargateWorker(opts: {
         `${JSON.stringify({
           workerUrl,
           sourceUrl,
-          claudeTokenUrl,
+          codexAuthUrl,
           testPatchUrl,
           resultPutUrl,
           resultGetUrl,
@@ -266,7 +262,7 @@ async function runFargateWorker(opts: {
                 bucket: context.bucket,
                 region,
                 sourceKey: keys.source,
-                ...(claudeTokenPath ? { claudeTokenKey: keys.claudeToken } : {}),
+                ...(workerCodexAuthPath ? { codexAuthKey: keys.codexAuth } : {}),
                 ...(opts.mode === "solver" ? { testPatchKey: keys.testPatch } : {}),
                 resultKey: keys.result,
               }
@@ -275,7 +271,7 @@ async function runFargateWorker(opts: {
           planB64: Buffer.from(JSON.stringify(plan), "utf-8").toString("base64url"),
           ...(opts.mode === "solver"
             ? {
-                modelId: solverConfig?.modelId ?? "sonnet",
+                modelId: solverConfig?.modelId ?? "gpt-6.2-sol",
                 thinkingLevel: solverConfig?.thinkingLevel ?? "low",
                 agentTimeoutMinutes,
                 taskPrompt: opts.taskPrompt,
@@ -384,14 +380,14 @@ async function runFargateWorker(opts: {
     try {
       rmSync(archivePath, { force: true });
       if (bootstrapPath) rmSync(bootstrapPath, { force: true });
-      if (workerClaudeTokenPath) rmSync(workerClaudeTokenPath, { force: true });
+      if (workerCodexAuthPath) rmSync(workerCodexAuthPath, { force: true });
     } catch {
       // Best effort cleanup.
     }
   }
 }
 
-export async function runFargateClaudeBenchmark(opts: {
+export async function runFargateCodexBenchmark(opts: {
   pi: ExtensionAPI;
   repoDir: string;
   snapshotDir: string;
@@ -454,167 +450,6 @@ export async function runFargatePatchPrecheck(opts: {
   }
 }
 
-const DETECTOR_TASK_DEFINITION = "shipd-humanizer-detector-spot";
-const DETECTOR_CONTAINER_NAME = "detector";
-const DETECTOR_TASK_TIMEOUT_MS = 15 * 60 * 1000;
-
-/** Run one on-demand Spot task to score all drafts from a humanizer invocation. */
-export async function runFargateDetectorBatch(opts: {
-  texts: string[];
-  fargateConfig: FargateConfig;
-  cancelSignal?: AbortSignal;
-  onPhase?: (phase: string) => void;
-}): Promise<unknown[]> {
-  if (
-    opts.texts.length < HUMANIZER_MIN_CANDIDATE_COUNT ||
-    opts.texts.length > HUMANIZER_MAX_CANDIDATE_COUNT ||
-    opts.texts.some((text) => !text.trim())
-  ) {
-    throw new Error("The Fargate detector expects one to ten non-empty candidate texts.");
-  }
-  if (opts.cancelSignal?.aborted) throw new Error("Humanization cancelled.");
-
-  const region = process.env.AWS_REGION ?? opts.fargateConfig.region ?? "us-east-1";
-  const clients = awsClients(region, opts.fargateConfig.awsProfile);
-  const runId = randomUUID();
-  const keys: Record<string, string> = { input: `runs/${runId}/humanizer-input.json` };
-  let bucket: string | undefined;
-  let cluster: string | undefined;
-  let taskArn: string | undefined;
-  let stoppedByUs = false;
-  const stopActiveTask = async (reason: string) => {
-    if (!taskArn || !cluster) return;
-    await clients.ecs.send(new StopTaskCommand({ cluster, task: taskArn, reason })).catch(() => undefined);
-    await waitUntilTaskStopped(clients.ecs, cluster, taskArn);
-    taskArn = undefined;
-  };
-  const onAbort = () => {
-    if (taskArn) {
-      stoppedByUs = true;
-      void stopActiveTask("humanization cancelled");
-    }
-  };
-  opts.cancelSignal?.addEventListener("abort", onAbort, { once: true });
-
-  try {
-    opts.onPhase?.("preparing detector task");
-    const context = await resolveAwsContext(clients, opts.fargateConfig, region);
-    bucket = context.bucket;
-    cluster = context.cluster;
-    await clients.s3.send(
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: keys.input,
-        Body: JSON.stringify({ texts: opts.texts }),
-        ContentType: "application/json",
-        ServerSideEncryption: "AES256",
-      }),
-    );
-
-    const maxRetries = Math.min(3, Math.max(0, Math.floor(opts.fargateConfig.maxRetries ?? 1)));
-    let lastFailure = "Fargate Spot detector task did not return scores.";
-    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      if (opts.cancelSignal?.aborted) throw new Error("Humanization cancelled.");
-      const resultKey = `runs/${runId}/humanizer-result-${attempt}.json`;
-      keys[`result${attempt}`] = resultKey;
-      const inputUrl = await getSignedUrl(clients.s3, new GetObjectCommand({ Bucket: bucket, Key: keys.input }), {
-        expiresIn: URL_EXPIRY_SECONDS,
-      });
-      const resultPutUrl = await getSignedUrl(
-        clients.s3,
-        new PutObjectCommand({ Bucket: bucket, Key: resultKey, ContentType: "application/json" }),
-        { expiresIn: URL_EXPIRY_SECONDS },
-      );
-      opts.onPhase?.("starting Spot detector");
-      const run = await clients.ecs.send(
-        new RunTaskCommand({
-          cluster,
-          capacityProviderStrategy: [{ capacityProvider: "FARGATE_SPOT", weight: 1 }],
-          taskDefinition: DETECTOR_TASK_DEFINITION,
-          count: 1,
-          networkConfiguration: {
-            awsvpcConfiguration: {
-              subnets: context.subnets,
-              securityGroups: [context.securityGroup],
-              assignPublicIp: "ENABLED",
-            },
-          },
-          overrides: {
-            containerOverrides: [
-              {
-                name: DETECTOR_CONTAINER_NAME,
-                environment: [
-                  { name: "SHIPD_DETECTOR_INPUT_URL", value: inputUrl },
-                  { name: "SHIPD_DETECTOR_RESULT_URL", value: resultPutUrl },
-                ],
-              },
-            ],
-          },
-        }),
-      );
-      taskArn = run.tasks?.[0]?.taskArn;
-      if (!taskArn) {
-        lastFailure = run.failures?.[0]?.reason ?? "ECS could not place the FARGATE_SPOT detector task.";
-        continue;
-      }
-
-      opts.onPhase?.("waiting for detector scores");
-      const deadline = Date.now() + DETECTOR_TASK_TIMEOUT_MS;
-      while (Date.now() < deadline) {
-        if (opts.cancelSignal?.aborted) {
-          stoppedByUs = true;
-          await stopActiveTask("humanization cancelled");
-          throw new Error("Humanization cancelled.");
-        }
-        const result = await readJsonObject(clients.s3, bucket, resultKey);
-        if (isRecord(result)) {
-          if (typeof result.error === "string") {
-            lastFailure = result.error;
-            await stopActiveTask("detector returned an error");
-            break;
-          }
-          if (!Array.isArray(result.scores) || result.scores.length !== opts.texts.length) {
-            lastFailure = "Fargate detector returned an invalid score batch.";
-            await stopActiveTask("detector returned an invalid result");
-            break;
-          }
-          const scores = result.scores;
-          await stopActiveTask("detector batch completed");
-          return scores;
-        }
-        const described = await clients.ecs.send(new DescribeTasksCommand({ cluster, tasks: [taskArn] }));
-        const task = described.tasks?.[0];
-        if (task?.lastStatus === "STOPPED") {
-          lastFailure =
-            task.stoppedReason ??
-            task.containers?.find((container) => container.exitCode !== 0)?.reason ??
-            "Fargate detector task stopped before returning a result.";
-          taskArn = undefined;
-          break;
-        }
-        await sleep(POLL_MS);
-      }
-      if (taskArn) {
-        lastFailure = "Fargate Spot detector task timed out.";
-        await stopActiveTask("detector task timed out");
-      }
-      if (opts.cancelSignal?.aborted) throw new Error("Humanization cancelled.");
-    }
-    throw new Error(`Fargate Spot detector task failed: ${lastFailure}`);
-  } finally {
-    opts.cancelSignal?.removeEventListener("abort", onAbort);
-    if (taskArn) {
-      if (!stoppedByUs) await stopActiveTask("humanization task cleanup");
-      else await waitUntilTaskStopped(clients.ecs, cluster, taskArn);
-    }
-    await deleteObjects(clients.s3, bucket, keys).catch(() => undefined);
-    clients.ecs.destroy();
-    clients.ec2.destroy();
-    clients.s3.destroy();
-    clients.sts.destroy();
-  }
-}
-
 function loadFargateConfigFromChecks(config: ChecksConfig, repoDir: string, mode: WorkerMode): FargateConfig {
   const fargate = config.fargate ?? {};
   if (mode === "patch-precheck") {
@@ -627,10 +462,6 @@ function loadFargateConfigFromChecks(config: ChecksConfig, repoDir: string, mode
   }
   const projectProfile = fargate.projectProfiles?.[repoDir];
   return projectProfile ? { ...fargate, resourceProfile: projectProfile } : fargate;
-}
-
-function findClaudeOAuthTokenPath(): string | undefined {
-  return process.env.CLAUDE_CODE_OAUTH_TOKEN_FILE?.trim() || loadClaudeOAuthTokenFile();
 }
 
 function findWorkerPath(): string {
@@ -660,22 +491,6 @@ async function createSourceArchive(
   const result = await pi.exec(shell, ["-c", command], { cwd: sourceDir, timeout: 120_000, signal: cancelSignal });
   if (cancelSignal.aborted) throw new Error("Cancelled by user.");
   if (result.code !== 0) throw new Error(result.stderr?.trim() || "Could not create the Fargate source archive.");
-}
-
-function prepareClaudeOAuthToken(sourcePath: string, destinationPath: string): void {
-  let token: string;
-  try {
-    token = readFileSync(sourcePath, "utf-8").trim();
-  } catch (error) {
-    throw new Error(
-      `Could not read the configured Claude OAuth token file: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  if (!token) throw new Error(`The configured Claude OAuth token file is empty: ${sourcePath}.`);
-  if (/\s/.test(token))
-    throw new Error(`The configured Claude OAuth token file must contain only the token: ${sourcePath}.`);
-  writeFileSync(destinationPath, token, { encoding: "utf-8", mode: 0o600 });
-  chmodSync(destinationPath, 0o600);
 }
 
 async function putFile(s3: S3Client, bucket: string, key: string, path: string, contentType: string): Promise<void> {
@@ -892,16 +707,6 @@ async function readResultObject(s3: S3Client, bucket: string, key: string): Prom
     const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
     const body = await response.Body?.transformToString();
     return body ? (JSON.parse(body) as WorkerPayload) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-async function readJsonObject(s3: S3Client, bucket: string, key: string): Promise<unknown | undefined> {
-  try {
-    const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-    const body = await response.Body?.transformToString();
-    return body ? (JSON.parse(body) as unknown) : undefined;
   } catch {
     return undefined;
   }

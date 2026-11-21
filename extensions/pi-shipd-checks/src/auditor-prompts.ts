@@ -11,7 +11,7 @@
  *     drops duplicates and wrong findings.
  * The rules.md families (fairness, test gaps, solution gaps) go to the type they belong to. test.sh is out of scope.
  *
- * Every reviewer runs as a read-only Claude CLI session in a workspace laid out as:
+ * Every reviewer runs as a read-only Codex CLI session in a workspace laid out as:
  *   repo/            clean git HEAD (the pinned base; patches NOT applied)
  *   review_assets/   problem.md (agent_prompt.md), test.patch (without test.sh), solution.patch, proposed_tests/
  * Reviewers cannot write files, so each prompt asks for one final ```json block; counter-tests travel inline.
