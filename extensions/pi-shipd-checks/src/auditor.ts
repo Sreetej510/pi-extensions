@@ -6,7 +6,7 @@
  *            type run depends on the size of each patch; each agent gets its own slice;
  *   round 2: one combined synthesis sees every finding and all of the change and applies the proof legs.
  * Findings come back grouped as unfair tests, test gaps, test improvements, solution gaps and solution improvements. A finding gates
- * (BLOCK) only when synthesis keeps it HIGH. Counter-tests are reported, not executed. test.sh is out of scope: it is
+ * the verdict only when synthesis keeps it HIGH. Counter-tests are reported, not executed. test.sh is out of scope: it is
  * stripped from test.patch and the snapshot before any reviewer sees them. Only the final report is kept: reviewer
  * prompts and answers live in the temp workspace and are deleted with it.
  */
@@ -392,10 +392,12 @@ function gradeFindings(candidates: Candidate[], synthesis: ReviewerResult[]): Gr
   });
 }
 
+type AuditVerdict = "PASS" | "FAIL";
+
 export interface AuditResult {
-  verdict: "PASS" | "REVIEW" | "BLOCK" | "INCOMPLETE";
-  testQuality: "PASS" | "FAIL" | "REVIEW";
-  solutionQuality: "PASS" | "FAIL" | "REVIEW";
+  verdict: AuditVerdict;
+  testQuality: AuditVerdict;
+  solutionQuality: AuditVerdict;
   unfairTests: AuditFinding[];
   testGaps: AuditFinding[];
   testImprovements: AuditFinding[];
@@ -433,23 +435,18 @@ function summarize(opts: {
     solutionGaps: pick("solutionGaps"),
     solutionImprovements: pick("solutionImprovements"),
   };
-  const areaVerdict = (findings: AuditFinding[]) =>
-    findings.some((finding) => finding.level === "HIGH") ? "FAIL" : findings.length ? "REVIEW" : "PASS";
   const failed = opts.reviewers.filter((result) => result.status !== "ok");
-  const synthesis = opts.reviewers.filter((result) => result.kind === "synthesis");
-  const synthesisMissing = opts.collected.candidates.length > 0 && synthesis.every((result) => result.status !== "ok");
-  const high = kept.some((finding) => finding.level === "HIGH");
-  const verdict = high
-    ? "BLOCK"
-    : synthesisMissing || failed.length === opts.reviewers.length
-      ? "INCOMPLETE"
-      : kept.length || failed.length
-        ? "REVIEW"
-        : "PASS";
+  const areaVerdict = (kind: "test" | "solution", findings: AuditFinding[]): AuditVerdict =>
+    failed.some((result) => result.kind === kind) ||
+    findings.some((finding) => finding.level === "HIGH" || finding.level === "UNSYNTHESISED")
+      ? "FAIL"
+      : "PASS";
+  const testQuality = areaVerdict("test", [...groups.unfairTests, ...groups.testGaps, ...groups.testImprovements]);
+  const solutionQuality = areaVerdict("solution", [...groups.solutionGaps, ...groups.solutionImprovements]);
   return {
-    verdict,
-    testQuality: areaVerdict([...groups.unfairTests, ...groups.testGaps, ...groups.testImprovements]),
-    solutionQuality: areaVerdict([...groups.solutionGaps, ...groups.solutionImprovements]),
+    verdict: failed.length || testQuality === "FAIL" || solutionQuality === "FAIL" ? "FAIL" : "PASS",
+    testQuality,
+    solutionQuality,
     ...groups,
     droppedCount: opts.graded.length - kept.length,
     testsGraded: opts.collected.testsGraded,
