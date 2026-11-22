@@ -1,6 +1,6 @@
 {
   "name": "@sreetej510/pi-shipd-checks",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "description": "Pi extension for Shipd checks, a local Codex CLI auditor (Auto Review replica for tests and solution), and a Fargate-backed Codex CLI solver benchmark.",
   "type": "module",
   "license": "MIT",
