@@ -708,7 +708,7 @@ interface QualityStatus {
   shouldRun: boolean;
   /** A completed report exists (the row offers Re-run rather than Run). */
   hasReport: boolean;
-  /** Shipd disabled reruns because Prompt Quality already passed on the current content. */
+  /** Shipd disabled reruns because the check already passed on the current content. */
   alreadyPassed: boolean;
   /** Set while an upstream step blocks the check; its disabled button's title says why. */
   lockReason?: string;
@@ -736,11 +736,7 @@ async function readQualityStatuses(
       !hasRunButton && !hasReport && (await lockButton.count()) > 0
         ? clean((await lockButton.getAttribute("title")) ?? "") || "Locked until an earlier step passes."
         : undefined;
-    const alreadyPassed =
-      quality === "Task Prompt Quality" &&
-      !busy &&
-      !stale &&
-      /^Already passed on this content\b/i.test(lockReason ?? "");
+    const alreadyPassed = !busy && !stale && /^Already passed on this content\b/i.test(lockReason ?? "");
     statuses.push({
       quality,
       rowText,
@@ -771,13 +767,6 @@ async function readQualityStatusesWithRetry(
     }
   }
   throw new Error(`Could not read quality status after ${QUALITY_UI_RETRY_ATTEMPTS} attempts. ${lastFailure}`);
-}
-
-async function hasQualityReport(page: Page, quality: QualityName): Promise<boolean> {
-  const row = qualityRow(page, quality);
-  // A fresh challenge uses a Run button and has no report popover yet. A completed
-  // check uses Re-run and exposes the report through the hover popover.
-  return (await row.locator('button[title^="Re-run"]').count()) > 0;
 }
 
 async function getQualityExpander(page: Page, quality: QualityName): Promise<Locator> {
@@ -1673,13 +1662,14 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           const reportPage = page;
           if (!reportPage)
             throw new Error(`Shipd page was closed before ${displayQualityName(quality)} report extraction.`);
+          const [status] = await readQualityStatusesWithRetry(reportPage, signal, [quality]);
+          if (status?.alreadyPassed) return { verdict: "PASS", blocking: [], nonBlocking: [] };
+          if (!status?.hasReport) return undefined;
           onUpdate?.({
             content: [{ type: "text", text: `Extracting ${displayQualityName(quality)} report...` }],
             details: undefined,
           });
-          return (await hasQualityReport(reportPage, quality))
-            ? await readReportWithRetry(reportPage, quality, readFeedbackReport, signal)
-            : undefined;
+          return readReportWithRetry(reportPage, quality, readFeedbackReport, signal);
         };
         const readRunOnceResult = async (quality: RunOnceCheck): Promise<JsonRecord> => {
           const report = await readFeedback(quality);
@@ -1695,6 +1685,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           if (!statusPage) throw new Error("Shipd page was closed before reading the run-once checks.");
           const toRun: RunOnceCheck[] = [];
           for (const status of await readQualityStatusesWithRetry(statusPage, signal, qualities)) {
+            if (status.alreadyPassed) continue;
             const quality = status.quality as RunOnceCheck;
             if (status.busy || !status.hasReport) toRun.push(quality);
             else if (isStale(status.rowText) && (await readRunOnceResult(quality)).verdict !== "PASS")
