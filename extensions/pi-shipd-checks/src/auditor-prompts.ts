@@ -120,6 +120,8 @@ ${loadFairnessRules()}`;
 
 const COVERAGE_METHOD = `Coverage. For every requirement sentence in your slice, decide from the test bodies (never from test names) whether the hidden tests would FAIL a wrong implementation. A gap is a prompt-stated behaviour that a believable wrong implementation gets wrong while every test still passes; name that wrong implementation and quote the sentence. Behaviour problem.md leaves open is not a gap.
 
+Fairness is mandatory for every proposed gap, including MEDIUM. Give the smallest test of a public, required outcome. Ground every setup dependency, call and assertion in the quoted requirement, an existing public repo contract or a value derived from the fixture. Try a materially different compliant design. Both it and the reference must pass the entire proposed test, including its helpers. Reject private hooks, guessed API shapes, unspecified defaults or ordering, and invented timing limits. A scope or timing example below is a search lead only. If you cannot devise a fair test, omit the gap.
+
 Walk each requirement through: malformed, missing, empty or boundary inputs; weak assertions (a count where values matter, one item of a combined report); persistence, cache and lifecycle paths, including restarts and process kills; the repo's existing operations (rename, move, reload, delete) applied to new state; routing, cancellation and transaction transitions; the public contract called directly; alternate routes, backends or mirror directions the rule names but one test covers; ordering, deduplication and collision boundaries; state isolation through the real implementation. A sentence about a class is covered only when the tests hit more than one representative of it on every axis a wrong implementation could split it on. Assertions that run only inside a success branch or behind "if it still exists" are vacuous. An explicitly excluded case needs a test an over-broad implementation fails.
 
 G1 discrimination: for every stated value, default, threshold, duration, count or open class, report the wrong value the tests accept: masked (only observed behind another field or cap), loose bound (double, half, off by one also pass), single point (one example of an open class), untested sibling (another path that reaches the behaviour), unobserved state (state that carries over a transition, never observed after it).
@@ -183,7 +185,7 @@ Read ${SOLUTION_PATCH} only to check that a demanded test would pass the referen
 ${REPLY}${FENCE}json block as your final message. ${NO_FILES}
 {"tests":[{"name":"<every test in your files>","file":"<path>","fair":true|false}],
  "unfairTests":[{"test":"<test name, or the helper and every test it reaches>","file":"<path:line>","finding":"<what the test demands that the prompt does not>","details":"<the correct, prompt-compliant implementation that fails, and the exact assertion or helper line it fails>","why":"<problem.md quote and, if any, the other test in the suite that accepts the same behaviour>","suggestedChange":"<loosen the assertion to X | state it in problem.md | drop the test>"}],
- "testGaps":[{"requirement":"<verbatim problem.md sentence>","finding":"<which behaviour no test checks>","details":"<the wrong implementation that passes every test, concretely>","why":"<why that behaviour is required: quote>","suggestedChange":"<the test to add: setup, action, assertion; it must pass the reference>","severity":"HIGH|MEDIUM"}],
+ "testGaps":[{"requirement":"<verbatim problem.md sentence>","finding":"<which behaviour no test checks>","details":"<the wrong implementation that passes every test, concretely>","why":"<why the proposed test also passes for a materially different compliant design>","suggestedChange":"<public setup, action and smallest observable assertion; it must pass the reference>","severity":"HIGH|MEDIUM"}],
  "testImprovements":[{"category":"Clutter|Conventions|Design|Practice","location":"<file:line (symbol)>","finding":"...","suggestedChange":"..."}]}
 `;
 }
@@ -314,7 +316,7 @@ Proof legs (all must hold for HIGH):
 4. load_bearing_check: the exact line or assertion that makes the claim true. Quote it.
 5. provenance: the defect is introduced or required by this change, not behaviour the pinned repo already had that problem.md does not ask to change.
 6. materiality: the input is something a real caller produces; pathological magnitudes, impossible states and float noise fail this leg.
-7. reference_pass (test findings that demand a new or stricter check): the demanded check must pass the reference solution; if the reference would fail it, the finding is a solution defect: answer HIGH with "as":"S1" when legs 1,3,5,6 hold.
+7. reference_pass (test findings that demand a new or stricter check): if a fair check of explicitly required behaviour exposes a reference defect, report it as S1 when legs 1,3,5,6 hold. A reference failure caused by an unfair check is grounds to drop the check.
 8. exercised_environment: claims about how the runtime environment behaves (offline, non-root, permissions) need a log; inferred only from reading, demote.
 
 Severity:
@@ -323,7 +325,9 @@ Severity:
 - Solution wrong outputs (S1/S2) are HIGH when legs 1,3,5,6 hold.
 - Code-quality findings (test or solution: Clutter, Conventions, Design, Practice, Scope, Stale callers) never gate: keep them MEDIUM with "as" set to the category when their evidence holds, and DROP them when the cited analogue, grep or counts do not hold. A code-quality finding that actually changes an output is a wrong output: say so in "why".
 - Test comments that name the grading process (grader, hidden tests, reward, the submission, reference solution) are MEDIUM Clutter unless they leak the solution.
-- When a leg cannot be checked from the files, the finding is unproven: MEDIUM, not HIGH.`;
+- When a leg cannot be checked from the files, the finding is unproven: MEDIUM, not HIGH.
+
+Mandatory fairness check for all coverage gaps (T3/T4), at any severity. Independently verify the quoted requirement, the minimal public setup/action/assertion, and that the test passes both the reference and a materially different compliant implementation. Inspect every fixture dependency and co-assertion. A test may reject the named wrong implementation only because it violates that requirement. Narrow or rewrite a proposed test to remove unsupported assumptions. If a fair, discriminating test cannot be established from the files, answer DROP, including for borderline gaps. Never turn an unverified gap into a test improvement. Use gap_fairness only on a retained coverage gap. Its public_check is the exact recommendation shown in the report. Keep all fairness-critical conditions in that field. Record how a different design passes it, and confirm directly from the source that the reference passes.`;
 
 export interface SynthesisCandidate {
   id: string;
@@ -347,10 +351,12 @@ ${SYNTH_DEMOTION_PATTERNS}
 ${WORKSPACE}
 Execution evidence: none. No counter-test, mutant or kill/restart run was executed for this review, so legs that need execution must be decided from the files alone.
 
+For every retained finding, give a summary of at most 160 characters stating the defect and the observable correction or check. Put a verified repo-relative file:line, public command or endpoint in location when available. Keep location and summary independently understandable. Keep proof in why.
+
 Findings to synthesise:
 ${items}
 
 ${REPLY}${FENCE}json block as your final message, with one entry for every id listed above. ${NO_FILES}
-{"findings":[{"id":"<id as listed>","verdict":"HIGH|MEDIUM|DROP","as":"<T3|T4|T5|T7|S1|S2 for blocking findings, or Clutter|Conventions|Design|Practice|Scope|Stale callers for code quality>","failed_leg":"<leg name or none>","promise_citation":"<verbatim problem.md text or none>","load_bearing_check":"<quoted line>","why":"<one line>"}]}
+{"findings":[{"id":"<id as listed>","verdict":"HIGH|MEDIUM|DROP","as":"<T3|T4|T5|T7|S1|S2 or Clutter|Conventions|Design|Practice|Scope|Stale callers>","location":"<verified location or empty>","summary":"<one line, at most 160 characters>","failed_leg":"<leg name or none>","promise_citation":"<verbatim problem.md text or none>","load_bearing_check":"<quoted line>","why":"<proof>","gap_fairness":{"public_check":"<public setup, action and minimal assertion in at most 160 characters>","compliant_alternative":"<different compliant design and why the entire check passes>","reference_passes":true}}]}
 `;
 }

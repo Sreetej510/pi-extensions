@@ -7,8 +7,8 @@
  *   round 2: one combined synthesis sees every finding and all of the change and applies the proof legs.
  * Findings come back grouped as unfair tests, test gaps, test improvements, solution gaps and solution improvements. A finding gates
  * the verdict only when synthesis keeps it HIGH. Counter-tests are reported, not executed. test.sh is out of scope: it is
- * stripped from test.patch and the snapshot before any reviewer sees them. Only the final report is kept: reviewer
- * prompts and answers live in the temp workspace and are deleted with it.
+ * stripped from test.patch and the snapshot before any reviewer sees them. The report gives one line per finding.
+ * Reviewer prompts and answers live in the temp workspace and are deleted with it.
  */
 
 import { randomUUID } from "node:crypto";
@@ -45,6 +45,8 @@ const SOLUTION_CHARS_PER_AGENT = 50_000;
 const MAX_AGENTS_PER_TYPE = 4;
 const SYNTH_CHUNK = 60;
 const CANDIDATE_TEXT_LIMIT = 1_600;
+const REPORT_SUMMARY_LIMIT = 160;
+const REPORT_LOCATION_LIMIT = 100;
 
 type ReviewerStatus = "ok" | "timedOut" | "cancelled" | "error" | "noAnswer";
 
@@ -302,7 +304,7 @@ export function collectFindings(results: ReviewerResult[]): CollectedFindings {
           result.name,
           str(item.severity) || "HIGH",
           "testGaps",
-          `[test gap] "${str(item.requirement)}": ${str(item.finding)}${sentence("Wrong implementation that passes", item.details)}${sentence("Why", item.why)}${sentence("Suggested change", item.suggestedChange)}`,
+          `[test gap] "${str(item.requirement)}": ${str(item.finding)}${sentence("Proposed public check", item.suggestedChange)}${sentence("Compliant alternative", item.why)}${sentence("Wrong implementation that passes", item.details)}`,
         );
       });
       asArray(answer.testImprovements).forEach((item: Json, index: number) => {
@@ -346,6 +348,8 @@ export interface AuditFinding {
   criterion: string;
   finding: string;
   why: string;
+  summary?: string;
+  location?: string;
   failedLeg?: string;
   loadBearing?: string;
   promise?: string;
@@ -354,10 +358,15 @@ export interface AuditFinding {
 interface GradedFinding extends AuditFinding {
   group: FindingGroup;
   dropped: boolean;
+  testGapReviewPending: boolean;
 }
 
-function gradeFindings(candidates: Candidate[], synthesis: ReviewerResult[]): GradedFinding[] {
+function gradeFindings(candidates: Candidate[], synthesis: ReviewerResult[], problem: string): GradedFinding[] {
   const votes = new Map<string, Json>();
+  const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
+  const proofText = (value: unknown) =>
+    typeof value === "string" && !/^none$/i.test(value.trim()) ? value.trim() : "";
+  const requirementText = normalize(problem);
   for (const result of synthesis) {
     for (const finding of asArray((result.answer as Json)?.findings)) {
       const id = str(finding.id);
@@ -371,23 +380,45 @@ function gradeFindings(candidates: Candidate[], synthesis: ReviewerResult[]): Gr
     let group = candidate.group;
     const isQuality = (QUALITY_CATEGORIES as readonly string[]).includes(criterion);
     // reference_pass: a test finding the reference itself would fail is a solution defect ("as":"S1")
-    if (/^S\d/i.test(criterion) && (group === "testGaps" || group === "unfairTests")) group = "solutionGaps";
+    if (/^S[12]$/i.test(criterion) && (group === "testGaps" || group === "unfairTests")) group = "solutionGaps";
     if (isQuality && group === "solutionGaps") group = "solutionImprovements";
-    if (isQuality && (group === "testGaps" || group === "unfairTests")) group = "testImprovements";
+    if (isQuality && group === "unfairTests") group = "testImprovements";
+    if (/^T[34]$/i.test(criterion)) group = "testGaps";
     const improvement = group === "testImprovements" || group === "solutionImprovements";
     const failedLeg = str(vote?.failed_leg);
+    const promise = proofText(vote?.promise_citation);
+    const publicCheck = proofText(vote?.gap_fairness?.public_check);
+    const alternative = proofText(vote?.gap_fairness?.compliant_alternative);
+    const testGapReviewPending =
+      group === "testGaps" &&
+      verdict !== "DROP" &&
+      !(
+        /^(HIGH|MEDIUM)$/.test(verdict) &&
+        /^T[34]$/i.test(criterion) &&
+        !/^(failing_case|wrong_impl|promise_citation|reference_pass)$/i.test(failedLeg.trim()) &&
+        vote?.gap_fairness?.reference_passes === true &&
+        promise &&
+        requirementText.includes(normalize(promise)) &&
+        publicCheck &&
+        alternative
+      );
+    const summary = group === "testGaps" ? "" : str(vote?.summary).trim();
+    const location = str(vote?.location).trim();
     return {
       id: candidate.id,
       group,
-      dropped: verdict === "DROP",
+      dropped: verdict === "DROP" || testGapReviewPending,
+      testGapReviewPending,
       // code-quality findings are the hosted checks' non-blocking list: they never gate
       level: !vote ? "UNSYNTHESISED" : verdict === "HIGH" && !improvement ? "HIGH" : "MEDIUM",
       criterion,
-      finding: candidate.text,
+      finding: group === "testGaps" ? publicCheck : candidate.text,
       why: str(vote?.why),
+      ...(summary ? { summary } : {}),
+      ...(location ? { location } : {}),
       ...(failedLeg && failedLeg !== "none" ? { failedLeg } : {}),
       ...(vote?.load_bearing_check ? { loadBearing: str(vote.load_bearing_check) } : {}),
-      ...(vote?.promise_citation && vote.promise_citation !== "none" ? { promise: str(vote.promise_citation) } : {}),
+      ...(promise ? { promise } : {}),
     };
   });
 }
@@ -405,6 +436,7 @@ export interface AuditResult {
   solutionImprovements: AuditFinding[];
   /** Findings synthesis rejected as wrong. */
   droppedCount: number;
+  unverifiedTestGaps: number;
   testsGraded: number;
   counterTests: CounterTest[];
   reviewers: Array<{ name: string; status: ReviewerStatus; durationMs: number; error?: string }>;
@@ -413,7 +445,7 @@ export interface AuditResult {
   reportPath: string;
 }
 
-const LEVEL_ORDER = { HIGH: 0, MEDIUM: 1, UNSYNTHESISED: 2 } as const;
+const LEVEL_ORDER = { HIGH: 0, UNSYNTHESISED: 1, MEDIUM: 2 } as const;
 
 function summarize(opts: {
   graded: GradedFinding[];
@@ -427,7 +459,7 @@ function summarize(opts: {
     kept
       .filter((finding) => finding.group === group)
       .sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level])
-      .map(({ group: _group, dropped: _dropped, ...finding }) => finding);
+      .map(({ group: _group, dropped: _dropped, testGapReviewPending: _testGapReviewPending, ...finding }) => finding);
   const groups = {
     unfairTests: pick("unfairTests"),
     testGaps: pick("testGaps"),
@@ -436,8 +468,10 @@ function summarize(opts: {
     solutionImprovements: pick("solutionImprovements"),
   };
   const failed = opts.reviewers.filter((result) => result.status !== "ok");
+  const unverifiedTestGaps = opts.graded.filter((finding) => finding.testGapReviewPending).length;
   const areaVerdict = (kind: "test" | "solution", findings: AuditFinding[]): AuditVerdict =>
     failed.some((result) => result.kind === kind) ||
+    (kind === "test" && unverifiedTestGaps > 0) ||
     findings.some((finding) => finding.level === "HIGH" || finding.level === "UNSYNTHESISED")
       ? "FAIL"
       : "PASS";
@@ -448,7 +482,8 @@ function summarize(opts: {
     testQuality,
     solutionQuality,
     ...groups,
-    droppedCount: opts.graded.length - kept.length,
+    droppedCount: opts.graded.length - kept.length - unverifiedTestGaps,
+    unverifiedTestGaps,
     testsGraded: opts.collected.testsGraded,
     counterTests: opts.collected.counterTests,
     reviewers: opts.reviewers.map((result) => ({
@@ -476,7 +511,7 @@ function sumUsage(results: ReviewerResult[]): TokenUsage {
   return total;
 }
 
-export const GROUP_TITLES: Record<FindingGroup, string> = {
+const GROUP_TITLES: Record<FindingGroup, string> = {
   unfairTests: "Unfair tests",
   testGaps: "Test gaps",
   testImprovements: "Test improvements",
@@ -484,44 +519,39 @@ export const GROUP_TITLES: Record<FindingGroup, string> = {
   solutionImprovements: "Solution improvements",
 };
 
-function renderMarkdown(result: AuditResult): string {
-  const inline = (text: string) => text.replace(/\r?\n/g, " ");
-  const md = [`# Auditor: ${result.verdict}`, "", `Tests: ${result.testQuality} | Solution: ${result.solutionQuality}`];
+function renderReport(result: AuditResult): string {
+  const shorten = (text: string, limit = REPORT_SUMMARY_LIMIT) => {
+    const line = text.replace(/\s+/g, " ").trim();
+    return line.length > limit ? `${line.slice(0, limit - 1)}…` : line;
+  };
+  const findings = (Object.keys(GROUP_TITLES) as FindingGroup[]).flatMap((group) =>
+    result[group].map((finding) => ({ group, ...finding })),
+  );
   const failedReviewers = result.reviewers.filter((reviewer) => reviewer.status !== "ok");
+  const md = [`# Auditor: ${result.verdict}`, "", `Tests: ${result.testQuality} | Solution: ${result.solutionQuality}`];
+  if (result.unverifiedTestGaps) {
+    md.push("", `Test-gap fairness review incomplete for ${result.unverifiedTestGaps} candidate(s).`);
+  }
   if (failedReviewers.length) {
     md.push("", "## Reviewer failures", "");
     for (const { name, status, error } of failedReviewers) {
-      md.push(`- ${name}: ${status}${error ? ` (${inline(error)})` : ""}`);
+      md.push(`- ${name}: ${status}${error ? ` (${shorten(error)})` : ""}`);
     }
   }
 
-  let hasFindings = false;
-  for (const group of Object.keys(GROUP_TITLES) as FindingGroup[]) {
-    if (!result[group].length) continue;
-    hasFindings = true;
-    md.push("", `## ${GROUP_TITLES[group]}`, "");
-    for (const finding of result[group]) {
-      const tag = [finding.level, finding.criterion].filter(Boolean).join(" ");
-      md.push(`- [${tag}] ${inline(finding.finding)}`);
-      if (finding.why) md.push(`  - Reason: ${inline(finding.why)}`);
-      if (finding.failedLeg) md.push(`  - Failed proof leg: ${inline(finding.failedLeg)}`);
-      if (finding.loadBearing) md.push(`  - Evidence: ${inline(finding.loadBearing)}`);
-      if (finding.promise) md.push(`  - Requirement: ${inline(finding.promise)}`);
-    }
-  }
-  if (!hasFindings) md.push("", "No findings.");
-
-  if (result.counterTests.length) {
-    md.push(
-      "",
-      "## Counter-tests (not executed)",
-      "",
-      "Apply after solution.patch and test.patch. Run from repo root.",
-    );
-    for (const test of result.counterTests) {
-      md.push("", `### ${test.id}`);
-      if (test.cmd) md.push("", "````sh", test.cmd.trimEnd(), "````");
-      md.push("", "````diff", test.patch.trimEnd(), "````");
+  if (!findings.length) md.push("", "No findings.");
+  for (const level of Object.keys(LEVEL_ORDER) as AuditFinding["level"][]) {
+    const entries = findings.filter((finding) => finding.level === level);
+    if (!entries.length) continue;
+    md.push("", `## ${level} (${entries.length})`, "");
+    for (const finding of entries) {
+      const tag = finding.criterion ? ` [${shorten(finding.criterion, 24)}]` : "";
+      const location = finding.location ? ` ${shorten(finding.location, REPORT_LOCATION_LIMIT)}` : "";
+      const summary =
+        finding.group === "testGaps"
+          ? finding.finding.replace(/\s+/g, " ").trim()
+          : shorten(finding.summary || finding.why || finding.finding);
+      md.push(`- ${GROUP_TITLES[finding.group]}${tag}${location}: ${summary}`);
     }
   }
   return `${md.join("\n")}\n`;
@@ -587,14 +617,14 @@ export async function runAudit(opts: {
     const runId = `${formatLocalTimestamp().replace(/[:.]/g, "-")}-auditor`;
     const reportPath = join(cwd, SOLVER_ARTIFACTS_DIRNAME, `${runId}.md`);
     const result = summarize({
-      graded: gradeFindings(collected.candidates, synthesis),
+      graded: gradeFindings(collected.candidates, synthesis, inputs.problem),
       collected,
       reviewers: [...reviewers, ...synthesis],
       durationMs: Date.now() - startedAt,
       reportPath,
     });
     mkdirSync(dirname(reportPath), { recursive: true });
-    writeFileSync(reportPath, renderMarkdown(result), "utf-8");
+    writeFileSync(reportPath, renderReport(result), "utf-8");
     return result;
   } finally {
     rmSync(workspace, { recursive: true, force: true });
