@@ -31,7 +31,7 @@ import { extractJsonAnswer, runCodex } from "./codex-cli.js";
 import { loadAuditorConfig } from "./config.js";
 import { requirePatchesCreated, runCreatePatches, snapshotGitHead } from "./git.js";
 import { extractNewFilesFromPatch, splitPatchFiles, splitPatchHunks } from "./patch.js";
-import { formatDuration, formatLocalTimestamp } from "./report.js";
+import { formatLocalTimestamp } from "./report.js";
 import { SOLVER_ARTIFACTS_DIRNAME } from "./solvergap.js";
 import type { AuditorConfig, TokenUsage } from "./types.js";
 
@@ -484,50 +484,44 @@ export const GROUP_TITLES: Record<FindingGroup, string> = {
   solutionImprovements: "Solution improvements",
 };
 
-function renderMarkdown(result: AuditResult, config: AuditorConfig): string {
-  const cell = (text: string) => text.replace(/\|/g, "/").replace(/\r?\n/g, " ");
-  const count = (group: FindingGroup) => result[group].length;
-  const md = [
-    `# Auditor: ${result.verdict}`,
-    "",
-    `Test Quality ${result.testQuality} · Solution Quality ${result.solutionQuality} · ${count("unfairTests")} unfair-test, ${count("testGaps")} test-gap, ${count("testImprovements")} test-improvement, ${count("solutionGaps")} solution-gap, ${count("solutionImprovements")} solution-improvement findings · ${result.testsGraded} tests graded · ${formatDuration(result.durationMs)} · codex ${config.modelId} effort ${config.thinkingLevel}`,
-    "",
-    "A finding gates only when synthesis keeps it HIGH. No counter-test or mutant was executed: legs that need execution were decided from the files.",
-  ];
+function renderMarkdown(result: AuditResult): string {
+  const inline = (text: string) => text.replace(/\r?\n/g, " ");
+  const md = [`# Auditor: ${result.verdict}`, "", `Tests: ${result.testQuality} | Solution: ${result.solutionQuality}`];
+  const failedReviewers = result.reviewers.filter((reviewer) => reviewer.status !== "ok");
+  if (failedReviewers.length) {
+    md.push("", "## Reviewer failures", "");
+    for (const { name, status, error } of failedReviewers) {
+      md.push(`- ${name}: ${status}${error ? ` (${inline(error)})` : ""}`);
+    }
+  }
+
+  let hasFindings = false;
   for (const group of Object.keys(GROUP_TITLES) as FindingGroup[]) {
+    if (!result[group].length) continue;
+    hasFindings = true;
     md.push("", `## ${GROUP_TITLES[group]}`, "");
-    if (!result[group].length) {
-      md.push("none");
-      continue;
-    }
-    md.push("| level | criterion | finding | synthesis |", "|---|---|---|---|");
     for (const finding of result[group]) {
-      const synthesis = [
-        finding.why,
-        finding.failedLeg ? `failed leg: ${finding.failedLeg}` : "",
-        finding.loadBearing ? `load-bearing: \`${cell(finding.loadBearing).slice(0, 300)}\`` : "",
-      ]
-        .filter(Boolean)
-        .join(" · ");
-      md.push(
-        `| ${finding.level} | ${finding.criterion} | ${cell(finding.finding)} | ${cell(synthesis) || "not synthesised"} |`,
-      );
+      const tag = [finding.level, finding.criterion].filter(Boolean).join(" ");
+      md.push(`- [${tag}] ${inline(finding.finding)}`);
+      if (finding.why) md.push(`  - Reason: ${inline(finding.why)}`);
+      if (finding.failedLeg) md.push(`  - Failed proof leg: ${inline(finding.failedLeg)}`);
+      if (finding.loadBearing) md.push(`  - Evidence: ${inline(finding.loadBearing)}`);
+      if (finding.promise) md.push(`  - Requirement: ${inline(finding.promise)}`);
     }
   }
-  md.push("", `${result.droppedCount} findings were dropped by synthesis as wrong.`);
-  md.push("", "## Reviewers", "", "| reviewer | status | time | error |", "|---|---|---|---|");
-  for (const reviewer of result.reviewers) {
-    md.push(
-      `| ${reviewer.name} | ${reviewer.status} | ${formatDuration(reviewer.durationMs)} | ${cell(reviewer.error ?? "").slice(0, 160)} |`,
-    );
-  }
+  if (!hasFindings) md.push("", "No findings.");
+
   if (result.counterTests.length) {
-    md.push("", "## Counter-tests (not executed)", "");
-    md.push("Apply after solution.patch and test.patch, then run the command in the repo root.", "");
+    md.push(
+      "",
+      "## Counter-tests (not executed)",
+      "",
+      "Apply after solution.patch and test.patch. Run from repo root.",
+    );
     for (const test of result.counterTests) {
-      md.push(`### ${test.id}`, "");
-      if (test.cmd) md.push(`Run: \`${test.cmd}\``, "");
-      md.push("````diff", test.patch.trimEnd(), "````", "");
+      md.push("", `### ${test.id}`);
+      if (test.cmd) md.push("", "````sh", test.cmd.trimEnd(), "````");
+      md.push("", "````diff", test.patch.trimEnd(), "````");
     }
   }
   return `${md.join("\n")}\n`;
@@ -600,7 +594,7 @@ export async function runAudit(opts: {
       reportPath,
     });
     mkdirSync(dirname(reportPath), { recursive: true });
-    writeFileSync(reportPath, renderMarkdown(result, config), "utf-8");
+    writeFileSync(reportPath, renderMarkdown(result), "utf-8");
     return result;
   } finally {
     rmSync(workspace, { recursive: true, force: true });
