@@ -708,6 +708,8 @@ interface QualityStatus {
   shouldRun: boolean;
   /** A completed report exists (the row offers Re-run rather than Run). */
   hasReport: boolean;
+  /** Shipd disabled reruns because Prompt Quality already passed on the current content. */
+  alreadyPassed: boolean;
   /** Set while an upstream step blocks the check; its disabled button's title says why. */
   lockReason?: string;
 }
@@ -725,6 +727,8 @@ async function readQualityStatuses(
     await label.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
     const row = label.locator("..");
     const rowText = clean(await row.innerText());
+    const busy = isBusy(rowText);
+    const stale = isStale(rowText);
     const hasRunButton = (await row.locator('button[title^="Run"]').count()) > 0;
     const hasReport = (await row.locator('button[title^="Re-run"]').count()) > 0;
     const lockButton = row.locator('button[disabled]:not([title^="Run"]):not([title^="Re-run"])').first();
@@ -732,13 +736,19 @@ async function readQualityStatuses(
       !hasRunButton && !hasReport && (await lockButton.count()) > 0
         ? clean((await lockButton.getAttribute("title")) ?? "") || "Locked until an earlier step passes."
         : undefined;
+    const alreadyPassed =
+      quality === "Task Prompt Quality" &&
+      !busy &&
+      !stale &&
+      /^Already passed on this content\b/i.test(lockReason ?? "");
     statuses.push({
       quality,
       rowText,
-      busy: isBusy(rowText),
-      shouldRun: hasRunButton || isStale(rowText),
+      busy,
+      shouldRun: hasRunButton || stale,
       hasReport,
-      ...(lockReason ? { lockReason } : {}),
+      alreadyPassed,
+      ...(lockReason && !alreadyPassed ? { lockReason } : {}),
     });
   }
   return statuses;
@@ -1587,11 +1597,19 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
           await runQualityStage(["Task Prompt Quality"]);
 
           if (!page) throw new Error("Shipd page was closed before Prompt Quality report extraction.");
-          onUpdate?.({ content: [{ type: "text", text: "Extracting Prompt Quality report..." }], details: undefined });
-          const promptReport = (await hasQualityReport(page, "Task Prompt Quality"))
-            ? await readReportWithRetry(page, "Task Prompt Quality", readJsonReport, signal)
-            : undefined;
-          promptQuality = buildPromptQualityResult(promptReport);
+          const [promptStatus] = await readQualityStatusesWithRetry(page, signal, ["Task Prompt Quality"]);
+          if (promptStatus?.alreadyPassed) {
+            promptQuality = { verdict: "PASS" };
+          } else {
+            onUpdate?.({
+              content: [{ type: "text", text: "Extracting Prompt Quality report..." }],
+              details: undefined,
+            });
+            const promptReport = promptStatus?.hasReport
+              ? await readReportWithRetry(page, "Task Prompt Quality", readJsonReport, signal)
+              : undefined;
+            promptQuality = buildPromptQualityResult(promptReport);
+          }
           if (promptQuality.verdict !== "PASS") {
             const result = { promptQuality };
             return {
@@ -1730,7 +1748,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
         const unlockChecks: QualityName[] = [
           "Verify Solution",
           ...(await runOnceChecksToRun(["Verify Tests", "Verify Flakiness"])),
-          ...(promptStatus?.hasReport ? [] : ["Task Prompt Quality" as const]),
+          ...(promptStatus?.hasReport || promptStatus?.alreadyPassed ? [] : ["Task Prompt Quality" as const]),
         ];
         const unlockRan = await runQualityStage(unlockChecks);
         const verifySolution = buildVerifyCheckResult("Verify Solution", await readFeedback("Verify Solution"));
