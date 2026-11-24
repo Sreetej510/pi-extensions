@@ -47,11 +47,11 @@ reports, and wait for started or queued jobs (a row reading `Waiting for …` co
 waits 15 seconds and reloads before the next step, because Shipd may start or unlock that step itself; a check still
 locked two minutes later is reported as an error.
 
-Solution Quality, Reward Hacking and Test Quality reports are read from each report's "Feedback for the author"
-section, not raw JSON. Each returns `verdict`, plus `blocking` and `nonBlocking` arrays of items with `finding`,
-`details`, `why` and `suggestedChange` (and `category`/`location` when Shipd gives them), and `reason` when a failure
-has no blocking items. Only blocking issues fail a check, as in Shipd's verdict; non-blocking issues are returned for
-the agent to validate and consider, but never fail it. `details.promptQuality` returns the verdict, reason, and major
+Solution Quality, Reward Hacking and Test Quality read the "Feedback for the author" section of each report. Findings
+include `finding`, `details`, `why` and `suggestedChange`, plus `category` and `location` when available.
+Solution Quality and Test Quality return just `PASS` when their only findings are non-blocking. When either check has
+blockers, it returns `FAIL` with all `blocking` and `nonBlocking` findings, which are visible in Pi's expanded tool
+output. Failures with no findings can return a `reason`. `details.promptQuality` returns the verdict, reason, and major
 non-AI comments (only `category`, `quote`, and `suggestion`; AI-category comments are omitted); Prompt Quality is still
 read from its raw JSON and is `PASS` only when the completed report and evaluation
 verdicts are both `PASS`, `requirementCount` is not blocking, and the AI gate does not flag the prompt. The prompt is

@@ -1071,20 +1071,20 @@ function askUserAction(failed: string[]): string {
   return `Stop and ask the user how to proceed: ${failed.join(", ")} failed on the current draft. These checks must pass at least once; do not change the task or re-run them to fix this without the user's direction.`;
 }
 
-/**
- * Solution Quality, Reward Hacking and Test Quality fail only on blocking issues (as Shipd's verdict does).
- * Non-blocking issues are returned for the agent to consider but never fail the check.
- */
 function buildFeedbackResult(quality: QualityName, report: FeedbackReport | undefined): JsonRecord {
   if (!report?.verdict) {
     return { verdict: "FAIL", reason: `No completed ${displayQualityName(quality)} report was available.` };
   }
-  const passed = report.verdict === "PASS" && report.blocking.length === 0;
+  const { verdict, blocking, nonBlocking, summary } = report;
+  const hasBlockers = blocking.length > 0;
+  const requiresBlockersForFeedback = quality === "Solution Quality" || quality === "Test Quality";
+  const advisoryOnly = requiresBlockersForFeedback && verdict === "FAIL" && nonBlocking.length > 0;
+  const passed = !hasBlockers && (verdict === "PASS" || advisoryOnly);
   return {
     verdict: passed ? "PASS" : "FAIL",
-    ...(!passed && report.blocking.length === 0 && report.summary ? { reason: report.summary } : {}),
-    ...(report.blocking.length > 0 ? { blocking: report.blocking } : {}),
-    ...(report.nonBlocking.length > 0 ? { nonBlocking: report.nonBlocking } : {}),
+    ...(!passed && !hasBlockers && summary ? { reason: summary } : {}),
+    ...(hasBlockers ? { blocking } : {}),
+    ...(nonBlocking.length > 0 && (hasBlockers || !requiresBlockersForFeedback) ? { nonBlocking } : {}),
   };
 }
 
@@ -1117,7 +1117,7 @@ function feedbackSummary(check: JsonRecord): string {
   return [String(check.verdict ?? "skipped"), ...counts].join(" · ");
 }
 
-function qualitySummaryText(details: unknown, theme: Theme): string[] {
+function qualitySummaryText(details: unknown, theme: Theme, expanded: boolean): string[] {
   const value = isRecord(details) ? details : {};
   const promptQuality = isRecord(value.promptQuality) ? value.promptQuality : {};
   const promptComments = Array.isArray(promptQuality.comments) ? promptQuality.comments : [];
@@ -1155,7 +1155,20 @@ function qualitySummaryText(details: unknown, theme: Theme): string[] {
   ];
   for (const [key, label] of checks) {
     const check = value[key];
-    if (isRecord(check)) lines.push(`  ${theme.fg("accent", label)}  ${theme.fg("muted", feedbackSummary(check))}`);
+    if (!isRecord(check)) continue;
+    lines.push(`  ${theme.fg("accent", label)}  ${theme.fg("muted", feedbackSummary(check))}`);
+    if (!expanded || check.verdict !== "FAIL" || (key !== "solutionQuality" && key !== "testQuality")) continue;
+    for (const [heading, findings] of [
+      ["Blocking findings", check.blocking],
+      ["Non-blocking findings", check.nonBlocking],
+    ] as const) {
+      if (!Array.isArray(findings) || findings.length === 0) continue;
+      lines.push(`    ${theme.bold(heading)}`);
+      for (const finding of findings.filter(isRecord)) {
+        const parts = Object.values(finding).filter((part): part is string => typeof part === "string" && part !== "");
+        if (parts.length > 0) lines.push(`    - ${parts.join("\n      ")}`);
+      }
+    }
   }
   if (typeof value.action === "string")
     lines.push(`  ${theme.fg("warning", "Stopped: ask the user before continuing")}`);
@@ -1357,7 +1370,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
       "Use only when the user asks to evaluate the current Shipd task.",
       "Run the staged checks in Shipd's order: prompt, patch precheck, Verify Solution, then Solution Quality, then Test Quality; cache only passing prompt hashes in this session.",
       "Verify Tests, Verify Flakiness and Reward Hacking only have to have passed once (a stale pass is fine); they are returned only when they fail. If the result has an `action`, stop and ask the user before changing anything.",
-      "Only blocking issues fail a check. Non-blocking issues are returned as optional improvements; validate each before changing code.",
+      "Solution Quality and Test Quality pass when their only findings are non-blocking. When blockers are present, include both kinds of findings and validate each before changing code.",
       "Return compact pass verdicts and concise, scenario-specific failure feedback. Never submit the challenge.",
     ],
     parameters: submitShipdParams,
@@ -1398,7 +1411,7 @@ export function registerSubmitShipdTool(pi: ExtensionAPI): void {
       if (context.isError) {
         return new Text(`${header}\n  ${theme.fg("error", compactToolError(result))}`, 0, 0);
       }
-      return new Text([header, ...qualitySummaryText(result.details, theme)].join("\n"), 0, 0);
+      return new Text([header, ...qualitySummaryText(result.details, theme, options.expanded)].join("\n"), 0, 0);
     },
     async execute(_toolCallId, _params, signal, onUpdate, ctx) {
       if (!jobLink) {
