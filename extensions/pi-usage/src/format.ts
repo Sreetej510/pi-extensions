@@ -29,9 +29,11 @@ export function formatCodexUsageReport(report: CodexUsageReport, _cacheAgeMs?: n
     if (!isPrimaryCodexSnapshot(snapshot)) {
       lines.push(`  ${label} limit:`);
     }
-    if (snapshot.primary) lines.push(formatWindowLine("5h limit:", snapshot.primary));
-    if (snapshot.secondary) lines.push(formatWindowLine("7d limit:", snapshot.secondary));
-    if (!snapshot.primary && !snapshot.secondary) {
+    const windows = getCodexUsageWindows(snapshot);
+    for (const { window, label } of windows) {
+      lines.push(formatWindowLine(label ? `${label} limit:` : "Usage limit:", window));
+    }
+    if (windows.length === 0) {
       lines.push("  Limits unavailable for this account");
     }
   }
@@ -52,8 +54,9 @@ export function formatCodexUsageStatusline(report: CodexUsageReport, model?: Pro
   if (!snapshot) return "usage unavailable";
 
   const parts = [formatStatuslinePrefix(snapshot)];
-  if (snapshot.primary) parts.push(`${clampPercent(snapshot.primary.usedPercent).toFixed(0)}% 5h`);
-  if (snapshot.secondary) parts.push(`${clampPercent(snapshot.secondary.usedPercent).toFixed(0)}% 7d`);
+  for (const { window, label } of getCodexUsageWindows(snapshot)) {
+    parts.push(`${clampPercent(window.usedPercent).toFixed(0)}% ${label ?? "limit"}`);
+  }
   if (parts.length === 1 && snapshot.credits) parts.push(formatCredits(snapshot.credits));
   return parts.join(" ");
 }
@@ -188,6 +191,16 @@ function brightenInfoNotification(text: string): string {
 
 function isPrimaryCodexSnapshot(snapshot: NormalizedRateLimitSnapshot): boolean {
   return normalizedUsageKey(snapshot.limitId) === "codex" || normalizedUsageKey(snapshot.limitName) === "codex";
+}
+
+function getCodexUsageWindows(snapshot: NormalizedRateLimitSnapshot) {
+  return [snapshot.primary, snapshot.secondary]
+    .filter((window): window is NormalizedRateLimitWindow => window !== undefined)
+    .sort((left, right) => (left.windowMinutes ?? Infinity) - (right.windowMinutes ?? Infinity))
+    .map((window) => ({
+      window,
+      label: window.windowMinutes === 5 * 60 ? "5h" : window.windowMinutes === 7 * 24 * 60 ? "7d" : undefined,
+    }));
 }
 
 function formatWindowLine(label: string, window: NormalizedRateLimitWindow): string {
