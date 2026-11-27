@@ -1090,10 +1090,16 @@ function buildFeedbackResult(quality: QualityName, report: FeedbackReport | unde
 
 /** Each later check is present only if it ran: a failing gate stops the stages after it. */
 function buildAgentResult(promptQuality: JsonRecord, checks: JsonRecord): JsonRecord {
+  const hasNonBlockingFindings = Object.values(checks).some(
+    (check) => isRecord(check) && Array.isArray(check.nonBlocking) && check.nonBlocking.length > 0,
+  );
   return {
     promptQuality,
     ...(promptQuality.verdict === "PASS" ? { note: PROMPT_PRESERVATION_NOTE } : {}),
     ...checks,
+    ...(hasNonBlockingFindings
+      ? { nonBlockingNote: "Non-blocking findings may be inaccurate. Verify them before making changes." }
+      : {}),
   };
 }
 
@@ -1170,6 +1176,7 @@ function qualitySummaryText(details: unknown, theme: Theme, expanded: boolean): 
       }
     }
   }
+  if (typeof value.nonBlockingNote === "string") lines.push(`  ${theme.fg("muted", value.nonBlockingNote)}`);
   if (typeof value.action === "string")
     lines.push(`  ${theme.fg("warning", "Stopped: ask the user before continuing")}`);
   return lines;
